@@ -1,5 +1,6 @@
 use crate::support::TokioIo;
 use crate::BootArgs;
+use cidr::Ipv6Cidr;
 use hyper_util::client::legacy::connect::HttpConnector;
 use hyper_util::client::legacy::Client;
 use hyper_util::rt::TokioExecutor;
@@ -166,28 +167,67 @@ impl HttpProxy {
     /// Get a socket and a bind address
     async fn try_connect(self, addr: SocketAddr) -> std::io::Result<TcpStream> {
         match (self.ipv6_subnet, self.fallback) {
-            (Some(v6), _) => {
-                let socket = TcpSocket::new_v6()?;
-                let bind_addr = SocketAddr::new(
-                    Self::get_rand_ipv6(v6.first_address().into(), v6.network_length()).into(),
-                    0,
-                );
-                socket.bind(bind_addr)?;
-                socket.connect(addr).await
-            }
-            (_, Some(IpAddr::V4(v4))) => {
-                let socket = TcpSocket::new_v4()?;
-                let bind_addr = SocketAddr::new(IpAddr::V4(v4), 0);
-                socket.bind(bind_addr)?;
-                socket.connect(addr).await
-            }
-            (_, Some(IpAddr::V6(v6))) => {
-                let socket = TcpSocket::new_v6()?;
-                let bind_addr = SocketAddr::new(IpAddr::V6(v6), 0);
-                socket.bind(bind_addr)?;
-                socket.connect(addr).await
-            }
+            (Some(v6), Some(ip)) => self.try_connect_with_ipv6_and_fallback(addr, v6, ip).await,
+            (Some(v6), _) => self.try_connect_with_ipv6(addr, v6).await,
+            (_, Some(ip)) => self.try_connect_with_fallback(addr, ip).await,
             _ => TcpStream::connect(addr).await,
+        }
+    }
+
+    /// Try to connect with ipv6 and fallback to ipv4/ipv6
+    async fn try_connect_with_ipv6_and_fallback(
+        self,
+        addr: SocketAddr,
+        v6: Ipv6Cidr,
+        ip: IpAddr,
+    ) -> std::io::Result<TcpStream> {
+        let socket = TcpSocket::new_v6()?;
+        let bind_addr = SocketAddr::new(
+            Self::get_rand_ipv6(v6.first_address().into(), v6.network_length()).into(),
+            0,
+        );
+
+        if socket.bind(bind_addr).is_err() {
+            let socket = self.create_socket_for_ip(ip)?;
+            let bind_addr = SocketAddr::new(ip, 0);
+            socket.bind(bind_addr)?;
+            return socket.connect(addr).await;
+        }
+
+        socket.connect(addr).await
+    }
+
+    /// Try to connect with ipv6
+    async fn try_connect_with_ipv6(
+        self,
+        addr: SocketAddr,
+        v6: Ipv6Cidr,
+    ) -> std::io::Result<TcpStream> {
+        let socket = TcpSocket::new_v6()?;
+        let bind_addr = SocketAddr::new(
+            Self::get_rand_ipv6(v6.first_address().into(), v6.network_length()).into(),
+            0,
+        );
+        socket.bind(bind_addr)?;
+        socket.connect(addr).await
+    }
+
+    /// Try to connect with fallback to ipv4/ipv6
+    async fn try_connect_with_fallback(
+        self,
+        addr: SocketAddr,
+        ip: IpAddr,
+    ) -> std::io::Result<TcpStream> {
+        let socket = self.create_socket_for_ip(ip)?;
+        let bind_addr = SocketAddr::new(ip, 0);
+        socket.bind(bind_addr)?;
+        socket.connect(addr).await
+    }
+
+    fn create_socket_for_ip(self, ip: IpAddr) -> std::io::Result<TcpSocket> {
+        match ip {
+            IpAddr::V4(_) => TcpSocket::new_v4(),
+            IpAddr::V6(_) => TcpSocket::new_v6(),
         }
     }
 
