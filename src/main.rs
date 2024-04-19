@@ -7,7 +7,7 @@ mod update;
 mod util;
 
 use clap::{Args, Parser, Subcommand};
-use std::{net::SocketAddr, path::PathBuf};
+use std::net::SocketAddr;
 
 type Result<T, E = error::Error> = std::result::Result<T, E>;
 
@@ -34,7 +34,7 @@ pub enum Commands {
     Stop,
     /// Show the server daemon process
     #[cfg(target_family = "unix")]
-    Status,
+    PS,
     /// Show the server daemon log
     #[cfg(target_family = "unix")]
     Log,
@@ -48,20 +48,14 @@ pub struct BootArgs {
     #[clap(short = 'L', long, global = true, env = "VPROXY_DEBUG")]
     debug: bool,
     /// Bind address
-    #[clap(short = 'B', long, default_value = "0.0.0.0:8100")]
+    #[clap(short, long, default_value = "0.0.0.0:8100")]
     bind: SocketAddr,
     /// Basic auth username
-    #[clap(short = 'u', long)]
+    #[clap(long)]
     auth_user: Option<String>,
     /// Basic auth password
-    #[clap(short = 'p', long)]
+    #[clap(long)]
     auth_pass: Option<String>,
-    /// TLS certificate file
-    #[clap(short = 'C', long)]
-    tls_cert: Option<PathBuf>,
-    /// TLS private key file
-    #[clap(short = 'K', long)]
-    tls_key: Option<PathBuf>,
     /// Ipv6 subnet, e.g. 2001:db8::/32
     #[clap(short = 'i', long)]
     ipv6_subnet: Option<cidr::Ipv6Cidr>,
@@ -69,14 +63,13 @@ pub struct BootArgs {
     #[clap(short = 'f', long)]
     fallback: Option<std::net::IpAddr>,
     /// Proxy type, e.g. http, https, socks5
-    #[clap(short = 't', long, default_value = "http")]
+    #[clap(short = 'T', long, default_value = "http")]
     typed: ProxyType,
 }
 
 #[derive(Clone, Debug)]
 pub enum ProxyType {
     Http,
-    Https,
     Socks5,
 }
 
@@ -85,7 +78,6 @@ impl std::str::FromStr for ProxyType {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
             "http" => Ok(Self::Http),
-            "https" => Ok(Self::Https),
             "socks5" => Ok(Self::Socks5),
             _ => Err("".to_string()),
         }
@@ -111,7 +103,7 @@ fn main() -> crate::Result<()> {
         #[cfg(target_family = "unix")]
         Commands::Stop => daemon::stop()?,
         #[cfg(target_family = "unix")]
-        Commands::Status => daemon::status(),
+        Commands::PS => daemon::status(),
         #[cfg(target_family = "unix")]
         Commands::Log => daemon::log()?,
         Commands::Update => update::update()?,

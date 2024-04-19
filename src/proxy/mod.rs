@@ -1,7 +1,6 @@
 mod auth;
 mod error;
 mod http;
-mod https;
 mod socks5;
 
 use crate::BootArgs;
@@ -36,7 +35,6 @@ pub async fn run(args: BootArgs) -> crate::Result<()> {
     // Choose proxy type
     match args.typed {
         crate::ProxyType::Http => http::run(args).await,
-        crate::ProxyType::Https => https::run(args).await,
         crate::ProxyType::Socks5 => socks5::run(args).await,
     }
 }

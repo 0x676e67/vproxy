@@ -9,7 +9,6 @@ license = "MIT"
 homepage = "https://github.com/gngpp/vproxy"
 repository = "https://github.com/gngpp/vproxy"
 
-
 [dependencies]
 base64 = "0.21.6"
 cidr = "0.2.2"

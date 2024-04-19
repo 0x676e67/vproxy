@@ -6,31 +6,35 @@ use hyper_util::client::legacy::Client;
 use hyper_util::rt::TokioExecutor;
 use hyper_util::rt::TokioIo;
 use rand::Rng;
+use tokio::sync::Semaphore;
 
 use std::net::{IpAddr, Ipv6Addr, SocketAddr, ToSocketAddrs};
 use std::sync::Arc;
 
+use super::error::ProxyError;
 use bytes::Bytes;
 use http_body_util::{combinators::BoxBody, BodyExt, Empty, Full};
 use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper::upgrade::Upgraded;
 use hyper::{Method, Request, Response};
-
 use tokio::net::{TcpListener, TcpSocket, TcpStream};
 
-use super::error::ProxyError;
-
-pub(super) async fn run(args: BootArgs) -> crate::Result<()> {
+pub async fn run(args: BootArgs) -> crate::Result<()> {
     tracing::info!("Listening on http://{}", args.bind);
     let listener = TcpListener::bind(args.bind).await?;
     let http_proxy = Arc::new(HttpProxy::new(args));
+    // Limit to 100 concurrent tasks
+    let sem = Arc::new(Semaphore::new(100)); 
 
     loop {
         let (stream, _) = listener.accept().await?;
         let io = TokioIo::new(stream);
         let http_proxy = http_proxy.clone();
+        let permit = sem.clone().acquire_owned().await;
+
         tokio::task::spawn(async move {
+            let _permit = permit;
             if let Err(err) = http1::Builder::new()
                 .preserve_header_case(true)
                 .title_case_headers(true)
