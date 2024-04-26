@@ -26,9 +26,9 @@ pub fn init_basic_auth_realm(args: &BootArgs) {
 /// Init ip whitelist
 pub fn init_ip_whitelist(args: &BootArgs) {
     // Set ip whitelist
-    if let Some(whitelist) = &args.whitelist {
+    if !args.whitelist.is_empty() {
         IP_WHITELIST
-            .set(Some(whitelist.clone()))
+            .set(Some(args.whitelist.clone()))
             .expect("IP_WHITELIST should be set only once")
     }
 }

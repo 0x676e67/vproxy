@@ -103,6 +103,7 @@ Options:
   -B, --bind <BIND>                Bind address [default: 0.0.0.0:8100]
   -u, --auth-user <AUTH_USER>      Basic auth username
   -p, --auth-pass <AUTH_PASS>      Basic auth password
+  -w, --whitelist <WHITELIST>      IP addresses whitelist, e.g. 47.253.53.46,47.253.81.245
   -i, --ipv6-subnet <IPV6_SUBNET>  Ipv6 subnet, e.g. 2001:db8::/32
   -f, --fallback <FALLBACK>        Fallback address
   -t, --typed <TYPED>              Proxy type, e.g. http, https, socks5 [default: http]
