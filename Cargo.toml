@@ -29,7 +29,7 @@ http = "1.0.0"
 clap = { version = "4.4.14", features = ["derive", "env"] }
 tracing = "0.1.40"
 tracing-subscriber = { version = "0.3.18", features = ["env-filter"] }
-self_update = { version = "0.39.0", default-features = false, features = [
+self_update = { version = "0.40.0", default-features = false, features = [
     "rustls",
     "archive-tar",
     "compression-flate2",
