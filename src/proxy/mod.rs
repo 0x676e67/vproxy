@@ -26,6 +26,9 @@ pub async fn run(args: BootArgs) -> crate::Result<()> {
     // Init basic auth realm
     auth::init_basic_auth_realm(&args);
 
+    // Init ip whitelist
+    auth::init_ip_whitelist(&args);
+
     // Auto set sysctl
     #[cfg(target_os = "linux")]
     args.ipv6_subnet.map(|v6| {

@@ -52,11 +52,14 @@ pub struct BootArgs {
     #[clap(short, long, default_value = "0.0.0.0:8100")]
     bind: SocketAddr,
     /// Basic auth username
-    #[clap(long)]
+    #[clap(short = 'u', long)]
     auth_user: Option<String>,
     /// Basic auth password
-    #[clap(long)]
+    #[clap(short = 'p', long)]
     auth_pass: Option<String>,
+    /// IP addresses whitelist, e.g. 47.253.53.46,47.253.81.245
+    #[clap(short = 'w', long)]
+    whitelist: Option<Vec<std::net::IpAddr>>,
     /// Ipv6 subnet, e.g. 2001:db8::/32
     #[clap(short = 'i', long)]
     ipv6_subnet: Option<cidr::Ipv6Cidr>,

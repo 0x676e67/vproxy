@@ -30,7 +30,7 @@ pub async fn run(args: BootArgs) -> crate::Result<()> {
     let sem = Arc::new(Semaphore::new(100));
 
     loop {
-        let (stream, _) = listener.accept().await?;
+        let (stream, socket) = listener.accept().await?;
         let io = TokioIo::new(stream);
         let http_proxy = http_proxy.clone();
         let permit = sem.clone().acquire_owned().await;
@@ -40,7 +40,7 @@ pub async fn run(args: BootArgs) -> crate::Result<()> {
             if let Err(err) = http1::Builder::new()
                 .preserve_header_case(true)
                 .title_case_headers(true)
-                .serve_connection(io, service_fn(move |req| http_proxy.proxy(req)))
+                .serve_connection(io, service_fn(move |req| http_proxy.proxy(socket, req)))
                 .with_upgrades()
                 .await
             {
@@ -68,12 +68,13 @@ impl HttpProxy {
 
     async fn proxy(
         self,
+        socket: SocketAddr,
         req: Request<hyper::body::Incoming>,
     ) -> Result<Response<BoxBody<Bytes, hyper::Error>>, ProxyError> {
-        tracing::info!("request: {req:?}");
+        tracing::info!("request: {req:?}, {socket:?}", req = req, socket = socket);
 
-        // Check basic auth
-        auth::valid_basic_auth(req.headers())?;
+        // Check Ip address whitelist or basic auth
+        auth::valid_ip_whitelist(socket).or_else(|_| auth::valid_basic_auth(req.headers()))?;
 
         if Method::CONNECT == req.method() {
             // Received an HTTP request like:
