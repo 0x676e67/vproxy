@@ -1,11 +1,11 @@
 mod auth;
 mod error;
 mod http;
-mod https;
 mod socks5;
 
-use crate::BootArgs;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
+
+use crate::BootArgs;
 
 #[tokio::main(flavor = "multi_thread")]
 pub async fn run(args: BootArgs) -> crate::Result<()> {
@@ -26,6 +26,9 @@ pub async fn run(args: BootArgs) -> crate::Result<()> {
     // Init basic auth realm
     auth::init_basic_auth_realm(&args);
 
+    // Init ip whitelist
+    auth::init_ip_whitelist(&args);
+
     // Auto set sysctl
     #[cfg(target_os = "linux")]
     args.ipv6_subnet.map(|v6| {
@@ -36,7 +39,6 @@ pub async fn run(args: BootArgs) -> crate::Result<()> {
     // Choose proxy type
     match args.typed {
         crate::ProxyType::Http => http::run(args).await,
-        crate::ProxyType::Https => https::run(args).await,
         crate::ProxyType::Socks5 => socks5::run(args).await,
     }
 }

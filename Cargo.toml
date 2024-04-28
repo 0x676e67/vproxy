@@ -1,6 +1,6 @@
 [package]
 name = "vproxy"
-version = "0.1.5"
+version = "0.1.7"
 edition = "2021"
 authors = ["gngppz@gmail.com"]
 description = "Random IPv6 request proxy"
@@ -9,15 +9,19 @@ license = "MIT"
 homepage = "https://github.com/gngpp/vproxy"
 repository = "https://github.com/gngpp/vproxy"
 
-
 [dependencies]
-base64 = "0.21.6"
+base64 = "0.22.0"
 cidr = "0.2.2"
 thiserror = "1.0.56"
 hyper = { version = "1.1.0", features = ["http1", "server"] }
 hyper-util = { version = "0.1.2", features = ["full"] }
 http-body-util = "0.1"
-tokio = { version = "1.35.1", features = ["net", "rt-multi-thread", "macros", "io-util"] }
+tokio = { version = "1.35.1", features = [
+    "net",
+    "rt-multi-thread",
+    "macros",
+    "io-util",
+] }
 rand = "0.8.5"
 bytes = "1.5.0"
 pin-project-lite = "0.2.13"
@@ -25,7 +29,11 @@ http = "1.0.0"
 clap = { version = "4.4.14", features = ["derive", "env"] }
 tracing = "0.1.40"
 tracing-subscriber = { version = "0.3.18", features = ["env-filter"] }
-self_update = { version = "0.39.0", default-features = false, features = ["rustls", "archive-tar", "compression-flate2"]  }
+self_update = { version = "0.40.0", default-features = false, features = [
+    "rustls",
+    "archive-tar",
+    "compression-flate2",
+] }
 
 # allocator
 tcmalloc = { version = "0.3.0", optional = true }

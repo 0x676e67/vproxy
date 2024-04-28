@@ -80,8 +80,7 @@ pub fn start(args: BootArgs) -> crate::Result<()> {
 /// Stop the daemon
 #[cfg(target_family = "unix")]
 pub fn stop() -> crate::Result<()> {
-    use nix::sys::signal;
-    use nix::unistd::Pid;
+    use nix::{sys::signal, unistd::Pid};
 
     check_root();
 

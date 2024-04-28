@@ -37,7 +37,6 @@ linux_target=(
   "armv7-unknown-linux-musleabihf:mimalloc"
   "arm-unknown-linux-musleabihf:jemalloc"
   "i686-unknown-linux-musl:jemalloc"
-  "i586-unknown-linux-musl:jemalloc"
 )
 
 # 2. MacOS

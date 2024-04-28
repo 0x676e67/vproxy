@@ -1,3 +1,5 @@
+use std::net::{IpAddr, SocketAddr};
+
 use base64::Engine;
 use http::{header, HeaderMap};
 use tokio::sync::OnceCell;
@@ -8,6 +10,9 @@ use crate::BootArgs;
 /// Basic auth realm
 static BASIC_AUTH_REALM: OnceCell<Option<(String, String)>> = OnceCell::const_new();
 
+/// Ip address whitelist
+static IP_WHITELIST: OnceCell<Option<Vec<IpAddr>>> = OnceCell::const_new();
+
 /// Init basic auth realm
 pub fn init_basic_auth_realm(args: &BootArgs) {
     // Set basic auth realm
@@ -16,6 +21,26 @@ pub fn init_basic_auth_realm(args: &BootArgs) {
             .set(Some((u.to_owned(), p.to_owned())))
             .expect("BASIC_AUTH_REALM should be set only once")
     }
+}
+
+/// Init ip whitelist
+pub fn init_ip_whitelist(args: &BootArgs) {
+    // Set ip whitelist
+    if !args.whitelist.is_empty() {
+        IP_WHITELIST
+            .set(Some(args.whitelist.clone()))
+            .expect("IP_WHITELIST should be set only once")
+    }
+}
+
+/// Valid Ip address whitelist
+pub fn valid_ip_whitelist(socket: SocketAddr) -> Result<(), AuthError> {
+    if let Some(Some(ip)) = IP_WHITELIST.get() {
+        if ip.contains(&socket.ip()) {
+            return Ok(());
+        }
+    }
+    Err(AuthError::Unauthorized)
 }
 
 /// Valid basic auth

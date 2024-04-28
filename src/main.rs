@@ -6,8 +6,9 @@ mod proxy;
 mod update;
 mod util;
 
+use std::net::SocketAddr;
+
 use clap::{Args, Parser, Subcommand};
-use std::{net::SocketAddr, path::PathBuf};
 
 type Result<T, E = error::Error> = std::result::Result<T, E>;
 
@@ -34,7 +35,7 @@ pub enum Commands {
     Stop,
     /// Show the server daemon process
     #[cfg(target_family = "unix")]
-    Status,
+    PS,
     /// Show the server daemon log
     #[cfg(target_family = "unix")]
     Log,
@@ -48,7 +49,7 @@ pub struct BootArgs {
     #[clap(short = 'L', long, global = true, env = "VPROXY_DEBUG")]
     debug: bool,
     /// Bind address
-    #[clap(short = 'B', long, default_value = "0.0.0.0:8100")]
+    #[clap(short, long, default_value = "0.0.0.0:8100")]
     bind: SocketAddr,
     /// Basic auth username
     #[clap(short = 'u', long)]
@@ -56,12 +57,9 @@ pub struct BootArgs {
     /// Basic auth password
     #[clap(short = 'p', long)]
     auth_pass: Option<String>,
-    /// TLS certificate file
-    #[clap(short = 'C', long)]
-    tls_cert: Option<PathBuf>,
-    /// TLS private key file
-    #[clap(short = 'K', long)]
-    tls_key: Option<PathBuf>,
+    /// IP addresses whitelist, e.g. 47.253.53.46,47.253.81.245
+    #[clap(short = 'w', long, value_parser, value_delimiter = ',')]
+    whitelist: Vec<std::net::IpAddr>,
     /// Ipv6 subnet, e.g. 2001:db8::/32
     #[clap(short = 'i', long)]
     ipv6_subnet: Option<cidr::Ipv6Cidr>,
@@ -69,23 +67,22 @@ pub struct BootArgs {
     #[clap(short = 'f', long)]
     fallback: Option<std::net::IpAddr>,
     /// Proxy type, e.g. http, https, socks5
-    #[clap(short = 't', long, default_value = "http")]
+    #[clap(short = 'T', long, default_value = "http")]
     typed: ProxyType,
 }
 
 #[derive(Clone, Debug)]
 pub enum ProxyType {
     Http,
-    Https,
     Socks5,
 }
 
 impl std::str::FromStr for ProxyType {
     type Err = String;
+
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
             "http" => Ok(Self::Http),
-            "https" => Ok(Self::Https),
             "socks5" => Ok(Self::Socks5),
             _ => Err("".to_string()),
         }
@@ -94,11 +91,9 @@ impl std::str::FromStr for ProxyType {
 
 // To try this example:
 // 1. cargo run --example http_proxy
-// 2. config http_proxy in command line
-//    $ export http_proxy=http://127.0.0.1:8100
+// 2. config http_proxy in command line $ export http_proxy=http://127.0.0.1:8100
 //    $ export https_proxy=http://127.0.0.1:8100
-// 3. send requests
-//    $ curl -i https://www.some_domain.com/
+// 3. send requests $ curl -i https://www.some_domain.com/
 fn main() -> crate::Result<()> {
     let opt = Opt::parse();
 
@@ -111,7 +106,7 @@ fn main() -> crate::Result<()> {
         #[cfg(target_family = "unix")]
         Commands::Stop => daemon::stop()?,
         #[cfg(target_family = "unix")]
-        Commands::Status => daemon::status(),
+        Commands::PS => daemon::status(),
         #[cfg(target_family = "unix")]
         Commands::Log => daemon::log()?,
         Commands::Update => update::update()?,

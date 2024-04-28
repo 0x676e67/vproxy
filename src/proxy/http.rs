@@ -1,40 +1,46 @@
-use crate::proxy::auth;
-use crate::BootArgs;
-use cidr::Ipv6Cidr;
-use hyper_util::client::legacy::connect::HttpConnector;
-use hyper_util::client::legacy::Client;
-use hyper_util::rt::TokioExecutor;
-use hyper_util::rt::TokioIo;
-use rand::Rng;
-
-use std::net::{IpAddr, Ipv6Addr, SocketAddr, ToSocketAddrs};
-use std::sync::Arc;
+use std::{
+    net::{IpAddr, Ipv6Addr, SocketAddr, ToSocketAddrs},
+    sync::Arc,
+};
 
 use bytes::Bytes;
+use cidr::Ipv6Cidr;
 use http_body_util::{combinators::BoxBody, BodyExt, Empty, Full};
-use hyper::server::conn::http1;
-use hyper::service::service_fn;
-use hyper::upgrade::Upgraded;
-use hyper::{Method, Request, Response};
-
-use tokio::net::{TcpListener, TcpSocket, TcpStream};
+use hyper::{
+    server::conn::http1, service::service_fn, upgrade::Upgraded, Method, Request, Response,
+};
+use hyper_util::{
+    client::legacy::{connect::HttpConnector, Client},
+    rt::{TokioExecutor, TokioIo},
+};
+use rand::Rng;
+use tokio::{
+    net::{TcpListener, TcpSocket, TcpStream},
+    sync::Semaphore,
+};
 
 use super::error::ProxyError;
+use crate::{proxy::auth, BootArgs};
 
-pub(super) async fn run(args: BootArgs) -> crate::Result<()> {
+pub async fn run(args: BootArgs) -> crate::Result<()> {
     tracing::info!("Listening on http://{}", args.bind);
     let listener = TcpListener::bind(args.bind).await?;
     let http_proxy = Arc::new(HttpProxy::new(args));
+    // Limit to 100 concurrent tasks
+    let sem = Arc::new(Semaphore::new(100));
 
     loop {
-        let (stream, _) = listener.accept().await?;
+        let (stream, socket) = listener.accept().await?;
         let io = TokioIo::new(stream);
         let http_proxy = http_proxy.clone();
+        let permit = sem.clone().acquire_owned().await;
+
         tokio::task::spawn(async move {
+            let _permit = permit;
             if let Err(err) = http1::Builder::new()
                 .preserve_header_case(true)
                 .title_case_headers(true)
-                .serve_connection(io, service_fn(move |req| http_proxy.proxy(req)))
+                .serve_connection(io, service_fn(move |req| http_proxy.proxy(socket, req)))
                 .with_upgrades()
                 .await
             {
@@ -62,12 +68,13 @@ impl HttpProxy {
 
     async fn proxy(
         self,
+        socket: SocketAddr,
         req: Request<hyper::body::Incoming>,
     ) -> Result<Response<BoxBody<Bytes, hyper::Error>>, ProxyError> {
-        tracing::info!("request: {req:?}");
+        tracing::info!("request: {req:?}, {socket:?}", req = req, socket = socket);
 
-        // Check basic auth
-        auth::valid_basic_auth(req.headers())?;
+        // Check Ip address whitelist or basic auth
+        auth::valid_ip_whitelist(socket).or_else(|_| auth::valid_basic_auth(req.headers()))?;
 
         if Method::CONNECT == req.method() {
             // Received an HTTP request like:
@@ -147,8 +154,8 @@ impl HttpProxy {
             .boxed()
     }
 
-    // Create a TCP connection to host:port, build a tunnel between the connection and
-    // the upgraded connection
+    // Create a TCP connection to host:port, build a tunnel between the connection
+    // and the upgraded connection
     async fn tunnel(&self, upgraded: Upgraded, addr_str: String) -> std::io::Result<()> {
         for addr in addr_str.to_socket_addrs()? {
             match self.try_connect(addr).await {
