@@ -48,7 +48,7 @@ where
             IOErrorKind::ConnectionAborted => Err(ReplyError::ConnectionNotAllowed.into()),
             IOErrorKind::ConnectionReset => Err(ReplyError::ConnectionNotAllowed.into()),
             IOErrorKind::NotConnected => Err(ReplyError::NetworkUnreachable.into()),
-            _ => Err(e.into()), 
+            _ => Err(e.into()),
         },
     }
 }

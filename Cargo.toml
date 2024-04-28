@@ -8,7 +8,7 @@ readme = "README.md"
 license = "MIT"
 homepage = "https://github.com/gngpp/vproxy"
 repository = "https://github.com/gngpp/vproxy"
-rust-version = "1.77"
+rust-version = "1.76"
 
 [dependencies]
 base64 = "0.22.0"
