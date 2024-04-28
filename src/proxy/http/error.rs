@@ -1,13 +1,4 @@
-/// Auth Error
-#[derive(thiserror::Error, Debug)]
-pub enum AuthError {
-    #[error("Missing credentials")]
-    MissingCredentials,
-    #[error("Invalid credentials")]
-    InvalidCredentials,
-    #[error("Unauthorized")]
-    Unauthorized,
-}
+use crate::proxy::auth::AuthError;
 
 /// Proxy Error
 #[derive(thiserror::Error, Debug)]

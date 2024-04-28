@@ -1,6 +1,6 @@
 use self_update::cargo_crate_version;
 
-pub(super) fn update() -> crate::Result<()> {
+pub(super) fn update() -> anyhow::Result<()> {
     use self_update::update::UpdateStatus;
     let status = self_update::backends::github::Update::configure()
         .repo_owner("gngpp")

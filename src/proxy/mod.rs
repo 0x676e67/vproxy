@@ -1,10 +1,10 @@
 mod auth;
-mod error;
 mod http;
-mod socks5;
+pub(crate) mod socks5;
 
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
+use self::{http::HttpContext, socks5::Socks5Context};
 use crate::BootArgs;
 
 #[tokio::main(flavor = "multi_thread")]
@@ -23,9 +23,6 @@ pub async fn run(args: BootArgs) -> crate::Result<()> {
         .with(tracing_subscriber::fmt::layer())
         .init();
 
-    // Init basic auth realm
-    auth::init_basic_auth_realm(&args);
-
     // Init ip whitelist
     auth::init_ip_whitelist(&args);
 
@@ -36,9 +33,40 @@ pub async fn run(args: BootArgs) -> crate::Result<()> {
         crate::util::sysctl_route_add_ipv6_subnet(&v6);
     });
 
+    tracing::info!("OS: {}", std::env::consts::OS);
+    tracing::info!("Arch: {}", std::env::consts::ARCH);
+    tracing::info!("Version: {}", env!("CARGO_PKG_VERSION"));
+    tracing::info!("Listening on {}", args.bind);
+
     // Choose proxy type
-    match args.typed {
-        crate::ProxyType::Http => http::run(args).await,
-        crate::ProxyType::Socks5 => socks5::run(args).await,
+    match args.proxy {
+        crate::Proxy::Http { auth } => {
+            http::run(HttpContext {
+                auth,
+                ipv6_subnet: args.ipv6_subnet,
+                fallback: args.fallback,
+                bind: args.bind,
+            })
+            .await
+        }
+        crate::Proxy::Socks5 {
+            auth,
+            timeout,
+            resolve_dns: dns_resolve,
+            allow_udp: udp_support,
+            execute_command,
+        } => {
+            socks5::run(Socks5Context {
+                auth: auth.clone(),
+                ipv6_subnet: args.ipv6_subnet,
+                fallback: args.fallback,
+                bind: args.bind,
+                timeout,
+                dns_resolve,
+                udp_support,
+                execute_command,
+            })
+            .await
+        }
     }
 }
