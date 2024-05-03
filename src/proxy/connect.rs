@@ -4,17 +4,27 @@ use rand::Rng;
 use std::net::{IpAddr, Ipv6Addr, SocketAddr};
 use tokio::net::{lookup_host, TcpSocket, TcpStream};
 
+/// `Connector` struct is used to create HTTP connectors, optionally configured
+/// with an IPv6 CIDR and a fallback IP address.
 #[derive(Clone)]
 pub struct Connector {
+    /// Optional IPv6 CIDR (Classless Inter-Domain Routing), used to optionally
+    /// configure an IPv6 address.
     cidr: Option<Ipv6Cidr>,
+    /// Optional IP address as a fallback option in case of connection failure.
     fallback: Option<IpAddr>,
 }
 
 impl Connector {
+    /// Constructs a new `Connector` instance, accepting optional IPv6 CIDR and
+    /// fallback IP address as parameters.
     pub(super) fn new(cidr: Option<Ipv6Cidr>, fallback: Option<IpAddr>) -> Self {
         Connector { cidr, fallback }
     }
 
+    /// Generates a new `HttpConnector` based on the configuration. This method
+    /// configures the connector considering the IPv6 CIDR and fallback IP
+    /// address.
     pub fn new_http_connector(&self) -> HttpConnector {
         let mut connector = HttpConnector::new();
 

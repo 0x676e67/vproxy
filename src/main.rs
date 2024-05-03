@@ -111,7 +111,7 @@ fn main() -> anyhow::Result<()> {
         #[cfg(target_family = "unix")]
         Commands::Stop => daemon::stop()?,
         #[cfg(target_family = "unix")]
-        Commands::PS => daemon::status(),
+        Commands::PS => daemon::status()?,
         #[cfg(target_family = "unix")]
         Commands::Log => daemon::log()?,
         Commands::Update => update::update()?,

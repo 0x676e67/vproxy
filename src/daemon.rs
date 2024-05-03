@@ -105,11 +105,30 @@ pub fn restart(args: BootArgs) -> crate::Result<()> {
 
 /// Show the status of the daemon
 #[cfg(target_family = "unix")]
-pub fn status() {
+pub fn status() -> crate::Result<()> {
     match get_pid() {
-        Some(pid) => println!("vproxy is running with pid: {}", pid),
+        Some(pid) => {
+            let mut sys = sysinfo::System::new();
+
+            // First we update all information of our `System` struct.
+            sys.refresh_all();
+
+            // Display processes ID
+            for (raw_pid, process) in sys.processes().iter() {
+                if raw_pid.as_u32().eq(&(pid.parse::<u32>()?)) {
+                    println!("{:<6} {:<6}  {:<6}", "PID", "CPU(%)", "MEM(MB)");
+                    println!(
+                        "{:<6}   {:<6.1}  {:<6.1}",
+                        raw_pid,
+                        process.cpu_usage(),
+                        (process.memory() as f64) / 1024.0 / 1024.0
+                    );
+                }
+            }
+        }
         None => println!("vproxy is not running"),
     }
+    Ok(())
 }
 
 /// Show the log of the daemon
