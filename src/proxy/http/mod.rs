@@ -2,25 +2,23 @@ mod auth;
 pub mod error;
 
 use self::{auth::Authenticator, error::ProxyError};
-use super::ProxyContext;
+use super::{connect::Connector, ProxyContext};
 use bytes::Bytes;
-use cidr::Ipv6Cidr;
 use http_body_util::{combinators::BoxBody, BodyExt, Empty, Full};
 use hyper::{
     server::conn::http1, service::service_fn, upgrade::Upgraded, Method, Request, Response,
 };
 use hyper_util::{
-    client::legacy::{connect::HttpConnector, Client},
+    client::legacy::Client,
     rt::{TokioExecutor, TokioIo},
 };
-use rand::Rng;
 use std::{
-    net::{IpAddr, Ipv6Addr, SocketAddr, ToSocketAddrs},
+    net::{SocketAddr, ToSocketAddrs},
     sync::Arc,
 };
-use tokio::net::{TcpSocket, TcpStream};
+use tokio::net::TcpStream;
 
-pub async fn run(ctx: ProxyContext) -> crate::Result<()> {
+pub async fn proxy(ctx: ProxyContext) -> crate::Result<()> {
     tracing::info!("Http server listening on {}", ctx.bind);
 
     let socket = if ctx.bind.is_ipv4() {
@@ -63,10 +61,8 @@ pub async fn run(ctx: ProxyContext) -> crate::Result<()> {
 struct HttpProxy {
     /// Authentication type
     auth: Authenticator,
-    /// Ipv6 subnet, e.g. 2001:db8::/32
-    ipv6_subnet: Option<cidr::Ipv6Cidr>,
-    /// Fallback address
-    fallback: Option<IpAddr>,
+    /// Connecetor
+    connector: Connector,
 }
 
 impl From<ProxyContext> for HttpProxy {
@@ -77,8 +73,7 @@ impl From<ProxyContext> for HttpProxy {
 
                 _ => Authenticator::None,
             },
-            ipv6_subnet: ctx.ipv6_subnet,
-            fallback: ctx.fallback,
+            connector: ctx.connector,
         }
     }
 }
@@ -129,26 +124,10 @@ impl HttpProxy {
                 Ok(resp)
             }
         } else {
-            let mut connector = HttpConnector::new();
-
-            match (self.ipv6_subnet, self.fallback) {
-                (Some(v6), Some(IpAddr::V4(v4))) => {
-                    let v6 = get_rand_ipv6(v6.first_address().into(), v6.network_length());
-                    connector.set_local_addresses(v4, v6);
-                }
-                (Some(v6), None) => {
-                    let v6 = get_rand_ipv6(v6.first_address().into(), v6.network_length());
-                    connector.set_local_address(Some(v6.into()));
-                }
-                // ipv4 or ipv6
-                (None, Some(ip)) => connector.set_local_address(Some(ip)),
-                _ => {}
-            }
-
             let resp = Client::builder(TokioExecutor::new())
                 .http1_title_case_headers(true)
                 .http1_preserve_header_case(true)
-                .build(connector)
+                .build(self.connector.new_http_connector())
                 .request(req)
                 .await?;
 
@@ -160,7 +139,7 @@ impl HttpProxy {
     // and the upgraded connection
     async fn tunnel(&self, upgraded: Upgraded, addr_str: String) -> std::io::Result<()> {
         for addr in addr_str.to_socket_addrs()? {
-            match self.try_connect(addr).await {
+            match self.connector.try_connect(addr).await {
                 Ok(mut server) => {
                     tracing::info!("tunnel: {} via {}", addr_str, server.local_addr()?);
                     return tunnel_proxy(upgraded, &mut server).await;
@@ -176,65 +155,6 @@ impl HttpProxy {
 
         Ok(())
     }
-
-    /// Get a socket and a bind address
-    async fn try_connect(&self, addr: SocketAddr) -> std::io::Result<TcpStream> {
-        match (self.ipv6_subnet, self.fallback) {
-            (Some(ipv6_cidr), ip_addr) => {
-                try_connect_with_ipv6_and_fallback(addr, ipv6_cidr, ip_addr).await
-            }
-            (None, Some(ip)) => try_connect_with_fallback(addr, ip).await,
-            _ => TcpStream::connect(addr).await,
-        }
-    }
-}
-
-/// Try to connect with ipv6 and fallback to ipv4/ipv6
-async fn try_connect_with_ipv6_and_fallback(
-    addr: SocketAddr,
-    v6: Ipv6Cidr,
-    ip: Option<IpAddr>,
-) -> std::io::Result<TcpStream> {
-    let socket = TcpSocket::new_v6()?;
-    let bind_addr = SocketAddr::new(
-        get_rand_ipv6(v6.first_address().into(), v6.network_length()).into(),
-        0,
-    );
-    socket.bind(bind_addr)?;
-
-    // Try to connect with ipv6
-    match socket.connect(addr).await {
-        Ok(first) => Ok(first),
-        Err(err) => {
-            tracing::debug!("try connect with ipv6 failed: {}", err);
-            if let Some(ip) = ip {
-                // Try to connect with fallback ip (ipv4 or ipv6)
-                let socket = create_socket_for_ip(ip)?;
-                let bind_addr = SocketAddr::new(ip, 0);
-                socket.bind(bind_addr)?;
-                socket.connect(addr).await
-            } else {
-                // Try to connect with system default ip
-                TcpStream::connect(addr).await
-            }
-        }
-    }
-}
-
-/// Try to connect with fallback to ipv4/ipv6
-async fn try_connect_with_fallback(addr: SocketAddr, ip: IpAddr) -> std::io::Result<TcpStream> {
-    let socket = create_socket_for_ip(ip)?;
-    let bind_addr = SocketAddr::new(ip, 0);
-    socket.bind(bind_addr)?;
-    socket.connect(addr).await
-}
-
-/// Create a socket for ip
-fn create_socket_for_ip(ip: IpAddr) -> std::io::Result<TcpSocket> {
-    match ip {
-        IpAddr::V4(_) => TcpSocket::new_v4(),
-        IpAddr::V6(_) => TcpSocket::new_v6(),
-    }
 }
 
 /// Proxy data between upgraded connection and server
@@ -247,15 +167,6 @@ async fn tunnel_proxy(upgraded: Upgraded, server: &mut TcpStream) -> std::io::Re
         from_server
     );
     Ok(())
-}
-
-/// Get a random ipv6 address
-fn get_rand_ipv6(mut ipv6: u128, prefix_len: u8) -> Ipv6Addr {
-    let rand: u128 = rand::thread_rng().gen();
-    let net_part = (ipv6 >> (128 - prefix_len)) << (128 - prefix_len);
-    let host_part = (rand << prefix_len) >> prefix_len;
-    ipv6 = net_part | host_part;
-    ipv6.into()
 }
 
 fn host_addr(uri: &http::Uri) -> Option<String> {

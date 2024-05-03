@@ -7,15 +7,15 @@ use std::{
 };
 
 #[cfg(target_family = "unix")]
-pub(crate) const PID_PATH: &str = "/var/run/vproxy.pid";
+const PID_PATH: &str = "/var/run/vproxy.pid";
 #[cfg(target_family = "unix")]
-pub(crate) const DEFAULT_STDOUT_PATH: &str = "/var/run/vproxy.out";
+const DEFAULT_STDOUT_PATH: &str = "/var/run/vproxy.out";
 #[cfg(target_family = "unix")]
-pub(crate) const DEFAULT_STDERR_PATH: &str = "/var/run/vproxy.err";
+const DEFAULT_STDERR_PATH: &str = "/var/run/vproxy.err";
 
 /// Get the pid of the daemon
 #[cfg(target_family = "unix")]
-pub(crate) fn get_pid() -> Option<String> {
+fn get_pid() -> Option<String> {
     if let Ok(data) = std::fs::read(PID_PATH) {
         let binding = String::from_utf8(data).expect("pid file is not utf8");
         return Some(binding.trim().to_string());

@@ -10,30 +10,27 @@ use self::{
         ClientConnection, IncomingConnection, Server, UdpAssociate,
     },
 };
-use super::ProxyContext;
+use super::{connect, ProxyContext};
 use as_any::AsAny;
 pub use error::Error;
 use std::{
     net::{SocketAddr, ToSocketAddrs},
     sync::Arc,
 };
-use tokio::{
-    net::{TcpStream, UdpSocket},
-    sync::Mutex,
-};
+use tokio::{net::UdpSocket, sync::Mutex};
 
-pub async fn run(ctx: ProxyContext) -> crate::Result<()> {
+pub async fn proxy(ctx: ProxyContext) -> crate::Result<()> {
     tracing::info!("Socks5 server listening on {}", ctx.bind);
 
-    match (ctx.auth.username, ctx.auth.password) {
+    match (&ctx.auth.username, &ctx.auth.password) {
         (Some(username), Some(password)) => {
-            let auth = Arc::new(auth::Password::new(&username, &password));
-            event_loop(auth, ctx.bind, ctx.concurrent as u32).await?;
+            let auth = Arc::new(auth::Password::new(username, password));
+            event_loop(auth, ctx).await?;
         }
 
         _ => {
             let auth = Arc::new(auth::NoAuth);
-            event_loop(auth, ctx.bind, ctx.concurrent as u32).await?;
+            event_loop(auth, ctx).await?;
         }
     }
 
@@ -45,19 +42,16 @@ const MAX_UDP_RELAY_PACKET_SIZE: usize = 1500;
 /// The library's `Result` type alias.
 pub type Result<T, E = Error> = std::result::Result<T, E>;
 
-async fn event_loop<S>(
-    auth: auth::AuthAdaptor<S>,
-    listen_addr: SocketAddr,
-    concurrent: u32,
-) -> Result<()>
+async fn event_loop<S>(auth: auth::AuthAdaptor<S>, ctx: ProxyContext) -> Result<()>
 where
     S: Send + Sync + 'static,
 {
-    let server = Server::bind_with_concurrency(listen_addr, auth, concurrent).await?;
-
+    let server = Server::bind_with_concurrency(ctx.bind, auth, ctx.concurrent as u32).await?;
+    let connector = Arc::new(ctx.connector);
     while let Ok((conn, _)) = server.accept().await {
+        let connector = connector.clone();
         tokio::spawn(async move {
-            if let Err(err) = handle(conn).await {
+            if let Err(err) = handle(conn, connector).await {
                 tracing::error!("{err}");
             }
         });
@@ -65,7 +59,7 @@ where
     Ok(())
 }
 
-async fn handle<S>(conn: IncomingConnection<S>) -> Result<()>
+async fn handle<S>(conn: IncomingConnection<S>, connector: Arc<connect::Connector>) -> Result<()>
 where
     S: Send + Sync + 'static,
 {
@@ -91,8 +85,10 @@ where
         }
         ClientConnection::Connect(connect, addr) => {
             let target = match addr {
-                Address::DomainAddress(domain, port) => TcpStream::connect((domain, port)).await,
-                Address::SocketAddress(addr) => TcpStream::connect(addr).await,
+                Address::DomainAddress(domain, port) => {
+                    connector.try_connect_for_domain(domain, port).await
+                }
+                Address::SocketAddress(addr) => connector.try_connect(addr).await,
             };
 
             if let Ok(mut target) = target {

@@ -1,10 +1,11 @@
 mod auth;
+mod connect;
 mod http;
 mod socks5;
 
 use crate::{AuthMode, BootArgs, Proxy};
 pub use socks5::Error;
-use std::net::{IpAddr, SocketAddr};
+use std::net::SocketAddr;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 struct ProxyContext {
@@ -14,10 +15,8 @@ struct ProxyContext {
     pub concurrent: usize,
     /// Authentication type
     pub auth: AuthMode,
-    /// Ipv6 subnet, e.g. 2001:db8::/32
-    pub ipv6_subnet: Option<cidr::Ipv6Cidr>,
-    /// Fallback address
-    pub fallback: Option<IpAddr>,
+    /// Connector
+    pub connector: connect::Connector,
 }
 
 #[tokio::main(flavor = "multi_thread")]
@@ -53,22 +52,20 @@ pub async fn run(args: BootArgs) -> crate::Result<()> {
 
     match args.proxy {
         Proxy::Http { auth } => {
-            http::run(ProxyContext {
+            http::proxy(ProxyContext {
                 bind: args.bind,
                 concurrent: args.concurrent,
                 auth,
-                ipv6_subnet: args.ipv6_subnet,
-                fallback: args.fallback,
+                connector: connect::Connector::new(args.ipv6_subnet, args.fallback),
             })
             .await
         }
         Proxy::Socks5 { auth } => {
-            socks5::run(ProxyContext {
+            socks5::proxy(ProxyContext {
                 bind: args.bind,
                 concurrent: args.concurrent,
                 auth,
-                ipv6_subnet: args.ipv6_subnet,
-                fallback: args.fallback,
+                connector: connect::Connector::new(args.ipv6_subnet, args.fallback),
             })
             .await
         }
