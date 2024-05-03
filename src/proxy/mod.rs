@@ -1,11 +1,22 @@
 mod auth;
-mod error;
 mod http;
 mod socks5;
 
+use std::net::{IpAddr, SocketAddr};
+
+pub use socks5::Error;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
-use crate::BootArgs;
+use crate::{AuthMode, BootArgs, Proxy};
+
+struct ProxyContext {
+    pub bind: SocketAddr,
+    pub auth: AuthMode,
+    /// Ipv6 subnet, e.g. 2001:db8::/32
+    pub ipv6_subnet: Option<cidr::Ipv6Cidr>,
+    /// Fallback address
+    pub fallback: Option<IpAddr>,
+}
 
 #[tokio::main(flavor = "multi_thread")]
 pub async fn run(args: BootArgs) -> crate::Result<()> {
@@ -23,9 +34,6 @@ pub async fn run(args: BootArgs) -> crate::Result<()> {
         .with(tracing_subscriber::fmt::layer())
         .init();
 
-    // Init basic auth realm
-    auth::init_basic_auth_realm(&args);
-
     // Init ip whitelist
     auth::init_ip_whitelist(&args);
 
@@ -36,9 +44,28 @@ pub async fn run(args: BootArgs) -> crate::Result<()> {
         crate::util::sysctl_route_add_ipv6_subnet(&v6);
     });
 
-    // Choose proxy type
-    match args.typed {
-        crate::ProxyType::Http => http::run(args).await,
-        crate::ProxyType::Socks5 => socks5::run(args).await,
+    tracing::info!("OS: {}", std::env::consts::OS);
+    tracing::info!("Arch: {}", std::env::consts::ARCH);
+    tracing::info!("Version: {}", env!("CARGO_PKG_VERSION"));
+
+    match args.proxy {
+        Proxy::Http { auth } => {
+            http::run(ProxyContext {
+                auth,
+                ipv6_subnet: args.ipv6_subnet,
+                fallback: args.fallback,
+                bind: args.bind,
+            })
+            .await
+        }
+        Proxy::Socks5 { auth } => {
+            socks5::run(ProxyContext {
+                auth,
+                ipv6_subnet: args.ipv6_subnet,
+                fallback: args.fallback,
+                bind: args.bind,
+            })
+            .await
+        }
     }
 }

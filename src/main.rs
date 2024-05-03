@@ -1,7 +1,7 @@
 pub mod alloc;
 #[cfg(target_family = "unix")]
 mod daemon;
-mod error;
+pub mod error;
 mod proxy;
 mod update;
 mod util;
@@ -43,50 +43,53 @@ pub enum Commands {
     Update,
 }
 
-#[derive(Args, Clone, Debug)]
+/// Choose the authentication type
+#[derive(Args, Clone)]
+pub struct AuthMode {
+    /// Authentication username
+    #[clap(short, long)]
+    pub username: Option<String>,
+    /// Authentication password
+    #[clap(short, long)]
+    pub password: Option<String>,
+}
+
+#[derive(Subcommand, Clone)]
+pub enum Proxy {
+    /// Http proxy
+    Http {
+        /// Authentication type
+        #[clap(flatten)]
+        auth: AuthMode,
+    },
+    /// Socks5 proxy
+    Socks5 {
+        /// Authentication type
+        #[clap(flatten)]
+        auth: AuthMode,
+    },
+}
+
+#[derive(Args, Clone)]
 pub struct BootArgs {
     /// Debug mode
-    #[clap(short = 'L', long, global = true, env = "VPROXY_DEBUG")]
+    #[clap(long, env = "VPROXY_DEBUG")]
     debug: bool,
     /// Bind address
     #[clap(short, long, default_value = "0.0.0.0:8100")]
     bind: SocketAddr,
-    /// Basic auth username
-    #[clap(short = 'u', long)]
-    auth_user: Option<String>,
-    /// Basic auth password
-    #[clap(short = 'p', long)]
-    auth_pass: Option<String>,
     /// IP addresses whitelist, e.g. 47.253.53.46,47.253.81.245
-    #[clap(short = 'w', long, value_parser, value_delimiter = ',')]
+    #[clap(short, long, value_parser, value_delimiter = ',')]
     whitelist: Vec<std::net::IpAddr>,
     /// Ipv6 subnet, e.g. 2001:db8::/32
-    #[clap(short = 'i', long)]
+    #[clap(short, long)]
     ipv6_subnet: Option<cidr::Ipv6Cidr>,
     /// Fallback address
-    #[clap(short = 'f', long)]
+    #[clap(short, long)]
     fallback: Option<std::net::IpAddr>,
-    /// Proxy type, e.g. http, https, socks5
-    #[clap(short = 'T', long, default_value = "http")]
-    typed: ProxyType,
-}
 
-#[derive(Clone, Debug)]
-pub enum ProxyType {
-    Http,
-    Socks5,
-}
-
-impl std::str::FromStr for ProxyType {
-    type Err = String;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s {
-            "http" => Ok(Self::Http),
-            "socks5" => Ok(Self::Socks5),
-            _ => Err("".to_string()),
-        }
-    }
+    #[clap(subcommand)]
+    proxy: Proxy,
 }
 
 // To try this example:
@@ -94,7 +97,7 @@ impl std::str::FromStr for ProxyType {
 // 2. config http_proxy in command line $ export http_proxy=http://127.0.0.1:8100
 //    $ export https_proxy=http://127.0.0.1:8100
 // 3. send requests $ curl -i https://www.some_domain.com/
-fn main() -> crate::Result<()> {
+fn main() -> anyhow::Result<()> {
     let opt = Opt::parse();
 
     match opt.commands {
