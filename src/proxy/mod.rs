@@ -1,11 +1,22 @@
 mod auth;
 mod http;
-pub(crate) mod socks5;
+mod socks5;
 
+use std::net::{IpAddr, SocketAddr};
+
+pub use socks5::Error;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
-use self::{http::HttpContext, socks5::Socks5Context};
-use crate::BootArgs;
+use crate::{AuthMode, BootArgs, Proxy};
+
+struct ProxyContext {
+    pub bind: SocketAddr,
+    pub auth: AuthMode,
+    /// Ipv6 subnet, e.g. 2001:db8::/32
+    pub ipv6_subnet: Option<cidr::Ipv6Cidr>,
+    /// Fallback address
+    pub fallback: Option<IpAddr>,
+}
 
 #[tokio::main(flavor = "multi_thread")]
 pub async fn run(args: BootArgs) -> crate::Result<()> {
@@ -36,12 +47,10 @@ pub async fn run(args: BootArgs) -> crate::Result<()> {
     tracing::info!("OS: {}", std::env::consts::OS);
     tracing::info!("Arch: {}", std::env::consts::ARCH);
     tracing::info!("Version: {}", env!("CARGO_PKG_VERSION"));
-    tracing::info!("Listening on {}", args.bind);
 
-    // Choose proxy type
     match args.proxy {
-        crate::Proxy::Http { auth } => {
-            http::run(HttpContext {
+        Proxy::Http { auth } => {
+            http::run(ProxyContext {
                 auth,
                 ipv6_subnet: args.ipv6_subnet,
                 fallback: args.fallback,
@@ -49,22 +58,12 @@ pub async fn run(args: BootArgs) -> crate::Result<()> {
             })
             .await
         }
-        crate::Proxy::Socks5 {
-            auth,
-            timeout,
-            resolve_dns: dns_resolve,
-            allow_udp: udp_support,
-            execute_command,
-        } => {
-            socks5::run(Socks5Context {
-                auth: auth.clone(),
+        Proxy::Socks5 { auth } => {
+            socks5::run(ProxyContext {
+                auth,
                 ipv6_subnet: args.ipv6_subnet,
                 fallback: args.fallback,
                 bind: args.bind,
-                timeout,
-                dns_resolve,
-                udp_support,
-                execute_command,
             })
             .await
         }

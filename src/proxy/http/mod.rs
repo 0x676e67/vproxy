@@ -18,17 +18,11 @@ use hyper_util::{
     rt::{TokioExecutor, TokioIo},
 };
 use rand::Rng;
-use tokio::{
-    net::{TcpListener, TcpSocket, TcpStream},
-    sync::Semaphore,
-};
+use tokio::net::{TcpListener, TcpSocket, TcpStream};
 
 use self::error::ProxyError;
-use super::auth::Authentication;
-use crate::{
-    proxy::auth::{self, AuthError},
-    AuthMode,
-};
+use super::{auth::Authentication, ProxyContext};
+use crate::proxy::auth::{self, AuthError};
 
 #[derive(Clone)]
 pub enum AuthenticationMethod {
@@ -92,27 +86,17 @@ impl Authentication for AuthenticationMethod {
     }
 }
 
-pub struct HttpContext {
-    pub bind: SocketAddr,
-    pub auth: AuthMode,
-    pub ipv6_subnet: Option<Ipv6Cidr>,
-    pub fallback: Option<IpAddr>,
-}
-
-pub async fn run(ctx: HttpContext) -> crate::Result<()> {
+pub async fn run(ctx: ProxyContext) -> crate::Result<()> {
+    tracing::info!("Http server listening on {}", ctx.bind);
     let listener = TcpListener::bind(ctx.bind).await?;
     let http_proxy = Arc::new(HttpProxy::from(ctx));
-    // Limit to 100 concurrent tasks
-    let sem = Arc::new(Semaphore::new(100));
 
     loop {
         let (stream, socket) = listener.accept().await?;
         let io = TokioIo::new(stream);
         let http_proxy = http_proxy.clone();
-        let permit = sem.clone().acquire_owned().await;
 
         tokio::task::spawn(async move {
-            let _permit = permit;
             if let Err(err) = http1::Builder::new()
                 .preserve_header_case(true)
                 .title_case_headers(true)
@@ -142,14 +126,15 @@ struct HttpProxy {
     fallback: Option<IpAddr>,
 }
 
-impl From<HttpContext> for HttpProxy {
-    fn from(ctx: HttpContext) -> Self {
+impl From<ProxyContext> for HttpProxy {
+    fn from(ctx: ProxyContext) -> Self {
         Self {
-            auth: match ctx.auth {
-                AuthMode::NoAuth => AuthenticationMethod::None,
-                AuthMode::Auth { username, password } => {
+            auth: match (ctx.auth.username, ctx.auth.password) {
+                (Some(username), Some(password)) => {
                     AuthenticationMethod::Password { username, password }
                 }
+
+                _ => AuthenticationMethod::None,
             },
             ipv6_subnet: ctx.ipv6_subnet,
             fallback: ctx.fallback,

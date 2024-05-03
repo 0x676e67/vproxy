@@ -44,20 +44,33 @@ pub enum Commands {
 }
 
 /// Choose the authentication type
-#[derive(Subcommand, Clone, Debug)]
-pub enum AuthMode {
-    /// No authentication
-    NoAuth,
-    /// Simple username and password authentication
-    Auth {
-        /// Authentication username
-        username: String,
-        /// Authentication password
-        password: String,
+#[derive(Args, Clone)]
+pub struct AuthMode {
+    /// Authentication username
+    #[clap(short, long)]
+    pub username: Option<String>,
+    /// Authentication password
+    #[clap(short, long)]
+    pub password: Option<String>,
+}
+
+#[derive(Subcommand, Clone)]
+pub enum Proxy {
+    /// Http proxy
+    Http {
+        /// Authentication type
+        #[clap(flatten)]
+        auth: AuthMode,
+    },
+    /// Socks5 proxy
+    Socks5 {
+        /// Authentication type
+        #[clap(flatten)]
+        auth: AuthMode,
     },
 }
 
-#[derive(Args, Clone, Debug)]
+#[derive(Args, Clone)]
 pub struct BootArgs {
     /// Debug mode
     #[clap(long, env = "VPROXY_DEBUG")]
@@ -77,34 +90,6 @@ pub struct BootArgs {
 
     #[clap(subcommand)]
     proxy: Proxy,
-}
-
-#[derive(Subcommand, Clone, Debug)]
-pub enum Proxy {
-    /// Http proxy
-    Http {
-        /// Authentication type
-        #[clap(subcommand)]
-        auth: AuthMode,
-    },
-    /// Socks5 proxy
-    Socks5 {
-        /// Authentication type
-        #[clap(subcommand)]
-        auth: AuthMode,
-        /// Timeout in seconds
-        #[clap(short, long, default_value = "10")]
-        timeout: u64,
-        /// Will the server perform dns resolve
-        #[clap(short, long, default_value = "true")]
-        resolve_dns: bool,
-        /// Set whether or not to allow udp traffic
-        #[clap(short = 'u', long, default_value = "true")]
-        allow_udp: bool,
-        /// Set whether or not to execute commands
-        #[clap(short, long, default_value = "true")]
-        execute_command: bool,
-    },
 }
 
 // To try this example:

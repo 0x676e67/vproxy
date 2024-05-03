@@ -1,78 +1,75 @@
-use thiserror::Error;
-
-use super::consts;
-
-#[derive(Error, Debug)]
-#[allow(dead_code)]
-pub enum SocksError {
-    #[error("i/o error: {0}")]
+/// The library's error type.
+#[derive(Debug, thiserror::Error)]
+pub enum Error {
+    #[error("{0}")]
     Io(#[from] std::io::Error),
-    #[error("the data for key `{0}` is not available")]
-    Redaction(String),
-    #[error("invalid header (expected {expected:?}, found {found:?})")]
-    InvalidHeader { expected: String, found: String },
 
-    #[error("Auth method unacceptable `{0:?}`.")]
-    AuthMethodUnacceptable(Vec<u8>),
-    #[error("Unsupported SOCKS version `{0}`.")]
-    UnsupportedSocksVersion(u8),
-    #[error("Domain exceeded max sequence length")]
-    ExceededMaxDomainLen(usize),
-    #[error("Authentication failed `{0}`")]
-    AuthenticationFailed(String),
-    #[error("Authentication rejected `{0}`")]
-    AuthenticationRejected(String),
+    #[error("{0}")]
+    FromUtf8(#[from] std::string::FromUtf8Error),
 
-    #[error("Argument input error: `{0}`.")]
-    ArgumentInputError(&'static str),
+    #[error("Invalid SOCKS version: {0:x}")]
+    InvalidVersion(u8),
+    #[error("Invalid command: {0:x}")]
+    InvalidCommand(u8),
+    #[error("Invalid address type: {0:x}")]
+    InvalidAtyp(u8),
+    #[error("Invalid reserved bytes: {0:x}")]
+    InvalidReserved(u8),
+    #[error("Invalid authentication status: {0:x}")]
+    InvalidAuthStatus(u8),
+    #[error("Invalid authentication version of subnegotiation: {0:x}")]
+    InvalidAuthSubnegotiation(u8),
+    #[error("Invalid fragment id: {0:x}")]
+    InvalidFragmentId(u8),
 
-    #[error("Error with reply: {0}.")]
-    ReplyError(#[from] ReplyError),
+    #[error("Invalid authentication method: {0:?}")]
+    InvalidAuthMethod(crate::proxy::socks5::proto::AuthMethod),
 
-    #[error(transparent)]
-    Other(#[from] anyhow::Error),
+    #[error("SOCKS version is 4 when 5 is expected")]
+    WrongVersion,
+
+    #[error("AddrParseError: {0}")]
+    AddrParseError(#[from] std::net::AddrParseError),
+
+    #[error("ParseIntError: {0}")]
+    ParseIntError(#[from] std::num::ParseIntError),
+
+    #[error("Utf8Error: {0}")]
+    Utf8Error(#[from] std::str::Utf8Error),
+
+    #[error("{0}")]
+    String(String),
 }
 
-/// SOCKS5 reply code
-#[allow(dead_code)]
-#[derive(Error, Debug, Copy, Clone)]
-pub enum ReplyError {
-    #[error("Succeeded")]
-    Succeeded,
-    #[error("General failure")]
-    GeneralFailure,
-    #[error("Connection not allowed by ruleset")]
-    ConnectionNotAllowed,
-    #[error("Network unreachable")]
-    NetworkUnreachable,
-    #[error("Host unreachable")]
-    HostUnreachable,
-    #[error("Connection refused")]
-    ConnectionRefused,
-    #[error("Connection timeout")]
-    ConnectionTimeout,
-    #[error("TTL expired")]
-    TtlExpired,
-    #[error("Command not supported")]
-    CommandNotSupported,
-    #[error("Address type not supported")]
-    AddressTypeNotSupported,
+impl From<&str> for Error {
+    fn from(s: &str) -> Self {
+        Error::String(s.to_string())
+    }
 }
 
-impl ReplyError {
-    #[inline]
-    pub fn as_u8(self) -> u8 {
-        match self {
-            ReplyError::Succeeded => consts::SOCKS5_REPLY_SUCCEEDED,
-            ReplyError::GeneralFailure => consts::SOCKS5_REPLY_GENERAL_FAILURE,
-            ReplyError::ConnectionNotAllowed => consts::SOCKS5_REPLY_CONNECTION_NOT_ALLOWED,
-            ReplyError::NetworkUnreachable => consts::SOCKS5_REPLY_NETWORK_UNREACHABLE,
-            ReplyError::HostUnreachable => consts::SOCKS5_REPLY_HOST_UNREACHABLE,
-            ReplyError::ConnectionRefused => consts::SOCKS5_REPLY_CONNECTION_REFUSED,
-            ReplyError::ConnectionTimeout => consts::SOCKS5_REPLY_TTL_EXPIRED,
-            ReplyError::TtlExpired => consts::SOCKS5_REPLY_TTL_EXPIRED,
-            ReplyError::CommandNotSupported => consts::SOCKS5_REPLY_COMMAND_NOT_SUPPORTED,
-            ReplyError::AddressTypeNotSupported => consts::SOCKS5_REPLY_ADDRESS_TYPE_NOT_SUPPORTED,
+impl From<String> for Error {
+    fn from(s: String) -> Self {
+        Error::String(s)
+    }
+}
+
+impl From<&String> for Error {
+    fn from(s: &String) -> Self {
+        Error::String(s.to_string())
+    }
+}
+
+impl From<Error> for std::io::Error {
+    fn from(e: Error) -> Self {
+        match e {
+            Error::Io(e) => e,
+            _ => std::io::Error::new(std::io::ErrorKind::Other, e),
         }
+    }
+}
+
+impl From<tokio::time::error::Elapsed> for Error {
+    fn from(e: tokio::time::error::Elapsed) -> Self {
+        Error::Io(e.into())
     }
 }

@@ -1,218 +1,119 @@
-mod auth;
 pub mod error;
-mod server;
-mod util;
+pub mod proto;
+pub mod server;
 
 use std::{
-    fmt,
-    future::Future,
-    net::{IpAddr, SocketAddr},
+    net::{SocketAddr, ToSocketAddrs},
+    sync::{atomic::AtomicBool, Arc},
 };
 
-use anyhow::Context;
+use as_any::AsAny;
+pub use error::Error;
 use tokio::{
-    io::{AsyncRead, AsyncReadExt, AsyncWrite},
-    task,
+    net::{TcpStream, UdpSocket},
+    sync::Mutex,
 };
-use tokio_stream::StreamExt;
-use util::addr::{read_address, TargetAddr, ToTargetAddr};
 
-#[allow(dead_code)]
-pub mod consts {
-    pub const SOCKS5_VERSION: u8 = 0x05;
-
-    pub const SOCKS5_AUTH_METHOD_NONE: u8 = 0x00;
-    pub const SOCKS5_AUTH_METHOD_GSSAPI: u8 = 0x01;
-    pub const SOCKS5_AUTH_METHOD_PASSWORD: u8 = 0x02;
-    pub const SOCKS5_AUTH_METHOD_NOT_ACCEPTABLE: u8 = 0xff;
-
-    pub const SOCKS5_CMD_TCP_CONNECT: u8 = 0x01;
-    pub const SOCKS5_CMD_TCP_BIND: u8 = 0x02;
-    pub const SOCKS5_CMD_UDP_ASSOCIATE: u8 = 0x03;
-
-    pub const SOCKS5_ADDR_TYPE_IPV4: u8 = 0x01;
-    pub const SOCKS5_ADDR_TYPE_DOMAIN_NAME: u8 = 0x03;
-    pub const SOCKS5_ADDR_TYPE_IPV6: u8 = 0x04;
-
-    pub const SOCKS5_REPLY_SUCCEEDED: u8 = 0x00;
-    pub const SOCKS5_REPLY_GENERAL_FAILURE: u8 = 0x01;
-    pub const SOCKS5_REPLY_CONNECTION_NOT_ALLOWED: u8 = 0x02;
-    pub const SOCKS5_REPLY_NETWORK_UNREACHABLE: u8 = 0x03;
-    pub const SOCKS5_REPLY_HOST_UNREACHABLE: u8 = 0x04;
-    pub const SOCKS5_REPLY_CONNECTION_REFUSED: u8 = 0x05;
-    pub const SOCKS5_REPLY_TTL_EXPIRED: u8 = 0x06;
-    pub const SOCKS5_REPLY_COMMAND_NOT_SUPPORTED: u8 = 0x07;
-    pub const SOCKS5_REPLY_ADDRESS_TYPE_NOT_SUPPORTED: u8 = 0x08;
-}
-
-#[derive(Debug, PartialEq)]
-pub enum Socks5Command {
-    TCPConnect,
-    TCPBind,
-    UDPAssociate,
-}
-
-#[allow(dead_code)]
-impl Socks5Command {
-    #[inline]
-    fn as_u8(&self) -> u8 {
-        match self {
-            Socks5Command::TCPConnect => consts::SOCKS5_CMD_TCP_CONNECT,
-            Socks5Command::TCPBind => consts::SOCKS5_CMD_TCP_BIND,
-            Socks5Command::UDPAssociate => consts::SOCKS5_CMD_UDP_ASSOCIATE,
-        }
-    }
-
-    #[inline]
-    fn from_u8(code: u8) -> Option<Socks5Command> {
-        match code {
-            consts::SOCKS5_CMD_TCP_CONNECT => Some(Socks5Command::TCPConnect),
-            consts::SOCKS5_CMD_TCP_BIND => Some(Socks5Command::TCPBind),
-            consts::SOCKS5_CMD_UDP_ASSOCIATE => Some(Socks5Command::UDPAssociate),
-            _ => None,
-        }
-    }
-}
-
-#[derive(Debug, PartialEq)]
-pub enum AuthenticationMethod {
-    None,
-    Password { username: String, password: String },
-}
-
-impl AuthenticationMethod {
-    #[inline]
-    fn from_u8(code: u8) -> Option<AuthenticationMethod> {
-        match code {
-            consts::SOCKS5_AUTH_METHOD_NONE => Some(AuthenticationMethod::None),
-            consts::SOCKS5_AUTH_METHOD_PASSWORD => Some(AuthenticationMethod::Password {
-                username: "test".to_string(),
-                password: "test".to_string(),
-            }),
-            _ => None,
-        }
-    }
-}
-
-impl fmt::Display for AuthenticationMethod {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match *self {
-            AuthenticationMethod::None => f.write_str("AuthenticationMethod::None"),
-            AuthenticationMethod::Password { .. } => f.write_str("AuthenticationMethod::Password"),
-        }
-    }
-}
-
-pub type Result<T, E = SocksError> = core::result::Result<T, E>;
-
-/// Generate UDP header
-///
-/// # UDP Request header structure.
-/// ```text
-/// +----+------+------+----------+----------+----------+
-/// |RSV | FRAG | ATYP | DST.ADDR | DST.PORT |   DATA   |
-/// +----+------+------+----------+----------+----------+
-/// | 2  |  1   |  1   | Variable |    2     | Variable |
-/// +----+------+------+----------+----------+----------+
-///
-/// The fields in the UDP request header are:
-///
-///     o  RSV  Reserved X'0000'
-///     o  FRAG    Current fragment number
-///     o  ATYP    address type of following addresses:
-///        o  IP V4 address: X'01'
-///        o  DOMAINNAME: X'03'
-///        o  IP V6 address: X'04'
-///     o  DST.ADDR       desired destination address
-///     o  DST.PORT       desired destination port
-///     o  DATA     user data
-/// ```
-pub fn new_udp_header<T: ToTargetAddr>(target_addr: T) -> Result<Vec<u8>> {
-    let mut header = vec![
-        0, 0, // RSV
-        0, // FRAG
-    ];
-    header.append(&mut target_addr.to_target_addr()?.to_be_bytes()?);
-
-    Ok(header)
-}
-
-/// Parse data from UDP client on raw buffer, return (frag, target_addr,
-/// payload).
-pub async fn parse_udp_request<'a>(mut req: &'a [u8]) -> Result<(u8, TargetAddr, &'a [u8])> {
-    let rsv = read_exact!(req, [0u8; 2]).context("Malformed request")?;
-
-    if !rsv.eq(&[0u8; 2]) {
-        return Err(ReplyError::GeneralFailure.into());
-    }
-
-    let [frag, atyp] = read_exact!(req, [0u8; 2]).context("Malformed request")?;
-
-    let target_addr = read_address(&mut req, atyp).await.map_err(|e| {
-        // print explicit error
-        tracing::error!("{:#}", e);
-        // then convert it to a reply
-        ReplyError::AddressTypeNotSupported
-    })?;
-
-    Ok((frag, target_addr, req))
-}
-
-use self::{error::SocksError, server::Socks5Socket};
-use crate::{
-    proxy::socks5::{
-        auth::SimpleUserPassword,
-        error::ReplyError,
-        server::{Config, Socks5Server},
+use self::{
+    proto::{Address, Reply, UdpHeader},
+    server::{
+        auth,
+        connection::{associate, associate::AssociatedUdpSocket},
+        ClientConnection, IncomingConnection, Server, UdpAssociate,
     },
-    read_exact, AuthMode,
 };
+use super::ProxyContext;
 
-pub struct Socks5Context {
-    pub bind: SocketAddr,
-    pub auth: AuthMode,
-    pub timeout: u64,
-    pub dns_resolve: bool,
-    pub udp_support: bool,
-    pub execute_command: bool,
-    /// Ipv6 subnet, e.g. 2001:db8::/32
-    pub ipv6_subnet: Option<cidr::Ipv6Cidr>,
-    /// Fallback address
-    pub fallback: Option<IpAddr>,
+pub async fn run(ctx: ProxyContext) -> crate::Result<()> {
+    tracing::info!("Socks5 server listening on {}", ctx.bind);
+    let exiting_flag = Arc::new(AtomicBool::new(false));
+
+    match (ctx.auth.username, ctx.auth.password) {
+        (Some(username), Some(password)) => {
+            let auth = Arc::new(auth::UserKeyAuth::new(&username, &password));
+            event_loop(auth, ctx.bind, Some(exiting_flag)).await?;
+        }
+
+        _ => {
+            let auth = Arc::new(auth::NoAuth);
+            event_loop(auth, ctx.bind, Some(exiting_flag)).await?;
+        }
+    }
+
+    Ok(())
 }
 
-pub(super) async fn run(ctx: Socks5Context) -> crate::Result<()> {
-    let mut config = Config::default();
-    config.set_request_timeout(ctx.timeout);
-    config.set_dns_resolve(ctx.dns_resolve);
-    config.set_udp_support(ctx.udp_support);
-    config.set_execute_command(ctx.execute_command);
+const MAX_UDP_RELAY_PACKET_SIZE: usize = 1500;
 
-    let config = match ctx.auth {
-        AuthMode::NoAuth => {
-            tracing::info!("No auth system has been set.");
-            config
-        }
-        AuthMode::Auth { username, password } => {
-            tracing::info!("Auth system has been set.");
-            config.with_authentication(SimpleUserPassword { username, password })
-        }
-    };
+/// The library's `Result` type alias.
+pub type Result<T, E = Error> = std::result::Result<T, E>;
 
-    // Bind to the address and start listening for incoming connections
-    let server = <Socks5Server>::bind(ctx.bind).await?.with_config(config);
+async fn event_loop<S>(
+    auth: auth::AuthAdaptor<S>,
+    listen_addr: SocketAddr,
+    exiting_flag: Option<Arc<AtomicBool>>,
+) -> Result<()>
+where
+    S: Send + Sync + 'static,
+{
+    let server = Server::bind(listen_addr, auth).await?;
 
-    // Accept connections in a loop
-    let mut incoming = server.incoming();
-
-    // Standard TCP loop
-    while let Some(socket_res) = incoming.next().await {
-        match socket_res {
-            Ok(socket) => {
-                spawn_and_log_error(socket.upgrade_to_socks5());
+    while let Ok((conn, _)) = server.accept().await {
+        if let Some(exiting_flag) = &exiting_flag {
+            if exiting_flag.load(std::sync::atomic::Ordering::Relaxed) {
+                break;
             }
-            Err(err) => {
-                tracing::error!("Accept error = {:?}", err);
+        }
+        tokio::spawn(async move {
+            if let Err(err) = handle(conn).await {
+                tracing::error!("{err}");
+            }
+        });
+    }
+    Ok(())
+}
+
+async fn handle<S>(conn: IncomingConnection<S>) -> Result<()>
+where
+    S: Send + Sync + 'static,
+{
+    let (conn, res) = conn.authenticate().await?;
+
+    if let Some(res) = res.as_any().downcast_ref::<std::io::Result<bool>>() {
+        let res = *res.as_ref().map_err(|err| err.to_string())?;
+        if !res {
+            tracing::info!("authentication failed");
+            return Ok(());
+        }
+    }
+
+    match conn.wait_request().await? {
+        ClientConnection::UdpAssociate(associate, _) => {
+            handle_s5_upd_associate(associate).await?;
+        }
+        ClientConnection::Bind(bind, _) => {
+            let mut conn = bind
+                .reply(Reply::CommandNotSupported, Address::unspecified())
+                .await?;
+            conn.shutdown().await?;
+        }
+        ClientConnection::Connect(connect, addr) => {
+            let target = match addr {
+                Address::DomainAddress(domain, port) => TcpStream::connect((domain, port)).await,
+                Address::SocketAddress(addr) => TcpStream::connect(addr).await,
+            };
+
+            if let Ok(mut target) = target {
+                let mut conn = connect
+                    .reply(Reply::Succeeded, Address::unspecified())
+                    .await?;
+                tracing::info!("{} -> {}", conn.peer_addr()?, target.peer_addr()?);
+                tokio::io::copy_bidirectional(&mut target, &mut conn).await?;
+            } else {
+                let mut conn = connect
+                    .reply(Reply::HostUnreachable, Address::unspecified())
+                    .await?;
+                conn.shutdown().await?;
             }
         }
     }
@@ -220,19 +121,78 @@ pub(super) async fn run(ctx: Socks5Context) -> crate::Result<()> {
     Ok(())
 }
 
-fn spawn_and_log_error<F, T>(fut: F) -> task::JoinHandle<()>
-where
-    F: Future<Output = Result<Socks5Socket<T, SimpleUserPassword>>> + Send + 'static,
-    T: AsyncRead + AsyncWrite + Unpin,
-{
-    task::spawn(async move {
-        match fut.await {
-            Ok(mut socket) => {
-                if let Some(user) = socket.take_credentials() {
-                    tracing::info!("User logged in with `{}`", user.username);
-                }
-            }
-            Err(err) => tracing::error!("{:#}", &err),
+async fn handle_s5_upd_associate(associate: UdpAssociate<associate::NeedReply>) -> Result<()> {
+    // listen on a random port
+    let listen_ip = associate.local_addr()?.ip();
+    let udp_listener = UdpSocket::bind(SocketAddr::from((listen_ip, 0))).await;
+
+    match udp_listener.and_then(|socket| socket.local_addr().map(|addr| (socket, addr))) {
+        Err(err) => {
+            let mut conn = associate
+                .reply(Reply::GeneralFailure, Address::unspecified())
+                .await?;
+            conn.shutdown().await?;
+            Err(err.into())
         }
-    })
+        Ok((listen_udp, listen_addr)) => {
+            tracing::info!("[UDP] {listen_addr} listen on");
+
+            let s5_listen_addr = Address::from(listen_addr);
+            let mut reply_listener = associate.reply(Reply::Succeeded, s5_listen_addr).await?;
+
+            let buf_size = MAX_UDP_RELAY_PACKET_SIZE - UdpHeader::max_serialized_len();
+            let listen_udp = Arc::new(AssociatedUdpSocket::from((listen_udp, buf_size)));
+
+            let zero_addr = SocketAddr::from(([0, 0, 0, 0], 0));
+
+            let incoming_addr = Arc::new(Mutex::new(zero_addr));
+
+            let dispatch_socket = UdpSocket::bind(zero_addr).await?;
+
+            let res = loop {
+                tokio::select! {
+                    res = async {
+                        let buf_size = MAX_UDP_RELAY_PACKET_SIZE - UdpHeader::max_serialized_len();
+                        listen_udp.set_max_packet_size(buf_size);
+
+                        let (pkt, frag, dst_addr, src_addr) = listen_udp.recv_from().await?;
+                        if frag != 0 {
+                            return Err("[UDP] packet fragment is not supported".into());
+                        }
+
+                        *incoming_addr.lock().await = src_addr;
+
+                        tracing::trace!("[UDP] {src_addr} -> {dst_addr} incoming packet size {}", pkt.len());
+                        let dst_addr = dst_addr.to_socket_addrs()?.next().ok_or("Invalid address")?;
+                        dispatch_socket.send_to(&pkt, dst_addr).await?;
+                        Ok::<_, Error>(())
+                    } => {
+                        if res.is_err() {
+                            break res;
+                        }
+                    },
+                    res = async {
+                        let mut buf = vec![0u8; MAX_UDP_RELAY_PACKET_SIZE];
+                        let (len, remote_addr) = dispatch_socket.recv_from(&mut buf).await?;
+                        let incoming_addr = *incoming_addr.lock().await;
+                        tracing::trace!("[UDP] {incoming_addr} <- {remote_addr} feedback to incoming");
+                        listen_udp.send_to(&buf[..len], 0, remote_addr.into(), incoming_addr).await?;
+                        Ok::<_, Error>(())
+                    } => {
+                        if res.is_err() {
+                            break res;
+                        }
+                    },
+                    _ = reply_listener.wait_until_closed() => {
+                        tracing::trace!("[UDP] {} listener closed", listen_addr);
+                        break Ok::<_, Error>(());
+                    },
+                };
+            };
+
+            reply_listener.shutdown().await?;
+
+            res
+        }
+    }
 }
