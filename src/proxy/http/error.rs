@@ -1,4 +1,4 @@
-use crate::proxy::auth::AuthError;
+use super::auth::AuthError;
 
 /// Proxy Error
 #[derive(thiserror::Error, Debug)]

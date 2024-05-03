@@ -1,10 +1,13 @@
 use crate::proxy::{
     auth,
-    socks5::proto::{handshake::password, AsyncStreamOperation, AuthMethod, UsernamePassword},
+    socks5::proto::{handshake::password, AsyncStreamOperation, Method, UsernamePassword},
 };
 use as_any::AsAny;
 use async_trait::async_trait;
-use std::sync::Arc;
+use std::{
+    io::{Error, ErrorKind},
+    sync::Arc,
+};
 use tokio::net::TcpStream;
 
 pub type AuthAdaptor<O> = Arc<dyn Auth<Output = O> + Send + Sync>;
@@ -12,7 +15,7 @@ pub type AuthAdaptor<O> = Arc<dyn Auth<Output = O> + Send + Sync>;
 #[async_trait]
 pub trait Auth {
     type Output: AsAny;
-    fn auth_method(&self) -> AuthMethod;
+    fn method(&self) -> Method;
     async fn execute(&self, stream: &mut TcpStream) -> Self::Output;
 }
 
@@ -24,8 +27,8 @@ pub struct NoAuth;
 impl Auth for NoAuth {
     type Output = ();
 
-    fn auth_method(&self) -> AuthMethod {
-        AuthMethod::NoAuth
+    fn method(&self) -> Method {
+        Method::NoAuth
     }
 
     async fn execute(&self, _: &mut TcpStream) -> Self::Output {}
@@ -45,8 +48,8 @@ impl Password {
 impl Auth for Password {
     type Output = std::io::Result<bool>;
 
-    fn auth_method(&self) -> AuthMethod {
-        AuthMethod::Password
+    fn method(&self) -> Method {
+        Method::Password
     }
 
     async fn execute(&self, stream: &mut TcpStream) -> Self::Output {
@@ -54,14 +57,14 @@ impl Auth for Password {
         let req = Request::retrieve_from_async_stream(stream).await?;
         let socket = stream.peer_addr()?;
 
-        let is_equal = (req.user_pass == self.0) || auth::authenticate_ip(socket).is_ok();
+        let is_equal = (req.user_pass == self.0) || auth::authenticate_ip(socket);
         let resp = Response::new(if is_equal { Succeeded } else { Failed });
         resp.write_to_async_stream(stream).await?;
         if is_equal {
             Ok(true)
         } else {
-            Err(std::io::Error::new(
-                std::io::ErrorKind::Other,
+            Err(Error::new(
+                ErrorKind::Other,
                 "username or password is incorrect",
             ))
         }

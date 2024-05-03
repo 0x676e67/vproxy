@@ -1,7 +1,7 @@
 use self::{associate::UdpAssociate, bind::Bind, connect::Connect};
 use crate::proxy::{
     socks5::{
-        proto::{self, handshake, Address, AsyncStreamOperation, AuthMethod, Command},
+        proto::{self, handshake, Address, AsyncStreamOperation, Command, Method},
         server::AuthAdaptor,
     },
     Error,
@@ -109,15 +109,15 @@ impl<O: 'static> IncomingConnection<O> {
             let output = self.auth.execute(&mut self.stream).await;
             Ok((AuthenticatedStream::new(self.stream), output))
         } else {
-            let response = handshake::Response::new(AuthMethod::NoAcceptableMethods);
+            let response = handshake::Response::new(Method::NoAcceptableMethods);
             response.write_to_async_stream(&mut self.stream).await?;
             let err = "No available handshake method provided by client";
             Err(std::io::Error::new(std::io::ErrorKind::Unsupported, err))
         }
     }
 
-    fn evaluate_request(&self, req: &handshake::Request) -> Option<AuthMethod> {
-        let method = self.auth.auth_method();
+    fn evaluate_request(&self, req: &handshake::Request) -> Option<Method> {
+        let method = self.auth.method();
         if req.evaluate_method(method) {
             Some(method)
         } else {

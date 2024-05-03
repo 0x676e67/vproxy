@@ -1,7 +1,18 @@
-use crate::proxy::auth::{self, AuthError};
+use crate::proxy::auth;
 use base64::Engine;
 use http::{header, HeaderMap};
 use std::net::SocketAddr;
+
+/// Auth Error
+#[derive(thiserror::Error, Debug)]
+pub enum AuthError {
+    #[error("Missing credentials")]
+    MissingCredentials,
+    #[error("Invalid credentials")]
+    InvalidCredentials,
+    #[error("Unauthorized")]
+    Unauthorized,
+}
 
 #[derive(Clone)]
 pub enum Authenticator {
@@ -12,7 +23,7 @@ pub enum Authenticator {
 impl Authenticator {
     pub fn authenticate(&self, headers: &HeaderMap, socket: SocketAddr) -> Result<(), AuthError> {
         // If no authentication is required, return immediately
-        if auth::authenticate_ip(socket).is_ok() {
+        if auth::authenticate_ip(socket) {
             return Ok(());
         }
         match self {

@@ -1,7 +1,7 @@
 /// A proxy authentication method.
 #[repr(u8)]
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub enum AuthMethod {
+pub enum Method {
     /// No authentication required.
     NoAuth              = 0x00,
     /// GSS API.
@@ -16,47 +16,47 @@ pub enum AuthMethod {
     NoAcceptableMethods = 0xff,
 }
 
-impl From<u8> for AuthMethod {
+impl From<u8> for Method {
     fn from(value: u8) -> Self {
         match value {
-            0x00 => AuthMethod::NoAuth,
-            0x01 => AuthMethod::GssApi,
-            0x02 => AuthMethod::Password,
-            0x03..=0x7f => AuthMethod::IanaReserved(value),
-            0x80..=0xfe => AuthMethod::Private(value),
-            0xff => AuthMethod::NoAcceptableMethods,
+            0x00 => Method::NoAuth,
+            0x01 => Method::GssApi,
+            0x02 => Method::Password,
+            0x03..=0x7f => Method::IanaReserved(value),
+            0x80..=0xfe => Method::Private(value),
+            0xff => Method::NoAcceptableMethods,
         }
     }
 }
 
-impl From<AuthMethod> for u8 {
-    fn from(value: AuthMethod) -> Self {
-        From::<&AuthMethod>::from(&value)
+impl From<Method> for u8 {
+    fn from(value: Method) -> Self {
+        From::<&Method>::from(&value)
     }
 }
 
-impl From<&AuthMethod> for u8 {
-    fn from(value: &AuthMethod) -> Self {
+impl From<&Method> for u8 {
+    fn from(value: &Method) -> Self {
         match value {
-            AuthMethod::NoAuth => 0x00,
-            AuthMethod::GssApi => 0x01,
-            AuthMethod::Password => 0x02,
-            AuthMethod::IanaReserved(value) => *value,
-            AuthMethod::Private(value) => *value,
-            AuthMethod::NoAcceptableMethods => 0xff,
+            Method::NoAuth => 0x00,
+            Method::GssApi => 0x01,
+            Method::Password => 0x02,
+            Method::IanaReserved(value) => *value,
+            Method::Private(value) => *value,
+            Method::NoAcceptableMethods => 0xff,
         }
     }
 }
 
-impl std::fmt::Display for AuthMethod {
+impl std::fmt::Display for Method {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         match self {
-            AuthMethod::NoAuth => write!(f, "NoAuth"),
-            AuthMethod::GssApi => write!(f, "GssApi"),
-            AuthMethod::Password => write!(f, "UserPass"),
-            AuthMethod::IanaReserved(value) => write!(f, "IanaReserved({0:#x})", value),
-            AuthMethod::Private(value) => write!(f, "Private({0:#x})", value),
-            AuthMethod::NoAcceptableMethods => write!(f, "NoAcceptableMethods"),
+            Method::NoAuth => write!(f, "NoAuth"),
+            Method::GssApi => write!(f, "GssApi"),
+            Method::Password => write!(f, "UserPass"),
+            Method::IanaReserved(value) => write!(f, "IanaReserved({0:#x})", value),
+            Method::Private(value) => write!(f, "Private({0:#x})", value),
+            Method::NoAcceptableMethods => write!(f, "NoAcceptableMethods"),
         }
     }
 }

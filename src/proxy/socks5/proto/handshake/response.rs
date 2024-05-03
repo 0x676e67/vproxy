@@ -1,4 +1,4 @@
-use crate::proxy::socks5::proto::{AsyncStreamOperation, AuthMethod, StreamOperation, Version};
+use crate::proxy::socks5::proto::{AsyncStreamOperation, Method, StreamOperation, Version};
 use tokio::io::{AsyncRead, AsyncReadExt};
 
 /// SOCKS5 handshake response
@@ -12,11 +12,11 @@ use tokio::io::{AsyncRead, AsyncReadExt};
 /// ```
 #[derive(Clone, Debug)]
 pub struct Response {
-    pub method: AuthMethod,
+    pub method: Method,
 }
 
 impl Response {
-    pub fn new(method: AuthMethod) -> Self {
+    pub fn new(method: Method) -> Self {
         Self { method }
     }
 }
@@ -34,7 +34,7 @@ impl StreamOperation for Response {
 
         let mut method = [0; 1];
         r.read_exact(&mut method)?;
-        let method = AuthMethod::from(method[0]);
+        let method = Method::from(method[0]);
 
         Ok(Self { method })
     }
@@ -61,7 +61,7 @@ impl AsyncStreamOperation for Response {
             return Err(std::io::Error::new(std::io::ErrorKind::Unsupported, err));
         }
 
-        let method = AuthMethod::from(r.read_u8().await?);
+        let method = Method::from(r.read_u8().await?);
 
         Ok(Self { method })
     }

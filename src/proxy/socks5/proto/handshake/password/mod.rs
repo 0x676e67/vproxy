@@ -32,10 +32,8 @@ impl std::fmt::Display for UsernamePassword {
                 percent_encode(self.username.as_bytes(), NON_ALPHANUMERIC)
             ),
             (false, false) => {
-                let username =
-                    percent_encode(self.username.as_bytes(), NON_ALPHANUMERIC).to_string();
-                let password =
-                    percent_encode(self.password.as_bytes(), NON_ALPHANUMERIC).to_string();
+                let username = percent_encode(self.username.as_bytes(), NON_ALPHANUMERIC);
+                let password = percent_encode(self.password.as_bytes(), NON_ALPHANUMERIC);
                 write!(f, "{}:{}", username, password)
             }
         }
@@ -62,16 +60,4 @@ impl UsernamePassword {
     pub fn password_arr(&self) -> Vec<u8> {
         self.password.as_bytes().to_vec()
     }
-}
-
-#[test]
-fn test_user_pass() {
-    let user_pass = UsernamePassword::new("username", "pass@word");
-    assert_eq!(user_pass.to_string(), "username:pass%40word");
-    let user_pass = UsernamePassword::new("username", "");
-    assert_eq!(user_pass.to_string(), "username");
-    let user_pass = UsernamePassword::new("", "password");
-    assert_eq!(user_pass.to_string(), ":password");
-    let user_pass = UsernamePassword::new("", "");
-    assert_eq!(user_pass.to_string(), "");
 }

@@ -1,4 +1,4 @@
-use crate::proxy::socks5::proto::{AsyncStreamOperation, AuthMethod, StreamOperation, Version};
+use crate::proxy::socks5::proto::{AsyncStreamOperation, Method, StreamOperation, Version};
 use tokio::io::{AsyncRead, AsyncReadExt};
 
 /// SOCKS5 handshake request
@@ -12,11 +12,11 @@ use tokio::io::{AsyncRead, AsyncReadExt};
 /// ```
 #[derive(Clone, Debug)]
 pub struct Request {
-    methods: Vec<AuthMethod>,
+    methods: Vec<Method>,
 }
 
 impl Request {
-    pub fn evaluate_method(&self, server_method: AuthMethod) -> bool {
+    pub fn evaluate_method(&self, server_method: Method) -> bool {
         self.methods.iter().any(|&m| m == server_method)
     }
 }
@@ -39,7 +39,7 @@ impl StreamOperation for Request {
         let mut methods = vec![0; mlen as usize];
         r.read_exact(&mut methods)?;
 
-        let methods = methods.into_iter().map(AuthMethod::from).collect();
+        let methods = methods.into_iter().map(Method::from).collect();
 
         Ok(Self { methods })
     }
@@ -73,7 +73,7 @@ impl AsyncStreamOperation for Request {
         let mut methods = vec![0; mlen as usize];
         r.read_exact(&mut methods).await?;
 
-        let methods = methods.into_iter().map(AuthMethod::from).collect();
+        let methods = methods.into_iter().map(Method::from).collect();
 
         Ok(Self { methods })
     }

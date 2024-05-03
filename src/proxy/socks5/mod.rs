@@ -55,9 +55,9 @@ where
 {
     let server = Server::bind_with_concurrency(listen_addr, auth, concurrent).await?;
 
-    while let Ok((conn, socket)) = server.accept().await {
+    while let Ok((conn, _)) = server.accept().await {
         tokio::spawn(async move {
-            if let Err(err) = handle(conn, socket).await {
+            if let Err(err) = handle(conn).await {
                 tracing::error!("{err}");
             }
         });
@@ -65,7 +65,7 @@ where
     Ok(())
 }
 
-async fn handle<S>(conn: IncomingConnection<S>, _: SocketAddr) -> Result<()>
+async fn handle<S>(conn: IncomingConnection<S>) -> Result<()>
 where
     S: Send + Sync + 'static,
 {

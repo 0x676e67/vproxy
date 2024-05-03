@@ -2,17 +2,6 @@ use crate::BootArgs;
 use std::net::{IpAddr, SocketAddr};
 use tokio::sync::OnceCell;
 
-/// Auth Error
-#[derive(thiserror::Error, Debug)]
-pub enum AuthError {
-    #[error("Missing credentials")]
-    MissingCredentials,
-    #[error("Invalid credentials")]
-    InvalidCredentials,
-    #[error("Unauthorized")]
-    Unauthorized,
-}
-
 /// Ip address whitelist
 static IP_WHITELIST: OnceCell<Option<Vec<IpAddr>>> = OnceCell::const_new();
 
@@ -28,14 +17,9 @@ pub fn init_ip_whitelist(args: &BootArgs) {
 }
 
 /// Valid Ip address whitelist
-pub fn authenticate_ip(socket: SocketAddr) -> Result<(), AuthError> {
+pub fn authenticate_ip(socket: SocketAddr) -> bool {
     match IP_WHITELIST.get() {
-        Some(Some(ip)) => {
-            if ip.contains(&socket.ip()) {
-                return Ok(());
-            }
-            Err(AuthError::Unauthorized)
-        }
-        Some(None) | None => Ok(()),
+        Some(Some(ip)) => ip.contains(&socket.ip()),
+        Some(None) | None => true,
     }
 }
