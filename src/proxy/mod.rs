@@ -56,7 +56,7 @@ pub async fn run(args: BootArgs) -> crate::Result<()> {
                 bind: args.bind,
                 concurrent: args.concurrent,
                 auth,
-                connector: connect::Connector::new(args.ipv6_subnet, args.fallback),
+                connector: connect::Connector::new(args.cidr, args.fallback),
             })
             .await
         }
@@ -65,7 +65,7 @@ pub async fn run(args: BootArgs) -> crate::Result<()> {
                 bind: args.bind,
                 concurrent: args.concurrent,
                 auth,
-                connector: connect::Connector::new(args.ipv6_subnet, args.fallback),
+                connector: connect::Connector::new(args.cidr, args.fallback),
             })
             .await
         }

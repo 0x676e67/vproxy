@@ -17,8 +17,8 @@ An easy and powerful Rust HTTP/Socks5 proxy that allows initiating network reque
 ### Features
 
 - IPv4/IPv6 priority
-- Service binding `IPv6-CIDR` address
-- Fallback address when `Ipv6-CIDR` address is unreachable
+- Service binding `IP-CIDR` address
+- Fallback address when `Ip-CIDR` address is unreachable
 - Basic authentication
 - IP whitelist
 - Proxy support (HTTP, SOCKS5)
@@ -90,7 +90,7 @@ Options:
   -V, --version  Print version
 
 $ vproxy run -h
-Run server
+Run proxyserver
 
 Usage: vproxy run [OPTIONS] <COMMAND>
 
@@ -100,13 +100,13 @@ Commands:
   help    Print this message or the help of the given subcommand(s)
 
 Options:
-      --debug                      Debug mode [env: VPROXY_DEBUG=]
-  -b, --bind <BIND>                Bind address [default: 0.0.0.0:8100]
-  -c, --concurrent <CONCURRENT>    Concurrent connections [default: 1024]
-  -w, --whitelist <WHITELIST>      IP addresses whitelist, e.g. 47.253.53.46,47.253.81.245
-  -i, --ipv6-subnet <IPV6_SUBNET>  Ipv6 subnet, e.g. 2001:db8::/32
-  -f, --fallback <FALLBACK>        Fallback address
-  -h, --help                       Print help
+      --debug                    Debug mode [env: VPROXY_DEBUG=]
+  -b, --bind <BIND>              Bind address [default: 0.0.0.0:8100]
+  -c, --concurrent <CONCURRENT>  Concurrent connections [default: 1024]
+  -w, --whitelist <WHITELIST>    IP addresses whitelist, e.g. 47.253.53.46,47.253.81.245
+  -i, --cidr <CIDR>              Ip-CIDR, e.g. 2001:db8::/32
+  -f, --fallback <FALLBACK>      Fallback address
+  -h, --help                     Print help
 ```
 
 ### Compile

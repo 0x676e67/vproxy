@@ -83,9 +83,9 @@ pub struct BootArgs {
     /// IP addresses whitelist, e.g. 47.253.53.46,47.253.81.245
     #[clap(short, long, value_parser, value_delimiter = ',')]
     whitelist: Vec<std::net::IpAddr>,
-    /// Ipv6 subnet, e.g. 2001:db8::/32
-    #[clap(short, long)]
-    ipv6_subnet: Option<cidr::Ipv6Cidr>,
+    /// Ip-CIDR, e.g. 2001:db8::/32
+    #[clap(short = 'i', long)]
+    cidr: Option<cidr::IpCidr>,
     /// Fallback address
     #[clap(short, long)]
     fallback: Option<std::net::IpAddr>,

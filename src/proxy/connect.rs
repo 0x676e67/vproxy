@@ -1,7 +1,7 @@
-use cidr::Ipv6Cidr;
+use cidr::IpCidr;
 use hyper_util::client::legacy::connect::HttpConnector;
 use rand::Rng;
-use std::net::{IpAddr, Ipv6Addr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use tokio::net::{lookup_host, TcpSocket, TcpStream};
 
 /// `Connector` struct is used to create HTTP connectors, optionally configured
@@ -10,7 +10,7 @@ use tokio::net::{lookup_host, TcpSocket, TcpStream};
 pub struct Connector {
     /// Optional IPv6 CIDR (Classless Inter-Domain Routing), used to optionally
     /// configure an IPv6 address.
-    cidr: Option<Ipv6Cidr>,
+    cidr: Option<IpCidr>,
     /// Optional IP address as a fallback option in case of connection failure.
     fallback: Option<IpAddr>,
 }
@@ -18,7 +18,7 @@ pub struct Connector {
 impl Connector {
     /// Constructs a new `Connector` instance, accepting optional IPv6 CIDR and
     /// fallback IP address as parameters.
-    pub(super) fn new(cidr: Option<Ipv6Cidr>, fallback: Option<IpAddr>) -> Self {
+    pub(super) fn new(cidr: Option<IpCidr>, fallback: Option<IpAddr>) -> Self {
         Connector { cidr, fallback }
     }
 
@@ -29,11 +29,19 @@ impl Connector {
         let mut connector = HttpConnector::new();
 
         match (self.cidr, self.fallback) {
-            (Some(v6), Some(IpAddr::V4(v4))) => {
-                let v6 = get_rand_ipv6(v6.first_address().into(), v6.network_length());
+            (Some(IpCidr::V6(cidr)), Some(IpAddr::V4(v4))) => {
+                let v6 = get_rand_ipv6(cidr.first_address().into(), cidr.network_length());
                 connector.set_local_addresses(v4, v6);
             }
-            (Some(v6), None) => {
+            (Some(IpCidr::V4(cidr)), Some(IpAddr::V6(v6))) => {
+                let v4 = get_rand_ipv4(cidr.first_address().into(), cidr.network_length());
+                connector.set_local_addresses(v4, v6);
+            }
+            (Some(IpCidr::V4(cidr)), None) => {
+                let v6 = get_rand_ipv4(cidr.first_address().into(), cidr.network_length());
+                connector.set_local_address(Some(v6.into()));
+            }
+            (Some(IpCidr::V6(v6)), None) => {
                 let v6 = get_rand_ipv6(v6.first_address().into(), v6.network_length());
                 connector.set_local_address(Some(v6.into()));
             }
@@ -59,7 +67,7 @@ impl Connector {
             _ => TcpStream::connect(addr).await,
         }
         .and_then(|stream| {
-            tracing::info!(": {} via {}", addr, stream.local_addr()?);
+            tracing::info!("{} via {}", addr, stream.local_addr()?);
             Ok(stream)
         })
     }
@@ -97,15 +105,32 @@ impl Connector {
 /// Try to connect with ipv6 and fallback to ipv4/ipv6
 async fn try_connect_with_ipv6_and_fallback(
     target_addr: SocketAddr,
-    cidr: Ipv6Cidr,
+    cidr: IpCidr,
     fallback: Option<IpAddr>,
 ) -> std::io::Result<TcpStream> {
-    let socket = TcpSocket::new_v6()?;
-    let bind_addr = SocketAddr::new(
-        get_rand_ipv6(cidr.first_address().into(), cidr.network_length()).into(),
-        0,
-    );
-    socket.bind(bind_addr)?;
+    let (bind, socket) = match cidr {
+        IpCidr::V4(cidr) => {
+            let socket = TcpSocket::new_v4()?;
+            (
+                IpAddr::V4(get_rand_ipv4(
+                    cidr.first_address().into(),
+                    cidr.network_length(),
+                )),
+                socket,
+            )
+        }
+        IpCidr::V6(cidr) => {
+            let socket = TcpSocket::new_v6()?;
+            (
+                IpAddr::V6(get_rand_ipv6(
+                    cidr.first_address().into(),
+                    cidr.network_length(),
+                )),
+                socket,
+            )
+        }
+    };
+    socket.bind(SocketAddr::new(bind, 0))?;
 
     // Try to connect with ipv6
     match socket.connect(target_addr).await {
@@ -143,6 +168,15 @@ fn create_socket_for_ip(ip: IpAddr) -> std::io::Result<TcpSocket> {
         IpAddr::V4(_) => TcpSocket::new_v4(),
         IpAddr::V6(_) => TcpSocket::new_v6(),
     }
+}
+
+/// Get a random ipv4 address
+fn get_rand_ipv4(mut ipv4: u32, prefix_len: u8) -> Ipv4Addr {
+    let rand: u32 = rand::thread_rng().gen();
+    let net_part = (ipv4 >> (32 - prefix_len)) << (32 - prefix_len);
+    let host_part = (rand << prefix_len) >> prefix_len;
+    ipv4 = net_part | host_part;
+    ipv4.into()
 }
 
 /// Get a random ipv6 address
