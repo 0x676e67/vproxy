@@ -12,10 +12,7 @@ pub struct Connector {
 
 impl Connector {
     pub(super) fn new(cidr: Option<Ipv6Cidr>, fallback: Option<IpAddr>) -> Self {
-        Connector {
-            cidr,
-            fallback,
-        }
+        Connector { cidr, fallback }
     }
 
     pub fn new_http_connector(&self) -> HttpConnector {
