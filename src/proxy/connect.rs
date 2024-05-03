@@ -58,6 +58,10 @@ impl Connector {
             (None, Some(ip)) => try_connect_with_fallback(addr, ip).await,
             _ => TcpStream::connect(addr).await,
         }
+        .and_then(|stream| {
+            tracing::info!(": {} via {}", addr, stream.local_addr()?);
+            Ok(stream)
+        })
     }
 
     /// Attempts to establish a connection to a given domain and port.

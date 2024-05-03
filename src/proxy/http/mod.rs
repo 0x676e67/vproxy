@@ -141,7 +141,6 @@ impl HttpProxy {
         for addr in addr_str.to_socket_addrs()? {
             match self.connector.try_connect(addr).await {
                 Ok(mut server) => {
-                    tracing::info!("tunnel: {} via {}", addr_str, server.local_addr()?);
                     return tunnel_proxy(upgraded, &mut server).await;
                 }
                 Err(err) => {

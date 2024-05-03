@@ -95,7 +95,6 @@ where
                 let mut conn = connect
                     .reply(Reply::Succeeded, Address::unspecified())
                     .await?;
-                tracing::info!("{} -> {}", conn.peer_addr()?, target.peer_addr()?);
                 tokio::io::copy_bidirectional(&mut target, &mut conn).await?;
             } else {
                 let mut conn = connect
@@ -184,4 +183,3 @@ async fn handle_s5_upd_associate(associate: UdpAssociate<associate::NeedReply>) 
         }
     }
 }
-
