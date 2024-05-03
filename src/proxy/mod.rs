@@ -8,7 +8,11 @@ use std::net::{IpAddr, SocketAddr};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 struct ProxyContext {
+    /// Bind address
     pub bind: SocketAddr,
+    /// Number of concurrent connections
+    pub concurrent: usize,
+    /// Authentication type
     pub auth: AuthMode,
     /// Ipv6 subnet, e.g. 2001:db8::/32
     pub ipv6_subnet: Option<cidr::Ipv6Cidr>,
@@ -49,19 +53,21 @@ pub async fn run(args: BootArgs) -> crate::Result<()> {
     match args.proxy {
         Proxy::Http { auth } => {
             http::run(ProxyContext {
+                bind: args.bind,
+                concurrent: args.concurrent,
                 auth,
                 ipv6_subnet: args.ipv6_subnet,
                 fallback: args.fallback,
-                bind: args.bind,
             })
             .await
         }
         Proxy::Socks5 { auth } => {
             socks5::run(ProxyContext {
+                bind: args.bind,
+                concurrent: args.concurrent,
                 auth,
                 ipv6_subnet: args.ipv6_subnet,
                 fallback: args.fallback,
-                bind: args.bind,
             })
             .await
         }

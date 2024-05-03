@@ -1,12 +1,10 @@
+mod auth;
 pub mod error;
 
-use self::error::ProxyError;
+use self::{auth::AuthenticationMethod, error::ProxyError};
 use super::ProxyContext;
-use crate::proxy::auth::{self, AuthError};
-use base64::Engine;
 use bytes::Bytes;
 use cidr::Ipv6Cidr;
-use http::{header, HeaderMap};
 use http_body_util::{combinators::BoxBody, BodyExt, Empty, Full};
 use hyper::{
     server::conn::http1, service::service_fn, upgrade::Upgraded, Method, Request, Response,
@@ -20,60 +18,27 @@ use std::{
     net::{IpAddr, Ipv6Addr, SocketAddr, ToSocketAddrs},
     sync::Arc,
 };
-use tokio::net::{TcpListener, TcpSocket, TcpStream};
-
-#[derive(Clone)]
-pub enum AuthenticationMethod {
-    None,
-    Password { username: String, password: String },
-}
-
-impl AuthenticationMethod {
-    pub fn auth_basic_auth_realm(&self, headers: &HeaderMap) -> Result<(), AuthError> {
-        match self {
-            AuthenticationMethod::None => Ok(()),
-            AuthenticationMethod::Password { username, password } => {
-                let hv = headers
-                    .get(header::PROXY_AUTHORIZATION)
-                    .ok_or_else(|| AuthError::MissingCredentials)?;
-
-                // extract basic auth
-                let basic_auth = hv
-                    .to_str()
-                    .map_err(|_| AuthError::InvalidCredentials)?
-                    .strip_prefix("Basic ")
-                    .ok_or_else(|| AuthError::InvalidCredentials)?;
-
-                // convert to string
-                let auth_bytes = base64::engine::general_purpose::STANDARD
-                    .decode(basic_auth.as_bytes())
-                    .map_err(|_| AuthError::InvalidCredentials)?;
-                let auth_str =
-                    String::from_utf8(auth_bytes).map_err(|_| AuthError::InvalidCredentials)?;
-                let (auth_username, auth_password) = auth_str
-                    .split_once(':')
-                    .ok_or_else(|| AuthError::InvalidCredentials)?;
-
-                // check credentials
-                if username.ne(auth_username) || password.ne(auth_password) {
-                    return Err(AuthError::Unauthorized);
-                }
-
-                Ok(())
-            }
-        }
-    }
-}
+use tokio::net::{TcpSocket, TcpStream};
 
 pub async fn run(ctx: ProxyContext) -> crate::Result<()> {
     tracing::info!("Http server listening on {}", ctx.bind);
-    let listener = TcpListener::bind(ctx.bind).await?;
-    let http_proxy = Arc::new(HttpProxy::from(ctx));
+
+    let socket = if ctx.bind.is_ipv4() {
+        tokio::net::TcpSocket::new_v4()?
+    } else {
+        tokio::net::TcpSocket::new_v6()?
+    };
+    socket.set_reuseaddr(true)?;
+    socket.bind(ctx.bind)?;
+    let listener = socket.listen(ctx.concurrent as u32)?;
+
+    // Create a proxy instance
+    let proxy = Arc::new(HttpProxy::from(ctx));
 
     loop {
         let (stream, socket) = listener.accept().await?;
         let io = TokioIo::new(stream);
-        let http_proxy = http_proxy.clone();
+        let http_proxy = proxy.clone();
 
         tokio::task::spawn(async move {
             if let Err(err) = http1::Builder::new()
@@ -82,7 +47,6 @@ pub async fn run(ctx: ProxyContext) -> crate::Result<()> {
                 .serve_connection(
                     io,
                     service_fn(move |req| {
-                        let http_proxy = http_proxy.clone();
                         <HttpProxy as Clone>::clone(&http_proxy).proxy(socket, req)
                     }),
                 )
@@ -129,9 +93,7 @@ impl HttpProxy {
     ) -> Result<Response<BoxBody<Bytes, hyper::Error>>, ProxyError> {
         tracing::info!("request: {req:?}, {socket:?}", req = req, socket = socket);
 
-        // Check Ip address whitelist or basic auth
-        auth::valid_ip_whitelist(socket)
-            .or_else(|_| self.auth.auth_basic_auth_realm(req.headers()))?;
+        self.auth.auth_basic_auth_realm(req.headers())?;
 
         if Method::CONNECT == req.method() {
             // Received an HTTP request like:

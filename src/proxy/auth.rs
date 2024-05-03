@@ -27,6 +27,7 @@ pub fn init_ip_whitelist(args: &BootArgs) {
 }
 
 /// Valid Ip address whitelist
+#[allow(dead_code)]
 pub fn valid_ip_whitelist(socket: SocketAddr) -> Result<(), AuthError> {
     if let Some(Some(ip)) = IP_WHITELIST.get() {
         if ip.contains(&socket.ip()) {

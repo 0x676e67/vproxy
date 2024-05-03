@@ -77,6 +77,9 @@ pub struct BootArgs {
     /// Bind address
     #[clap(short, long, default_value = "0.0.0.0:8100")]
     bind: SocketAddr,
+    /// Concurrent connections
+    #[clap(short, long, default_value = "1024")]
+    concurrent: usize,
     /// IP addresses whitelist, e.g. 47.253.53.46,47.253.81.245
     #[clap(short, long, value_parser, value_delimiter = ',')]
     whitelist: Vec<std::net::IpAddr>,

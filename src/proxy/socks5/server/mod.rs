@@ -32,10 +32,14 @@ impl<O: 'static + std::marker::Send> Server<O> {
         Self { listener, auth }
     }
 
-    /// Create a new socks5 server on the given socket address and
-    /// authentication method.
+    /// Create a new socks5 server on the given socket address, authentication
+    /// method, and concurrency level.
     #[inline]
-    pub async fn bind(addr: SocketAddr, auth: AuthAdaptor<O>) -> std::io::Result<Self> {
+    pub async fn bind_with_concurrency(
+        addr: SocketAddr,
+        auth: AuthAdaptor<O>,
+        concurrent: u32,
+    ) -> std::io::Result<Self> {
         let socket = if addr.is_ipv4() {
             tokio::net::TcpSocket::new_v4()?
         } else {
@@ -43,8 +47,15 @@ impl<O: 'static + std::marker::Send> Server<O> {
         };
         socket.set_reuseaddr(true)?;
         socket.bind(addr)?;
-        let listener = socket.listen(1024)?;
+        let listener = socket.listen(concurrent)?;
         Ok(Self::new(listener, auth))
+    }
+
+    /// Create a new socks5 server on the given socket address and
+    /// authentication method with a default concurrency level of 1024.
+    #[inline]
+    pub async fn bind(addr: SocketAddr, auth: AuthAdaptor<O>) -> std::io::Result<Self> {
+        Self::bind_with_concurrency(addr, auth, 1024).await
     }
 
     /// Accept an [`IncomingConnection`](https://docs.rs/socks5-impl/latest/socks5_impl/server/connection/struct.IncomingConnection.html).

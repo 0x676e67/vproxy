@@ -29,12 +29,12 @@ pub async fn run(ctx: ProxyContext) -> crate::Result<()> {
     match (ctx.auth.username, ctx.auth.password) {
         (Some(username), Some(password)) => {
             let auth = Arc::new(auth::UserKeyAuth::new(&username, &password));
-            event_loop(auth, ctx.bind, Some(exiting_flag)).await?;
+            event_loop(auth, ctx.bind, ctx.concurrent as u32, Some(exiting_flag)).await?;
         }
 
         _ => {
             let auth = Arc::new(auth::NoAuth);
-            event_loop(auth, ctx.bind, Some(exiting_flag)).await?;
+            event_loop(auth, ctx.bind, ctx.concurrent as u32, Some(exiting_flag)).await?;
         }
     }
 
@@ -49,12 +49,13 @@ pub type Result<T, E = Error> = std::result::Result<T, E>;
 async fn event_loop<S>(
     auth: auth::AuthAdaptor<S>,
     listen_addr: SocketAddr,
+    concurrent: u32,
     exiting_flag: Option<Arc<AtomicBool>>,
 ) -> Result<()>
 where
     S: Send + Sync + 'static,
 {
-    let server = Server::bind(listen_addr, auth).await?;
+    let server = Server::bind_with_concurrency(listen_addr, auth, concurrent).await?;
 
     while let Ok((conn, _)) = server.accept().await {
         if let Some(exiting_flag) = &exiting_flag {
