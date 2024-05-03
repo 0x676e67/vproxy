@@ -2,12 +2,10 @@ mod auth;
 mod http;
 mod socks5;
 
-use std::net::{IpAddr, SocketAddr};
-
-pub use socks5::Error;
-use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
-
 use crate::{AuthMode, BootArgs, Proxy};
+pub use socks5::Error;
+use std::net::{IpAddr, SocketAddr};
+use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 struct ProxyContext {
     pub bind: SocketAddr,

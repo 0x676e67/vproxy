@@ -1,16 +1,6 @@
-use std::net::{IpAddr, SocketAddr};
-
-use tokio::sync::OnceCell;
-
 use crate::BootArgs;
-
-/// Use this trait to handle a custom authentication on your end.
-pub trait Authentication: Send + Sync {
-    type Item;
-
-    /// Authenticate the user
-    async fn authenticate(&self, credentials: Option<(String, String)>) -> Option<Self::Item>;
-}
+use std::net::{IpAddr, SocketAddr};
+use tokio::sync::OnceCell;
 
 /// Auth Error
 #[derive(thiserror::Error, Debug)]

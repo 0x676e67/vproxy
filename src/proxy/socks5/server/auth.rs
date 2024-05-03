@@ -1,10 +1,8 @@
-use std::sync::Arc;
-
+use crate::proxy::socks5::proto::{handshake::password, AsyncStreamOperation, AuthMethod, UserKey};
 use as_any::AsAny;
 use async_trait::async_trait;
+use std::sync::Arc;
 use tokio::net::TcpStream;
-
-use crate::proxy::socks5::proto::{handshake::password, AsyncStreamOperation, AuthMethod, UserKey};
 
 /// This trait is for defining the socks5 authentication method.
 ///

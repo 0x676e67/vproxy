@@ -1,6 +1,5 @@
-use tokio::io::{AsyncRead, AsyncReadExt};
-
 use crate::proxy::socks5::proto::{Address, AsyncStreamOperation, StreamOperation};
+use tokio::io::{AsyncRead, AsyncReadExt};
 
 /// SOCKS5 UDP packet header
 ///

@@ -1,12 +1,10 @@
+use crate::{proxy, BootArgs};
+use daemonize::Daemonize;
 use std::{
     fs::{File, Permissions},
     os::unix::fs::PermissionsExt,
     path::Path,
 };
-
-use daemonize::Daemonize;
-
-use crate::{proxy, BootArgs};
 
 #[cfg(target_family = "unix")]
 pub(crate) const PID_PATH: &str = "/var/run/vproxy.pid";

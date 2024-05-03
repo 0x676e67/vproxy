@@ -1,6 +1,5 @@
-use tokio::io::{AsyncRead, AsyncReadExt};
-
 use crate::proxy::socks5::proto::{AsyncStreamOperation, StreamOperation};
+use tokio::io::{AsyncRead, AsyncReadExt};
 
 #[repr(u8)]
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]

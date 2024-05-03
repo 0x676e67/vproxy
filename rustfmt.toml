@@ -2,7 +2,7 @@ unstable_features = true
 
 version = "Two"
 
-group_imports = "StdExternalCrate"
+group_imports = "One"
 imports_granularity = "Crate"
 reorder_imports = true
 

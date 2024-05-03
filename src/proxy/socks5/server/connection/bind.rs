@@ -1,3 +1,4 @@
+use crate::proxy::socks5::proto::{Address, AsyncStreamOperation, Reply, Response};
 use std::{
     marker::PhantomData,
     net::SocketAddr,
@@ -5,7 +6,6 @@ use std::{
     task::{Context, Poll},
     time::Duration,
 };
-
 use tokio::{
     io::{AsyncRead, AsyncWrite, AsyncWriteExt, ReadBuf},
     net::{
@@ -13,8 +13,6 @@ use tokio::{
         TcpStream,
     },
 };
-
-use crate::proxy::socks5::proto::{Address, AsyncStreamOperation, Reply, Response};
 
 /// Socks5 command type `Bind`
 ///

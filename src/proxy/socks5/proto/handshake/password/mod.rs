@@ -1,12 +1,11 @@
 mod request;
 mod response;
 
-use serde::{Deserialize, Serialize};
-
 pub use self::{
     request::Request,
     response::{Response, Status},
 };
+use serde::{Deserialize, Serialize};
 
 pub const SUBNEGOTIATION_VERSION: u8 = 0x01;
 

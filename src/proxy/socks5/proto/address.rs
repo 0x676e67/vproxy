@@ -1,12 +1,10 @@
+use crate::proxy::socks5::proto::{AsyncStreamOperation, StreamOperation};
+use bytes::BufMut;
 use std::{
     io::Cursor,
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, ToSocketAddrs},
 };
-
-use bytes::BufMut;
 use tokio::io::{AsyncRead, AsyncReadExt};
-
-use crate::proxy::socks5::proto::{AsyncStreamOperation, StreamOperation};
 
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 #[repr(u8)]

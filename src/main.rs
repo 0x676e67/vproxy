@@ -6,9 +6,8 @@ mod proxy;
 mod update;
 mod util;
 
-use std::net::SocketAddr;
-
 use clap::{Args, Parser, Subcommand};
+use std::net::SocketAddr;
 
 type Result<T, E = error::Error> = std::result::Result<T, E>;
 

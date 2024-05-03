@@ -2,18 +2,6 @@ pub mod error;
 pub mod proto;
 pub mod server;
 
-use std::{
-    net::{SocketAddr, ToSocketAddrs},
-    sync::{atomic::AtomicBool, Arc},
-};
-
-use as_any::AsAny;
-pub use error::Error;
-use tokio::{
-    net::{TcpStream, UdpSocket},
-    sync::Mutex,
-};
-
 use self::{
     proto::{Address, Reply, UdpHeader},
     server::{
@@ -23,6 +11,16 @@ use self::{
     },
 };
 use super::ProxyContext;
+use as_any::AsAny;
+pub use error::Error;
+use std::{
+    net::{SocketAddr, ToSocketAddrs},
+    sync::{atomic::AtomicBool, Arc},
+};
+use tokio::{
+    net::{TcpStream, UdpSocket},
+    sync::Mutex,
+};
 
 pub async fn run(ctx: ProxyContext) -> crate::Result<()> {
     tracing::info!("Socks5 server listening on {}", ctx.bind);

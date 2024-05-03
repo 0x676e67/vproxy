@@ -1,8 +1,7 @@
-use tokio::io::{AsyncRead, AsyncReadExt};
-
 use crate::proxy::socks5::proto::{
     Address, AsyncStreamOperation, Command, StreamOperation, Version,
 };
+use tokio::io::{AsyncRead, AsyncReadExt};
 
 /// SOCKS5 request
 ///

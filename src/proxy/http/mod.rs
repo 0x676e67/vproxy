@@ -1,10 +1,8 @@
 pub mod error;
 
-use std::{
-    net::{IpAddr, Ipv6Addr, SocketAddr, ToSocketAddrs},
-    sync::Arc,
-};
-
+use self::error::ProxyError;
+use super::ProxyContext;
+use crate::proxy::auth::{self, AuthError};
 use base64::Engine;
 use bytes::Bytes;
 use cidr::Ipv6Cidr;
@@ -18,11 +16,11 @@ use hyper_util::{
     rt::{TokioExecutor, TokioIo},
 };
 use rand::Rng;
+use std::{
+    net::{IpAddr, Ipv6Addr, SocketAddr, ToSocketAddrs},
+    sync::Arc,
+};
 use tokio::net::{TcpListener, TcpSocket, TcpStream};
-
-use self::error::ProxyError;
-use super::{auth::Authentication, ProxyContext};
-use crate::proxy::auth::{self, AuthError};
 
 #[derive(Clone)]
 pub enum AuthenticationMethod {
@@ -63,25 +61,6 @@ impl AuthenticationMethod {
 
                 Ok(())
             }
-        }
-    }
-}
-
-impl Authentication for AuthenticationMethod {
-    type Item = ();
-
-    async fn authenticate(&self, credentials: Option<(String, String)>) -> Option<Self::Item> {
-        match self {
-            AuthenticationMethod::None => Some(()),
-            AuthenticationMethod::Password { username, password } => credentials
-                .map(|(u, p)| {
-                    if u.eq(username) && p.eq(password) {
-                        Some(())
-                    } else {
-                        None
-                    }
-                })
-                .flatten(),
         }
     }
 }

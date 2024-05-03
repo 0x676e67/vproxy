@@ -1,7 +1,3 @@
-use std::{net::SocketAddr, time::Duration};
-
-use tokio::{io::AsyncWriteExt, net::TcpStream};
-
 use self::{associate::UdpAssociate, bind::Bind, connect::Connect};
 use crate::proxy::{
     socks5::{
@@ -10,6 +6,8 @@ use crate::proxy::{
     },
     Error,
 };
+use std::{net::SocketAddr, time::Duration};
+use tokio::{io::AsyncWriteExt, net::TcpStream};
 
 pub mod associate;
 pub mod bind;
