@@ -11,12 +11,12 @@ pub const SUBNEGOTIATION_VERSION: u8 = 0x01;
 
 /// Required for a username + password authentication.
 #[derive(Default, Debug, Eq, PartialEq, Clone, Hash, Deserialize, Serialize)]
-pub struct UserKey {
+pub struct UsernamePassword {
     pub username: String,
     pub password: String,
 }
 
-impl std::fmt::Display for UserKey {
+impl std::fmt::Display for UsernamePassword {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         use percent_encoding::{percent_encode, NON_ALPHANUMERIC};
         match (self.username.is_empty(), self.password.is_empty()) {
@@ -42,7 +42,7 @@ impl std::fmt::Display for UserKey {
     }
 }
 
-impl UserKey {
+impl UsernamePassword {
     /// Constructs `UserKey` with the specified username and a password.
     pub fn new<U, P>(username: U, password: P) -> Self
     where
@@ -65,13 +65,13 @@ impl UserKey {
 }
 
 #[test]
-fn test_user_key() {
-    let user_key = UserKey::new("username", "pass@word");
-    assert_eq!(user_key.to_string(), "username:pass%40word");
-    let user_key = UserKey::new("username", "");
-    assert_eq!(user_key.to_string(), "username");
-    let user_key = UserKey::new("", "password");
-    assert_eq!(user_key.to_string(), ":password");
-    let user_key = UserKey::new("", "");
-    assert_eq!(user_key.to_string(), "");
+fn test_user_pass() {
+    let user_pass = UsernamePassword::new("username", "pass@word");
+    assert_eq!(user_pass.to_string(), "username:pass%40word");
+    let user_pass = UsernamePassword::new("username", "");
+    assert_eq!(user_pass.to_string(), "username");
+    let user_pass = UsernamePassword::new("", "password");
+    assert_eq!(user_pass.to_string(), ":password");
+    let user_pass = UsernamePassword::new("", "");
+    assert_eq!(user_pass.to_string(), "");
 }

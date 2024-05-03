@@ -1,18 +1,23 @@
-use crate::proxy::auth::AuthError;
+use crate::proxy::auth::{self, AuthError};
 use base64::Engine;
 use http::{header, HeaderMap};
+use std::net::SocketAddr;
 
 #[derive(Clone)]
-pub enum AuthenticationMethod {
+pub enum Authenticator {
     None,
     Password { username: String, password: String },
 }
 
-impl AuthenticationMethod {
-    pub fn auth_basic_auth_realm(&self, headers: &HeaderMap) -> Result<(), AuthError> {
+impl Authenticator {
+    pub fn authenticate(&self, headers: &HeaderMap, socket: SocketAddr) -> Result<(), AuthError> {
+        // If no authentication is required, return immediately
+        if auth::authenticate_ip(socket).is_ok() {
+            return Ok(());
+        }
         match self {
-            AuthenticationMethod::None => Ok(()),
-            AuthenticationMethod::Password { username, password } => {
+            Authenticator::None => Ok(()),
+            Authenticator::Password { username, password } => {
                 let hv = headers
                     .get(header::PROXY_AUTHORIZATION)
                     .ok_or_else(|| AuthError::MissingCredentials)?;
@@ -36,6 +41,7 @@ impl AuthenticationMethod {
 
                 // check credentials
                 if username.ne(auth_username) || password.ne(auth_password) {
+                    tracing::warn!("Unauthorized access from {}", socket);
                     return Err(AuthError::Unauthorized);
                 }
 

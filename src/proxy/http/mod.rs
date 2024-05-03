@@ -1,7 +1,7 @@
 mod auth;
 pub mod error;
 
-use self::{auth::AuthenticationMethod, error::ProxyError};
+use self::{auth::Authenticator, error::ProxyError};
 use super::ProxyContext;
 use bytes::Bytes;
 use cidr::Ipv6Cidr;
@@ -62,7 +62,7 @@ pub async fn run(ctx: ProxyContext) -> crate::Result<()> {
 #[derive(Clone)]
 struct HttpProxy {
     /// Authentication type
-    auth: AuthenticationMethod,
+    auth: Authenticator,
     /// Ipv6 subnet, e.g. 2001:db8::/32
     ipv6_subnet: Option<cidr::Ipv6Cidr>,
     /// Fallback address
@@ -73,11 +73,9 @@ impl From<ProxyContext> for HttpProxy {
     fn from(ctx: ProxyContext) -> Self {
         Self {
             auth: match (ctx.auth.username, ctx.auth.password) {
-                (Some(username), Some(password)) => {
-                    AuthenticationMethod::Password { username, password }
-                }
+                (Some(username), Some(password)) => Authenticator::Password { username, password },
 
-                _ => AuthenticationMethod::None,
+                _ => Authenticator::None,
             },
             ipv6_subnet: ctx.ipv6_subnet,
             fallback: ctx.fallback,
@@ -93,7 +91,8 @@ impl HttpProxy {
     ) -> Result<Response<BoxBody<Bytes, hyper::Error>>, ProxyError> {
         tracing::info!("request: {req:?}, {socket:?}", req = req, socket = socket);
 
-        self.auth.auth_basic_auth_realm(req.headers())?;
+        // Check if the client is authorized
+        self.auth.authenticate(req.headers(), socket)?;
 
         if Method::CONNECT == req.method() {
             // Received an HTTP request like:

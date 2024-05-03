@@ -9,7 +9,7 @@ mod udp;
 pub use self::{
     address::Address,
     command::Command,
-    handshake::{password::UserKey, AuthMethod},
+    handshake::{password::UsernamePassword, AuthMethod},
     reply::Reply,
     request::Request,
     response::Response,

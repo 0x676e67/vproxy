@@ -7,7 +7,7 @@ pub enum AuthMethod {
     /// GSS API.
     GssApi              = 0x01,
     /// A username + password authentication.
-    UserPass            = 0x02,
+    Password            = 0x02,
     /// IANA reserved 0x03..=0x7f.
     IanaReserved(u8),
     /// A private authentication method 0x80..=0xfe.
@@ -21,7 +21,7 @@ impl From<u8> for AuthMethod {
         match value {
             0x00 => AuthMethod::NoAuth,
             0x01 => AuthMethod::GssApi,
-            0x02 => AuthMethod::UserPass,
+            0x02 => AuthMethod::Password,
             0x03..=0x7f => AuthMethod::IanaReserved(value),
             0x80..=0xfe => AuthMethod::Private(value),
             0xff => AuthMethod::NoAcceptableMethods,
@@ -40,7 +40,7 @@ impl From<&AuthMethod> for u8 {
         match value {
             AuthMethod::NoAuth => 0x00,
             AuthMethod::GssApi => 0x01,
-            AuthMethod::UserPass => 0x02,
+            AuthMethod::Password => 0x02,
             AuthMethod::IanaReserved(value) => *value,
             AuthMethod::Private(value) => *value,
             AuthMethod::NoAcceptableMethods => 0xff,
@@ -53,7 +53,7 @@ impl std::fmt::Display for AuthMethod {
         match self {
             AuthMethod::NoAuth => write!(f, "NoAuth"),
             AuthMethod::GssApi => write!(f, "GssApi"),
-            AuthMethod::UserPass => write!(f, "UserPass"),
+            AuthMethod::Password => write!(f, "UserPass"),
             AuthMethod::IanaReserved(value) => write!(f, "IanaReserved({0:#x})", value),
             AuthMethod::Private(value) => write!(f, "Private({0:#x})", value),
             AuthMethod::NoAcceptableMethods => write!(f, "NoAcceptableMethods"),

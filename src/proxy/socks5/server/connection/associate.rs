@@ -65,9 +65,6 @@ impl<S: Default> UdpAssociate<S> {
 
     /// Reads the linger duration for this socket by getting the `SO_LINGER`
     /// option.
-    ///
-    /// For more information about this option, see
-    /// [set_linger](https://docs.rs/socks5-impl/latest/socks5_impl/server/connection/struct.Connect.html#method.set_linger).
     #[inline]
     pub fn linger(&self) -> std::io::Result<Option<Duration>> {
         self.stream.linger()
@@ -90,9 +87,6 @@ impl<S: Default> UdpAssociate<S> {
     }
 
     /// Gets the value of the `TCP_NODELAY` option on this socket.
-    ///
-    /// For more information about this option, see
-    /// [set_nodelay](https://docs.rs/socks5-impl/latest/socks5_impl/server/connection/struct.Connect.html#method.set_nodelay).
     #[inline]
     pub fn nodelay(&self) -> std::io::Result<bool> {
         self.stream.nodelay()
@@ -110,9 +104,6 @@ impl<S: Default> UdpAssociate<S> {
     }
 
     /// Gets the value of the `IP_TTL` option for this socket.
-    ///
-    /// For more information about this option, see
-    /// [set_ttl](https://docs.rs/socks5-impl/latest/socks5_impl/server/connection/struct.Connect.html#method.set_ttl).
     pub fn ttl(&self) -> std::io::Result<u32> {
         self.stream.ttl()
     }
@@ -222,7 +213,6 @@ impl<S> From<UdpAssociate<S>> for TcpStream {
 /// [`UdpSocket::from::<AssociatedUdpSocket>()`](#
 /// impl-From<AssociatedUdpSocket>).
 ///
-/// [`AssociatedUdpSocket`](https://docs.rs/socks5-impl/latest/socks5_impl/server/connection/associate/struct.AssociatedUdpSocket.html)
 /// can be used as the associated UDP socket.
 #[derive(Debug)]
 pub struct AssociatedUdpSocket {

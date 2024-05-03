@@ -47,10 +47,6 @@ impl<O: 'static> IncomingConnection<O> {
     }
 
     /// Reads the linger duration for this socket by getting the `SO_LINGER`
-    /// option.
-    ///
-    /// For more information about this option, see
-    /// [set_linger](https://docs.rs/socks5-impl/latest/socks5_impl/server/connection/struct.IncomingConnection.html#method.set_linger).
     #[inline]
     pub fn linger(&self) -> std::io::Result<Option<Duration>> {
         self.stream.linger()
@@ -73,9 +69,6 @@ impl<O: 'static> IncomingConnection<O> {
     }
 
     /// Gets the value of the `TCP_NODELAY` option on this socket.
-    ///
-    /// For more information about this option, see
-    /// [set_nodelay](https://docs.rs/socks5-impl/latest/socks5_impl/server/connection/struct.IncomingConnection.html#method.set_nodelay).
     #[inline]
     pub fn nodelay(&self) -> std::io::Result<bool> {
         self.stream.nodelay()
@@ -93,9 +86,6 @@ impl<O: 'static> IncomingConnection<O> {
     }
 
     /// Gets the value of the `IP_TTL` option for this socket.
-    ///
-    /// For more information about this option, see
-    /// [set_ttl](https://docs.rs/socks5-impl/latest/socks5_impl/server/connection/struct.IncomingConnection.html#method.set_ttl).
     pub fn ttl(&self) -> std::io::Result<u32> {
         self.stream.ttl()
     }
@@ -109,21 +99,15 @@ impl<O: 'static> IncomingConnection<O> {
     }
 
     /// Perform a SOCKS5 authentication handshake using the given
-    /// [`AuthExecutor`](https://docs.rs/socks5-impl/latest/socks5_impl/server/auth/trait.AuthExecutor.html) adapter.
-    ///
-    /// If the handshake succeeds, an [`Authenticated`](https://docs.rs/socks5-impl/latest/socks5_impl/server/connection/struct.Authenticated.html)
-    /// alongs with the output of the [`AuthExecutor`](https://docs.rs/socks5-impl/latest/socks5_impl/server/auth/trait.AuthExecutor.html) adapter is returned.
-    /// Otherwise, the error and the original [`TcpStream`](https://docs.rs/tokio/latest/tokio/net/struct.TcpStream.html) is returned.
-    ///
     /// Note that this method will not implicitly close the connection even if
     /// the handshake failed.
-    pub async fn authenticate(mut self) -> std::io::Result<(Authenticated, O)> {
+    pub async fn authenticate(mut self) -> std::io::Result<(AuthenticatedStream, O)> {
         let request = handshake::Request::retrieve_from_async_stream(&mut self.stream).await?;
         if let Some(method) = self.evaluate_request(&request) {
             let response = handshake::Response::new(method);
             response.write_to_async_stream(&mut self.stream).await?;
             let output = self.auth.execute(&mut self.stream).await;
-            Ok((Authenticated::new(self.stream), output))
+            Ok((AuthenticatedStream::new(self.stream), output))
         } else {
             let response = handshake::Response::new(AuthMethod::NoAcceptableMethods);
             response.write_to_async_stream(&mut self.stream).await?;
@@ -158,23 +142,16 @@ impl<O> From<IncomingConnection<O>> for TcpStream {
 }
 
 /// A TCP stream that has been authenticated.
-///
-/// To get the command from the SOCKS5 client, use
-/// [`wait_request`](https://docs.rs/socks5-impl/latest/socks5_impl/server/connection/struct.Authenticated.html#method.wait_request).
-///
-/// It can also be converted back into a raw [`tokio::TcpStream`](https://docs.rs/tokio/latest/tokio/net/struct.TcpStream.html) with `From` trait.
-pub struct Authenticated(TcpStream);
+/// To get the command from the SOCKS5 client, use TcpStream
+pub struct AuthenticatedStream(TcpStream);
 
-impl Authenticated {
+impl AuthenticatedStream {
     #[inline]
     fn new(stream: TcpStream) -> Self {
         Self(stream)
     }
 
     /// Waits the SOCKS5 client to send a request.
-    ///
-    /// This method will return a [`Command`](https://docs.rs/socks5-impl/latest/socks5_impl/server/connection/enum.Command.html)
-    /// if the client sends a valid command.
     ///
     /// When encountering an error, the stream will be returned alongside the
     /// error.
@@ -221,9 +198,6 @@ impl Authenticated {
 
     /// Reads the linger duration for this socket by getting the `SO_LINGER`
     /// option.
-    ///
-    /// For more information about this option, see
-    /// [set_linger](https://docs.rs/socks5-impl/latest/socks5_impl/server/connection/struct.Authenticated.html#method.set_linger).
     #[inline]
     pub fn linger(&self) -> std::io::Result<Option<Duration>> {
         self.0.linger()
@@ -246,9 +220,6 @@ impl Authenticated {
     }
 
     /// Gets the value of the `TCP_NODELAY` option on this socket.
-    ///
-    /// For more information about this option, see
-    /// [set_nodelay](https://docs.rs/socks5-impl/latest/socks5_impl/server/connection/struct.Authenticated.html#method.set_nodelay).
     #[inline]
     pub fn nodelay(&self) -> std::io::Result<bool> {
         self.0.nodelay()
@@ -266,9 +237,6 @@ impl Authenticated {
     }
 
     /// Gets the value of the `IP_TTL` option for this socket.
-    ///
-    /// For more information about this option, see
-    /// [set_ttl](https://docs.rs/socks5-impl/latest/socks5_impl/server/connection/struct.Authenticated.html#method.set_ttl).
     pub fn ttl(&self) -> std::io::Result<u32> {
         self.0.ttl()
     }
@@ -282,9 +250,9 @@ impl Authenticated {
     }
 }
 
-impl From<Authenticated> for TcpStream {
+impl From<AuthenticatedStream> for TcpStream {
     #[inline]
-    fn from(conn: Authenticated) -> Self {
+    fn from(conn: AuthenticatedStream) -> Self {
         conn.0
     }
 }

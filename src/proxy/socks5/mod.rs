@@ -6,7 +6,7 @@ use self::{
     proto::{Address, Reply, UdpHeader},
     server::{
         auth,
-        connection::{associate, associate::AssociatedUdpSocket},
+        connection::associate::{self, AssociatedUdpSocket},
         ClientConnection, IncomingConnection, Server, UdpAssociate,
     },
 };
@@ -15,7 +15,7 @@ use as_any::AsAny;
 pub use error::Error;
 use std::{
     net::{SocketAddr, ToSocketAddrs},
-    sync::{atomic::AtomicBool, Arc},
+    sync::Arc,
 };
 use tokio::{
     net::{TcpStream, UdpSocket},
@@ -24,17 +24,16 @@ use tokio::{
 
 pub async fn run(ctx: ProxyContext) -> crate::Result<()> {
     tracing::info!("Socks5 server listening on {}", ctx.bind);
-    let exiting_flag = Arc::new(AtomicBool::new(false));
 
     match (ctx.auth.username, ctx.auth.password) {
         (Some(username), Some(password)) => {
-            let auth = Arc::new(auth::UserKeyAuth::new(&username, &password));
-            event_loop(auth, ctx.bind, ctx.concurrent as u32, Some(exiting_flag)).await?;
+            let auth = Arc::new(auth::Password::new(&username, &password));
+            event_loop(auth, ctx.bind, ctx.concurrent as u32).await?;
         }
 
         _ => {
             let auth = Arc::new(auth::NoAuth);
-            event_loop(auth, ctx.bind, ctx.concurrent as u32, Some(exiting_flag)).await?;
+            event_loop(auth, ctx.bind, ctx.concurrent as u32).await?;
         }
     }
 
@@ -50,21 +49,15 @@ async fn event_loop<S>(
     auth: auth::AuthAdaptor<S>,
     listen_addr: SocketAddr,
     concurrent: u32,
-    exiting_flag: Option<Arc<AtomicBool>>,
 ) -> Result<()>
 where
     S: Send + Sync + 'static,
 {
     let server = Server::bind_with_concurrency(listen_addr, auth, concurrent).await?;
 
-    while let Ok((conn, _)) = server.accept().await {
-        if let Some(exiting_flag) = &exiting_flag {
-            if exiting_flag.load(std::sync::atomic::Ordering::Relaxed) {
-                break;
-            }
-        }
+    while let Ok((conn, socket)) = server.accept().await {
         tokio::spawn(async move {
-            if let Err(err) = handle(conn).await {
+            if let Err(err) = handle(conn, socket).await {
                 tracing::error!("{err}");
             }
         });
@@ -72,7 +65,7 @@ where
     Ok(())
 }
 
-async fn handle<S>(conn: IncomingConnection<S>) -> Result<()>
+async fn handle<S>(conn: IncomingConnection<S>, _: SocketAddr) -> Result<()>
 where
     S: Send + Sync + 'static,
 {

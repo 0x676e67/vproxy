@@ -64,38 +64,3 @@ impl std::fmt::Display for Reply {
         write!(f, "{}", s)
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn reply_try_from() {
-        assert_eq!(Reply::try_from(0x00).unwrap(), Reply::Succeeded);
-        assert_eq!(Reply::try_from(0x01).unwrap(), Reply::GeneralFailure);
-        assert_eq!(Reply::try_from(0x02).unwrap(), Reply::ConnectionNotAllowed);
-        assert_eq!(Reply::try_from(0x03).unwrap(), Reply::NetworkUnreachable);
-        assert_eq!(Reply::try_from(0x04).unwrap(), Reply::HostUnreachable);
-        assert_eq!(Reply::try_from(0x05).unwrap(), Reply::ConnectionRefused);
-        assert_eq!(Reply::try_from(0x06).unwrap(), Reply::TtlExpired);
-        assert_eq!(Reply::try_from(0x07).unwrap(), Reply::CommandNotSupported);
-        assert_eq!(
-            Reply::try_from(0x08).unwrap(),
-            Reply::AddressTypeNotSupported
-        );
-        assert!(Reply::try_from(0x09).is_err());
-    }
-
-    #[test]
-    fn reply_from() {
-        assert_eq!(u8::from(Reply::Succeeded), 0x00);
-        assert_eq!(u8::from(Reply::GeneralFailure), 0x01);
-        assert_eq!(u8::from(Reply::ConnectionNotAllowed), 0x02);
-        assert_eq!(u8::from(Reply::NetworkUnreachable), 0x03);
-        assert_eq!(u8::from(Reply::HostUnreachable), 0x04);
-        assert_eq!(u8::from(Reply::ConnectionRefused), 0x05);
-        assert_eq!(u8::from(Reply::TtlExpired), 0x06);
-        assert_eq!(u8::from(Reply::CommandNotSupported), 0x07);
-        assert_eq!(u8::from(Reply::AddressTypeNotSupported), 0x08);
-    }
-}

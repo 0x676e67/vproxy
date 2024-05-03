@@ -15,11 +15,7 @@ use tokio::{
 };
 
 /// Socks5 command type `Bind`
-///
-/// By [`wait_request()`](https://docs.rs/socks5-impl/latest/socks5_impl/server/connection/struct.Authenticated.html#method.wait_request)
-/// on an [`Authenticated`](https://docs.rs/socks5-impl/latest/socks5_impl/server/connection/struct.Authenticated.html) from SOCKS5 client,
 /// you may get a `Bind<NeedFirstReply>`. After replying the client 2 times
-/// using [`reply()`](https://docs.rs/socks5-impl/latest/socks5_impl/server/connection/struct.Bind.html#method.reply),
 /// you will get a `Bind<Ready>`, which can be used as a regular async TCP
 /// stream.
 ///
@@ -86,10 +82,6 @@ impl Bind<NeedFirstReply> {
     }
 
     /// Reads the linger duration for this socket by getting the `SO_LINGER`
-    /// option.
-    ///
-    /// For more information about this option, see
-    /// [set_linger](https://docs.rs/socks5-impl/latest/socks5_impl/server/connection/struct.Bind.html#method.set_linger).
     #[inline]
     pub fn linger(&self) -> std::io::Result<Option<Duration>> {
         self.stream.linger()
@@ -112,9 +104,6 @@ impl Bind<NeedFirstReply> {
     }
 
     /// Gets the value of the `TCP_NODELAY` option on this socket.
-    ///
-    /// For more information about this option, see
-    /// [set_nodelay](https://docs.rs/socks5-impl/latest/socks5_impl/server/connection/struct.Bind.html#method.set_nodelay).
     #[inline]
     pub fn nodelay(&self) -> std::io::Result<bool> {
         self.stream.nodelay()
@@ -132,9 +121,6 @@ impl Bind<NeedFirstReply> {
     }
 
     /// Gets the value of the `IP_TTL` option for this socket.
-    ///
-    /// For more information about this option, see
-    /// [set_ttl](https://docs.rs/socks5-impl/latest/socks5_impl/server/connection/struct.Bind.html#method.set_ttl).
     pub fn ttl(&self) -> std::io::Result<u32> {
         self.stream.ttl()
     }
@@ -195,10 +181,6 @@ impl Bind<NeedSecondReply> {
     }
 
     /// Reads the linger duration for this socket by getting the `SO_LINGER`
-    /// option.
-    ///
-    /// For more information about this option, see
-    /// [set_linger](https://docs.rs/socks5-impl/latest/socks5_impl/server/connection/struct.Bind.html#method.set_linger).
     #[inline]
     pub fn linger(&self) -> std::io::Result<Option<Duration>> {
         self.stream.linger()
@@ -221,9 +203,6 @@ impl Bind<NeedSecondReply> {
     }
 
     /// Gets the value of the `TCP_NODELAY` option on this socket.
-    ///
-    /// For more information about this option, see
-    /// [set_nodelay](https://docs.rs/socks5-impl/latest/socks5_impl/server/connection/struct.Bind.html#method.set_nodelay).
     #[inline]
     pub fn nodelay(&self) -> std::io::Result<bool> {
         self.stream.nodelay()
@@ -241,9 +220,6 @@ impl Bind<NeedSecondReply> {
     }
 
     /// Gets the value of the `IP_TTL` option for this socket.
-    ///
-    /// For more information about this option, see
-    /// [set_ttl](https://docs.rs/socks5-impl/latest/socks5_impl/server/connection/struct.Bind.html#method.set_ttl).
     pub fn ttl(&self) -> std::io::Result<u32> {
         self.stream.ttl()
     }

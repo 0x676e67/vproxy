@@ -12,13 +12,6 @@ pub use crate::proxy::socks5::server::{
     connection::{associate::UdpAssociate, ClientConnection, IncomingConnection},
 };
 
-/// The socks5 server itself.
-///
-/// The server can be constructed on a given socket address, or be created on an
-/// existing TcpListener.
-///
-/// The authentication method can be configured with the
-/// [`AuthExecutor`](https://docs.rs/socks5-impl/latest/socks5_impl/server/auth/trait.AuthExecutor.html) trait.
 pub struct Server<O> {
     listener: TcpListener,
     auth: AuthAdaptor<O>,
@@ -51,16 +44,7 @@ impl<O: 'static + std::marker::Send> Server<O> {
         Ok(Self::new(listener, auth))
     }
 
-    /// Create a new socks5 server on the given socket address and
-    /// authentication method with a default concurrency level of 1024.
-    #[inline]
-    pub async fn bind(addr: SocketAddr, auth: AuthAdaptor<O>) -> std::io::Result<Self> {
-        Self::bind_with_concurrency(addr, auth, 1024).await
-    }
-
-    /// Accept an [`IncomingConnection`](https://docs.rs/socks5-impl/latest/socks5_impl/server/connection/struct.IncomingConnection.html).
     /// The connection may not be a valid socks5 connection. You need to call
-    /// [`IncomingConnection::handshake()`](https://docs.rs/socks5-impl/latest/socks5_impl/server/connection/struct.IncomingConnection.html#method.handshake)
     /// to hand-shake it into a proper socks5 connection.
     #[inline]
     pub async fn accept(&self) -> std::io::Result<(IncomingConnection<O>, SocketAddr)> {
@@ -68,11 +52,8 @@ impl<O: 'static + std::marker::Send> Server<O> {
         Ok((IncomingConnection::new(stream, self.auth.clone()), addr))
     }
 
-    /// Polls to accept an [`IncomingConnection<O>`](https://docs.rs/socks5-impl/latest/socks5_impl/server/connection/struct.IncomingConnection.html).
-    ///
     /// The connection is only a freshly created TCP connection and may not be a
     /// valid SOCKS5 connection. You should call
-    /// [`IncomingConnection::authenticate()`](https://docs.rs/socks5-impl/latest/socks5_impl/server/connection/struct.IncomingConnection.html#method.authenticate)
     /// to perform a SOCKS5 authentication handshake.
     ///
     /// If there is no connection to accept, Poll::Pending is returned and the

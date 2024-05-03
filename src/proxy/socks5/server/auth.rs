@@ -1,52 +1,27 @@
-use crate::proxy::socks5::proto::{handshake::password, AsyncStreamOperation, AuthMethod, UserKey};
+use crate::proxy::{
+    auth,
+    socks5::proto::{handshake::password, AsyncStreamOperation, AuthMethod, UsernamePassword},
+};
 use as_any::AsAny;
 use async_trait::async_trait;
 use std::sync::Arc;
 use tokio::net::TcpStream;
 
-/// This trait is for defining the socks5 authentication method.
-///
-/// Pre-defined authentication methods can be found in the [`auth`](https://docs.rs/socks5-impl/latest/socks5_impl/server/auth/index.html) module.
-///
-/// You can create your own authentication method by implementing this trait.
-/// Since GAT is not stabled yet, [async_trait](https://docs.rs/async-trait/latest/async_trait/index.html) needs to be used.
-///
-/// # Example
-/// ```rust
-/// use socks5_impl::{protocol::AuthMethod, server::AuthExecutor};
-/// use tokio::net::TcpStream;
-///
-/// pub struct MyAuth;
-///
-/// impl AuthExecutor for MyAuth {
-///     type Output = std::io::Result<usize>;
-///
-///     fn auth_method(&self) -> AuthMethod {
-///         AuthMethod::from(0x80)
-///     }
-///
-///     async fn execute(&self, stream: &mut TcpStream) -> Self::Output {
-///         // do something
-///         Ok(1145141919810)
-///     }
-/// }
-/// ```
+pub type AuthAdaptor<O> = Arc<dyn Auth<Output = O> + Send + Sync>;
 
 #[async_trait]
-pub trait AuthExecutor {
+pub trait Auth {
     type Output: AsAny;
     fn auth_method(&self) -> AuthMethod;
     async fn execute(&self, stream: &mut TcpStream) -> Self::Output;
 }
-
-pub type AuthAdaptor<O> = Arc<dyn AuthExecutor<Output = O> + Send + Sync>;
 
 /// No authentication as the socks5 handshake method.
 #[derive(Debug, Default)]
 pub struct NoAuth;
 
 #[async_trait]
-impl AuthExecutor for NoAuth {
+impl Auth for NoAuth {
     type Output = ();
 
     fn auth_method(&self) -> AuthMethod {
@@ -57,30 +32,29 @@ impl AuthExecutor for NoAuth {
 }
 
 /// Username and password as the socks5 handshake method.
-pub struct UserKeyAuth {
-    user_key: UserKey,
-}
+pub struct Password(UsernamePassword);
 
-impl UserKeyAuth {
+impl Password {
     pub fn new(username: &str, password: &str) -> Self {
-        let user_key = UserKey::new(username, password);
-        Self { user_key }
+        let user_pass = UsernamePassword::new(username, password);
+        Self(user_pass)
     }
 }
 
 #[async_trait]
-impl AuthExecutor for UserKeyAuth {
+impl Auth for Password {
     type Output = std::io::Result<bool>;
 
     fn auth_method(&self) -> AuthMethod {
-        AuthMethod::UserPass
+        AuthMethod::Password
     }
 
     async fn execute(&self, stream: &mut TcpStream) -> Self::Output {
         use password::{Request, Response, Status::*};
         let req = Request::retrieve_from_async_stream(stream).await?;
+        let socket = stream.peer_addr()?;
 
-        let is_equal = req.user_key == self.user_key;
+        let is_equal = (req.user_pass == self.0) || auth::authenticate_ip(socket).is_ok();
         let resp = Response::new(if is_equal { Succeeded } else { Failed });
         resp.write_to_async_stream(stream).await?;
         if is_equal {

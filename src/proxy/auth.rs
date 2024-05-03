@@ -22,17 +22,20 @@ pub fn init_ip_whitelist(args: &BootArgs) {
     if !args.whitelist.is_empty() {
         IP_WHITELIST
             .set(Some(args.whitelist.clone()))
-            .expect("IP_WHITELIST should be set only once")
+            .expect("IP_WHITELIST should be set only once");
+        tracing::info!("IP whitelist: {:?}", args.whitelist);
     }
 }
 
 /// Valid Ip address whitelist
-#[allow(dead_code)]
-pub fn valid_ip_whitelist(socket: SocketAddr) -> Result<(), AuthError> {
-    if let Some(Some(ip)) = IP_WHITELIST.get() {
-        if ip.contains(&socket.ip()) {
-            return Ok(());
+pub fn authenticate_ip(socket: SocketAddr) -> Result<(), AuthError> {
+    match IP_WHITELIST.get() {
+        Some(Some(ip)) => {
+            if ip.contains(&socket.ip()) {
+                return Ok(());
+            }
+            Err(AuthError::Unauthorized)
         }
+        Some(None) | None => Ok(()),
     }
-    Err(AuthError::Unauthorized)
 }

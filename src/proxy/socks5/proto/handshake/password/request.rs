@@ -1,4 +1,4 @@
-use crate::proxy::socks5::proto::{AsyncStreamOperation, StreamOperation, UserKey};
+use crate::proxy::socks5::proto::{AsyncStreamOperation, StreamOperation, UsernamePassword};
 use tokio::io::{AsyncRead, AsyncReadExt};
 
 /// SOCKS5 password handshake request
@@ -13,7 +13,7 @@ use tokio::io::{AsyncRead, AsyncReadExt};
 
 #[derive(Clone, Debug)]
 pub struct Request {
-    pub user_key: UserKey,
+    pub user_pass: UsernamePassword,
 }
 
 impl StreamOperation for Request {
@@ -43,24 +43,24 @@ impl StreamOperation for Request {
         let pwd = String::from_utf8(password)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
 
-        let user_key = UserKey::new(username, pwd);
-        Ok(Self { user_key })
+        let user_pass = UsernamePassword::new(username, pwd);
+        Ok(Self { user_pass })
     }
 
     fn write_to_buf<B: bytes::BufMut>(&self, buf: &mut B) {
         buf.put_u8(super::SUBNEGOTIATION_VERSION);
 
-        let username = self.user_key.username_arr();
+        let username = self.user_pass.username_arr();
         buf.put_u8(username.len() as u8);
         buf.put_slice(&username);
 
-        let password = self.user_key.password_arr();
+        let password = self.user_pass.password_arr();
         buf.put_u8(password.len() as u8);
         buf.put_slice(&password);
     }
 
     fn len(&self) -> usize {
-        3 + self.user_key.username_arr().len() + self.user_key.password_arr().len()
+        3 + self.user_pass.username_arr().len() + self.user_pass.password_arr().len()
     }
 }
 
@@ -90,7 +90,7 @@ impl AsyncStreamOperation for Request {
         let pwd = String::from_utf8(password)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
 
-        let user_key = UserKey::new(username, pwd);
-        Ok(Self { user_key })
+        let user_pass = UsernamePassword::new(username, pwd);
+        Ok(Self { user_pass })
     }
 }
