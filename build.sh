@@ -91,7 +91,7 @@ build_linux_target() {
     build_target=$(echo $target | cut -d':' -f1)
     feature=$(echo $target | cut -d':' -f2)
     log "info" "Building ${target}..."
-    if cargo zigbuild --release --target "${build_target}" --features "${feature}"; then
+    if cargo zigbuild --release --no-default-features --target "${build_target}" --features "${feature}"; then
       compress_and_move $build_target
       log "info" "Build ${target} done"
     else
@@ -105,7 +105,7 @@ build_linux_target() {
 build_macos_target() {
   for target in "${macos_target[@]}"; do
     log "info" "Building ${target}..."
-    if CARGO_PROFILE_RELEASE_STRIP=none cargo zigbuild --release --target "${target}"; then
+    if CARGO_PROFILE_RELEASE_STRIP=none cargo zigbuild --release --no-default-features --target "${target}"; then
       compress_and_move $target
       log "info" "Build ${target} done"
     else
@@ -119,7 +119,7 @@ build_macos_target() {
 build_windows_target() {
   for target in "${windows_target[@]}"; do
     log "info" "Building ${target}..."
-    if cargo build --release --target "${target}"; then
+    if cargo build --release --no-default-features --target "${target}"; then
       compress_and_move $target
       log "info" "Build ${target} done"
     else
