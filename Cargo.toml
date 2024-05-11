@@ -58,10 +58,7 @@ nix = { version = "0.28.0", features = ["user", "signal"] }
 sysinfo = { version = "0.30", default-features = false }
 
 [features]
-default = []
-http = []
-https = []
-socks5 = []
+default = ["mimalloc"]
 jemalloc = ["jemallocator"]
 tcmalloc = ["tcmalloc/bundled"]
 snmalloc = ["snmalloc-rs"]
