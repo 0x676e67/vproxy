@@ -32,6 +32,11 @@ impl NoAuth {
 }
 
 impl Whitelist for NoAuth {
+    fn is_empty(&self) -> bool {
+        // Check if the whitelist is empty
+        self.0.is_empty()
+    }
+
     fn contains(&self, ip: IpAddr) -> bool {
         // If whitelist is empty, allow all
         if self.0.is_empty() {
@@ -53,9 +58,12 @@ impl Auth for NoAuth {
 
     async fn execute(&self, stream: &mut TcpStream) -> Self::Output {
         let socket = stream.peer_addr()?;
-        let is_equal = true || self.contains(socket.ip());
+        let is_equal = self.contains(socket.ip()) || self.is_empty();
         if !is_equal {
-            return Err(Error::new(ErrorKind::Other, "Ip is not in the whitelist"));
+            return Err(Error::new(
+                ErrorKind::Other,
+                format!("Address {} is not in the whitelist", socket.ip()),
+            ));
         }
         Ok((true, Extensions::None))
     }
@@ -68,6 +76,11 @@ pub struct Password {
 }
 
 impl Whitelist for Password {
+    fn is_empty(&self) -> bool {
+        // Check if the whitelist is empty
+        self.whitelist.is_empty()
+    }
+
     fn contains(&self, ip: IpAddr) -> bool {
         // If whitelist is empty, allow all
         if self.whitelist.is_empty() {
