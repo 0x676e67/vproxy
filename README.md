@@ -68,6 +68,8 @@ while true; do curl -x http://127.0.0.1:8100 -s https://api.ip.sb/ip -A Mozilla;
 
 If no subnet is configured, the local default network proxy request will be used. When the local machine sets the priority `Ipv4`/`Ipv6` and the priority is `Ipv4`, it will always use `Ipv4` to make requests (if any).
 
+- When using passwordless authorization, if an IP whitelist exists, only authorized IPs can pass the request.
+
 ```shell
 $ vproxy -h
 An easy and powerful Rust HTTP/Socks5 Proxy
@@ -107,6 +109,14 @@ Options:
   -i, --cidr <CIDR>              Ip-CIDR, e.g. 2001:db8::/32
   -f, --fallback <FALLBACK>      Fallback address
   -h, --help                     Print help
+```
+
+### Install
+
+- Cargo
+
+```shell
+cargo install vproxy
 ```
 
 ### Compile
