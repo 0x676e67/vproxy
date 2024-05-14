@@ -4,6 +4,7 @@ use crate::proxy::{
 };
 use as_any::AsAny;
 use async_trait::async_trait;
+use password::{Request, Response, Status::*};
 use std::{
     io::{Error, ErrorKind},
     net::IpAddr,
@@ -22,17 +23,45 @@ pub trait Auth {
 
 /// No authentication as the socks5 handshake method.
 #[derive(Debug, Default)]
-pub struct NoAuth;
+pub struct NoAuth(Vec<IpAddr>);
+
+impl NoAuth {
+    pub fn new(whitelist: Vec<IpAddr>) -> Self {
+        Self(whitelist)
+    }
+}
+
+impl Whitelist for NoAuth {
+    fn contains(&self, ip: IpAddr) -> bool {
+        // If whitelist is empty, allow all
+        if self.0.is_empty() {
+            return true;
+        } else {
+            // Check if the ip is in the whitelist
+            return self.0.contains(&ip);
+        }
+    }
+}
 
 #[async_trait]
 impl Auth for NoAuth {
-    type Output = ();
+    type Output = std::io::Result<bool>;
 
     fn method(&self) -> Method {
         Method::NoAuth
     }
 
-    async fn execute(&self, _: &mut TcpStream) -> Self::Output {}
+    async fn execute(&self, stream: &mut TcpStream) -> Self::Output {
+        let socket = stream.peer_addr()?;
+        let is_equal = self.contains(socket.ip());
+        let resp = Response::new(if is_equal { Succeeded } else { Failed });
+        resp.write_to_async_stream(stream).await?;
+        if is_equal {
+            Ok(true)
+        } else {
+            Err(Error::new(ErrorKind::Other, "Ip is not in the whitelist"))
+        }
+    }
 }
 
 /// Username and password as the socks5 handshake method.
@@ -71,7 +100,6 @@ impl Auth for Password {
     }
 
     async fn execute(&self, stream: &mut TcpStream) -> Self::Output {
-        use password::{Request, Response, Status::*};
         let req = Request::retrieve_from_async_stream(stream).await?;
         let socket = stream.peer_addr()?;
 

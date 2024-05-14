@@ -33,7 +33,7 @@ pub async fn proxy(ctx: ProxyContext) -> crate::Result<()> {
         }
 
         _ => {
-            let auth = Arc::new(auth::NoAuth);
+            let auth = Arc::new(auth::NoAuth::new(ctx.whitelist.clone()));
             event_loop(auth, ctx).await?;
         }
     }
