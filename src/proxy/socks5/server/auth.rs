@@ -122,3 +122,4 @@ impl Auth for Password {
         }
     }
 }
+
