@@ -45,12 +45,7 @@ impl Whitelist for Authenticator {
         };
 
         // If whitelist is empty, allow all
-        if whitelist.is_empty() {
-            return false;
-        } else {
-            // Check if the ip is in the whitelist
-            return whitelist.contains(&ip);
-        }
+        whitelist.contains(&ip)
     }
 }
 

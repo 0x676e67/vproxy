@@ -39,12 +39,7 @@ impl Whitelist for NoAuth {
 
     fn contains(&self, ip: IpAddr) -> bool {
         // If whitelist is empty, allow all
-        if self.0.is_empty() {
-            return false;
-        } else {
-            // Check if the ip is in the whitelist
-            return self.0.contains(&ip);
-        }
+        self.0.contains(&ip)
     }
 }
 
