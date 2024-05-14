@@ -1,7 +1,7 @@
-use crate::proxy::auth;
+use crate::proxy::auth::Whitelist;
 use base64::Engine;
 use http::{header, HeaderMap};
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 
 /// Auth Error
 #[derive(thiserror::Error, Debug)]
@@ -16,31 +16,57 @@ pub enum AuthError {
 
 #[derive(Clone)]
 pub enum Authenticator {
-    None,
-    Password { username: String, password: String },
+    None(Vec<IpAddr>),
+    Password {
+        username: String,
+        password: String,
+        whitelist: Vec<IpAddr>,
+    },
+}
+
+impl Whitelist for Authenticator {
+    fn contains(&self, ip: IpAddr) -> bool {
+        let whitelist = match self {
+            Authenticator::None(whitelist) => whitelist,
+            Authenticator::Password { whitelist, .. } => whitelist,
+        };
+
+        // If whitelist is empty, allow all
+        if whitelist.is_empty() {
+            return true;
+        } else {
+            // Check if the ip is in the whitelist
+            return whitelist.contains(&ip);
+        }
+    }
 }
 
 impl Authenticator {
     pub fn authenticate(&self, headers: &HeaderMap, socket: SocketAddr) -> Result<(), AuthError> {
-        // If no authentication is required, return immediately
-        if auth::authenticate_ip(socket) {
-            return Ok(());
-        }
         match self {
-            Authenticator::None => Ok(()),
-            Authenticator::Password { username, password } => {
+            Authenticator::None(..) => {
+                // If whitelist is empty, allow all
+                if !self.contains(socket.ip()) {
+                    tracing::warn!("Unauthorized access from {}", socket);
+                    return Err(AuthError::Unauthorized);
+                }
+                return Ok(());
+            }
+            Authenticator::Password {
+                username, password, ..
+            } => {
                 let hv = headers
                     .get(header::PROXY_AUTHORIZATION)
                     .ok_or_else(|| AuthError::MissingCredentials)?;
 
-                // extract basic auth
+                // Extract basic auth
                 let basic_auth = hv
                     .to_str()
                     .map_err(|_| AuthError::InvalidCredentials)?
                     .strip_prefix("Basic ")
                     .ok_or_else(|| AuthError::InvalidCredentials)?;
 
-                // convert to string
+                // Convert to string
                 let auth_bytes = base64::engine::general_purpose::STANDARD
                     .decode(basic_auth.as_bytes())
                     .map_err(|_| AuthError::InvalidCredentials)?;
@@ -50,8 +76,14 @@ impl Authenticator {
                     .split_once(':')
                     .ok_or_else(|| AuthError::InvalidCredentials)?;
 
-                // check credentials
+                // Check credentials
                 if username.ne(auth_username) || password.ne(auth_password) {
+                    // Check if the ip is in the whitelist
+                    if self.contains(socket.ip()) {
+                        tracing::info!("Authorized access from {}", socket);
+                        return Ok(());
+                    }
+
                     tracing::warn!("Unauthorized access from {}", socket);
                     return Err(AuthError::Unauthorized);
                 }

@@ -5,7 +5,7 @@ mod socks5;
 
 use crate::{AuthMode, BootArgs, Proxy};
 pub use socks5::Error;
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 struct ProxyContext {
@@ -15,6 +15,8 @@ struct ProxyContext {
     pub concurrent: usize,
     /// Authentication type
     pub auth: AuthMode,
+    /// Ip whitelist
+    pub whitelist: Vec<IpAddr>,
     /// Connector
     pub connector: connect::Connector,
 }
@@ -47,15 +49,13 @@ pub async fn run(args: BootArgs) -> crate::Result<()> {
         crate::util::sysctl_route_add_cidr(&v6);
     });
 
-    // Init ip whitelist
-    auth::init_ip_whitelist(&args);
-
     match args.proxy {
         Proxy::Http { auth } => {
             http::proxy(ProxyContext {
                 bind: args.bind,
                 concurrent: args.concurrent,
                 auth,
+                whitelist: args.whitelist,
                 connector: connect::Connector::new(args.cidr, args.fallback),
             })
             .await
@@ -65,6 +65,7 @@ pub async fn run(args: BootArgs) -> crate::Result<()> {
                 bind: args.bind,
                 concurrent: args.concurrent,
                 auth,
+                whitelist: args.whitelist,
                 connector: connect::Connector::new(args.cidr, args.fallback),
             })
             .await

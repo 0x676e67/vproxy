@@ -24,7 +24,11 @@ pub async fn proxy(ctx: ProxyContext) -> crate::Result<()> {
 
     match (&ctx.auth.username, &ctx.auth.password) {
         (Some(username), Some(password)) => {
-            let auth = Arc::new(auth::Password::new(username, password));
+            let auth = Arc::new(auth::Password::new(
+                username,
+                password,
+                ctx.whitelist.clone(),
+            ));
             event_loop(auth, ctx).await?;
         }
 

@@ -69,9 +69,13 @@ impl From<ProxyContext> for HttpProxy {
     fn from(ctx: ProxyContext) -> Self {
         Self {
             auth: match (ctx.auth.username, ctx.auth.password) {
-                (Some(username), Some(password)) => Authenticator::Password { username, password },
+                (Some(username), Some(password)) => Authenticator::Password {
+                    username,
+                    password,
+                    whitelist: ctx.whitelist,
+                },
 
-                _ => Authenticator::None,
+                _ => Authenticator::None(ctx.whitelist),
             },
             connector: ctx.connector,
         }
