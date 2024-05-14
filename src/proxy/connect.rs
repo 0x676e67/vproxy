@@ -1,4 +1,4 @@
-use super::auth::Extentions;
+use super::auth::Extensions;
 use cidr::{IpCidr, Ipv4Cidr, Ipv6Cidr};
 use hyper_util::client::legacy::connect::HttpConnector;
 use rand::Rng;
@@ -26,7 +26,7 @@ impl Connector {
     /// Generates a new `HttpConnector` based on the configuration. This method
     /// configures the connector considering the IPv6 CIDR and fallback IP
     /// address.
-    pub fn new_http_connector(&self, extention: Extentions) -> HttpConnector {
+    pub fn new_http_connector(&self, extention: Extensions) -> HttpConnector {
         let mut connector = HttpConnector::new();
 
         match (self.cidr, self.fallback) {
@@ -64,7 +64,7 @@ impl Connector {
         &self,
         domain: String,
         port: u16,
-        extention: Extentions,
+        extention: Extensions,
     ) -> std::io::Result<TcpStream> {
         let mut last_err = None;
 
@@ -92,7 +92,7 @@ impl Connector {
     pub async fn try_connect(
         &self,
         addr: SocketAddr,
-        extention: Extentions,
+        extention: Extensions,
     ) -> std::io::Result<TcpStream> {
         match (self.cidr, self.fallback) {
             (Some(cidr), ip_addr) => {
@@ -113,7 +113,7 @@ async fn try_connect_with_ipv6_and_fallback(
     target_addr: SocketAddr,
     cidr: IpCidr,
     fallback: Option<IpAddr>,
-    extention: Extentions,
+    extention: Extensions,
 ) -> std::io::Result<TcpStream> {
     let (bind, socket) = match cidr {
         IpCidr::V4(cidr) => {
@@ -177,9 +177,9 @@ fn create_socket_for_ip(ip: IpAddr) -> std::io::Result<TcpSocket> {
 /// ID. The network part of the address is preserved, and the host part is
 /// generated from the hash. If the extension is not a Session, the function
 /// generates a random IPv4 address within the CIDR range.
-fn assign_ipv4_from_extention(cidr: &Ipv4Cidr, extention: Extentions) -> Ipv4Addr {
+fn assign_ipv4_from_extention(cidr: &Ipv4Cidr, extention: Extensions) -> Ipv4Addr {
     match extention {
-        Extentions::Session((a, _)) => {
+        Extensions::Session((a, _)) => {
             // Calculate the subnet mask and apply it to ensure the base_ip is preserved in
             // the non-variable part
             let subnet_mask = !((1u32 << (32 - cidr.network_length())) - 1);
@@ -200,9 +200,9 @@ fn assign_ipv4_from_extention(cidr: &Ipv4Cidr, extention: Extentions) -> Ipv4Add
 /// ID. The network part of the address is preserved, and the host part is
 /// generated from the hash. If the extension is not a Session, the function
 /// generates a random IPv6 address within the CIDR range.
-fn assign_ipv6_from_extention(cidr: &Ipv6Cidr, extention: Extentions) -> Ipv6Addr {
+fn assign_ipv6_from_extention(cidr: &Ipv6Cidr, extention: Extensions) -> Ipv6Addr {
     match extention {
-        Extentions::Session((a, b)) => {
+        Extensions::Session((a, b)) => {
             let combined = ((a as u128) << 64) | (b as u128);
             // Calculate the subnet mask and apply it to ensure the base_ip is preserved in
             // the non-variable part
@@ -256,7 +256,7 @@ mod tests {
 
         for x in 0..session_len {
             let s = x.to_string();
-            sessions.push(Extentions::Session(murmur::murmurhash3_x64_128(
+            sessions.push(Extensions::Session(murmur::murmurhash3_x64_128(
                 s.as_bytes(),
                 s.len() as u64,
             )));
@@ -285,7 +285,7 @@ mod tests {
 
         for x in 0..session_len {
             let s = x.to_string();
-            sessions.push(Extentions::Session(murmur::murmurhash3_x64_128(
+            sessions.push(Extensions::Session(murmur::murmurhash3_x64_128(
                 s.as_bytes(),
                 s.len() as u64,
             )));

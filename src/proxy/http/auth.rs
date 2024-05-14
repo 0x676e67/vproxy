@@ -1,4 +1,4 @@
-use crate::proxy::auth::{Whitelist, Extentions};
+use crate::proxy::auth::{Extensions, Whitelist};
 use base64::Engine;
 use http::{header, HeaderMap};
 use std::net::{IpAddr, SocketAddr};
@@ -46,7 +46,7 @@ impl Authenticator {
         &self,
         headers: &HeaderMap,
         socket: SocketAddr,
-    ) -> Result<Extentions, AuthError> {
+    ) -> Result<Extensions, AuthError> {
         match self {
             Authenticator::None(..) => {
                 // If whitelist is empty, allow all
@@ -54,7 +54,7 @@ impl Authenticator {
                     tracing::warn!("Unauthorized access from {}", socket);
                     return Err(AuthError::Unauthorized);
                 }
-                Ok(Extentions::None)
+                Ok(Extensions::None)
             }
             Authenticator::Password {
                 username, password, ..
@@ -87,7 +87,7 @@ impl Authenticator {
 
                 // Check credentials
                 if is_equal {
-                    Ok(Extentions::from((username.as_str(), auth_username)))
+                    Ok(Extensions::from((username.as_str(), auth_username)))
                 } else {
                     tracing::warn!("Unauthorized access from {}", socket);
                     return Err(AuthError::Unauthorized);

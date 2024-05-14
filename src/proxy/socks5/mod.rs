@@ -10,7 +10,7 @@ use self::{
         ClientConnection, IncomingConnection, Server, UdpAssociate,
     },
 };
-use super::{auth::Extentions, connect, ProxyContext};
+use super::{auth::Extensions, connect, ProxyContext};
 pub use error::Error;
 use std::{
     net::{SocketAddr, ToSocketAddrs},
@@ -51,7 +51,7 @@ const MAX_UDP_RELAY_PACKET_SIZE: usize = 1500;
 pub type Result<T, E = Error> = std::result::Result<T, E>;
 
 async fn event_loop(
-    server: Server<std::io::Result<(bool, Extentions)>>,
+    server: Server<std::io::Result<(bool, Extensions)>>,
     connector: connect::Connector,
 ) -> Result<()> {
     let connector = Arc::new(connector);
@@ -67,7 +67,7 @@ async fn event_loop(
 }
 
 async fn handle(
-    conn: IncomingConnection<std::io::Result<(bool, Extentions)>>,
+    conn: IncomingConnection<std::io::Result<(bool, Extensions)>>,
     connector: Arc<connect::Connector>,
 ) -> Result<()> {
     let (conn, res) = conn.authenticate().await?;

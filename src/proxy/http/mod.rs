@@ -2,7 +2,7 @@ mod auth;
 pub mod error;
 
 use self::{auth::Authenticator, error::ProxyError};
-use super::{auth::Extentions, connect::Connector, ProxyContext};
+use super::{auth::Extensions, connect::Connector, ProxyContext};
 use bytes::Bytes;
 use http_body_util::{combinators::BoxBody, BodyExt, Empty, Full};
 use hyper::{
@@ -145,7 +145,7 @@ impl HttpProxy {
         &self,
         upgraded: Upgraded,
         addr_str: String,
-        extention: Extentions,
+        extention: Extensions,
     ) -> std::io::Result<()> {
         for addr in addr_str.to_socket_addrs()? {
             match self.connector.try_connect(addr, extention).await {

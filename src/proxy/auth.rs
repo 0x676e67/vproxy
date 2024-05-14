@@ -6,18 +6,18 @@ pub trait Whitelist {
 }
 
 #[derive(Clone, Copy)]
-pub enum Extentions {
+pub enum Extensions {
     None,
     Session((u64, u64)),
 }
 
-impl Default for Extentions {
+impl Default for Extensions {
     fn default() -> Self {
-        Extentions::None
+        Extensions::None
     }
 }
 
-impl From<(&str, &str)> for Extentions {
+impl From<(&str, &str)> for Extensions {
     // This function takes a tuple of two strings as input: a prefix (the username)
     // and a string `s` (the username-session-id).
     fn from((prefix, s): (&str, &str)) -> Self {
@@ -31,13 +31,13 @@ impl From<(&str, &str)> for Extentions {
                 // Return it wrapped in the `Session` variant of `AuthExpand`.
                 if !s.is_empty() {
                     let (a, b) = murmur::murmurhash3_x64_128(s.as_bytes(), s.len() as u64);
-                    return Extentions::Session((a, b));
+                    return Extensions::Session((a, b));
                 }
             }
         }
         // If the string `s` does not start with the prefix, or if the remaining string
         // after removing the prefix and "-" is empty, return the `None` variant
         // of `AuthExpand`.
-        Extentions::None
+        Extensions::None
     }
 }

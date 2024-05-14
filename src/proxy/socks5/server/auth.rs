@@ -1,5 +1,5 @@
 use crate::proxy::{
-    auth::{Whitelist, Extentions},
+    auth::{Extensions, Whitelist},
     socks5::proto::{handshake::password, AsyncStreamOperation, Method, UsernamePassword},
 };
 use async_trait::async_trait;
@@ -44,7 +44,7 @@ impl Whitelist for NoAuth {
 
 #[async_trait]
 impl Auth for NoAuth {
-    type Output = std::io::Result<(bool, Extentions)>;
+    type Output = std::io::Result<(bool, Extensions)>;
 
     fn method(&self) -> Method {
         Method::NoAuth
@@ -55,7 +55,7 @@ impl Auth for NoAuth {
         if !self.contains(socket.ip()) {
             return Err(Error::new(ErrorKind::Other, "Ip is not in the whitelist"));
         }
-        Ok((true, Extentions::None))
+        Ok((true, Extensions::None))
     }
 }
 
@@ -88,7 +88,7 @@ impl Password {
 
 #[async_trait]
 impl Auth for Password {
-    type Output = std::io::Result<(bool, Extentions)>;
+    type Output = std::io::Result<(bool, Extensions)>;
 
     fn method(&self) -> Method {
         Method::Password
@@ -109,7 +109,7 @@ impl Auth for Password {
         if is_equal {
             Ok((
                 true,
-                Extentions::from((
+                Extensions::from((
                     self.user_pass.username.as_str(),
                     req.user_pass.username.as_str(),
                 )),
