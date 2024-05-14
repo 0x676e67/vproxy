@@ -25,6 +25,7 @@ pub trait Auth {
 pub struct NoAuth(Vec<IpAddr>);
 
 impl NoAuth {
+    /// Creates a new `NoAuth` instance with the given IP whitelist.
     pub fn new(whitelist: Vec<IpAddr>) -> Self {
         Self(whitelist)
     }
@@ -78,6 +79,8 @@ impl Whitelist for Password {
 }
 
 impl Password {
+    /// Creates a new `Password` instance with the given username, password, and
+    /// IP whitelist.
     pub fn new(username: &str, password: &str, whitelist: Vec<IpAddr>) -> Self {
         Self {
             user_pass: UsernamePassword::new(username, password),
@@ -122,4 +125,3 @@ impl Auth for Password {
         }
     }
 }
-

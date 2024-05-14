@@ -14,9 +14,12 @@ pub enum AuthError {
     Unauthorized,
 }
 
+/// Enum representing different types of authenticators.
 #[derive(Clone)]
 pub enum Authenticator {
+    /// No authentication with an IP whitelist.
     None(Vec<IpAddr>),
+    /// Password authentication with a username, password, and IP whitelist.
     Password {
         username: String,
         password: String,
@@ -96,4 +99,3 @@ impl Authenticator {
         }
     }
 }
-

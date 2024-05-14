@@ -121,7 +121,7 @@ cargo install vproxy
 
 ### Compile
 
-- Linux compile, Ubuntu machine for example:
+- To compile on a Linux machine (e.g., Ubuntu):
 
 ```shell
 git clone https://github.com/gngpp/vproxy.git && cd vproxy

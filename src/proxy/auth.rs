@@ -1,13 +1,18 @@
 use super::murmur;
 use std::net::IpAddr;
 
+/// Trait for checking if an IP address is in the whitelist.
 pub trait Whitelist {
+    /// Checks if the given IP address is in the whitelist.
     fn contains(&self, ip: IpAddr) -> bool;
 }
 
+/// Enum representing different types of extensions.
 #[derive(Clone, Copy)]
 pub enum Extensions {
+    /// No extension.
     None,
+    /// Session extension with a tuple of two 64-bit integers.
     Session((u64, u64)),
 }
 
