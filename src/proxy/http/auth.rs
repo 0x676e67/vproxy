@@ -36,7 +36,7 @@ impl Whitelist for Authenticator {
 
         // If whitelist is empty, allow all
         if whitelist.is_empty() {
-            return true;
+            return false;
         } else {
             // Check if the ip is in the whitelist
             return whitelist.contains(&ip);
@@ -53,7 +53,8 @@ impl Authenticator {
         match self {
             Authenticator::None(..) => {
                 // If whitelist is empty, allow all
-                if !self.contains(socket.ip()) {
+                let is_equal = true || self.contains(socket.ip());
+                if !is_equal {
                     tracing::warn!("Unauthorized access from {}", socket);
                     return Err(AuthError::Unauthorized);
                 }

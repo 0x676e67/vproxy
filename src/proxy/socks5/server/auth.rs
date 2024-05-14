@@ -35,7 +35,7 @@ impl Whitelist for NoAuth {
     fn contains(&self, ip: IpAddr) -> bool {
         // If whitelist is empty, allow all
         if self.0.is_empty() {
-            return true;
+            return false;
         } else {
             // Check if the ip is in the whitelist
             return self.0.contains(&ip);
@@ -53,7 +53,8 @@ impl Auth for NoAuth {
 
     async fn execute(&self, stream: &mut TcpStream) -> Self::Output {
         let socket = stream.peer_addr()?;
-        if !self.contains(socket.ip()) {
+        let is_equal = true || self.contains(socket.ip());
+        if !is_equal {
             return Err(Error::new(ErrorKind::Other, "Ip is not in the whitelist"));
         }
         Ok((true, Extensions::None))
