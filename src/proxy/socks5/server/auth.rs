@@ -53,14 +53,10 @@ impl Auth for NoAuth {
 
     async fn execute(&self, stream: &mut TcpStream) -> Self::Output {
         let socket = stream.peer_addr()?;
-        let is_equal = self.contains(socket.ip());
-        let resp = Response::new(if is_equal { Succeeded } else { Failed });
-        resp.write_to_async_stream(stream).await?;
-        if is_equal {
-            Ok(true)
-        } else {
-            Err(Error::new(ErrorKind::Other, "Ip is not in the whitelist"))
+        if !self.contains(socket.ip()) {
+            return Err(Error::new(ErrorKind::Other, "Ip is not in the whitelist"));
         }
+        Ok(true)
     }
 }
 
