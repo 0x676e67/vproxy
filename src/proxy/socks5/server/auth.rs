@@ -1,8 +1,7 @@
 use crate::proxy::{
-    auth::Whitelist,
+    auth::{AuthWhitelist, Extentions},
     socks5::proto::{handshake::password, AsyncStreamOperation, Method, UsernamePassword},
 };
-use as_any::AsAny;
 use async_trait::async_trait;
 use password::{Request, Response, Status::*};
 use std::{
@@ -12,11 +11,11 @@ use std::{
 };
 use tokio::net::TcpStream;
 
-pub type AuthAdaptor<O> = Arc<dyn Auth<Output = O> + Send + Sync>;
+pub type AuthAdaptor<A> = Arc<dyn Auth<Output = A> + Send + Sync>;
 
 #[async_trait]
 pub trait Auth {
-    type Output: AsAny;
+    type Output;
     fn method(&self) -> Method;
     async fn execute(&self, stream: &mut TcpStream) -> Self::Output;
 }
@@ -31,7 +30,7 @@ impl NoAuth {
     }
 }
 
-impl Whitelist for NoAuth {
+impl AuthWhitelist for NoAuth {
     fn contains(&self, ip: IpAddr) -> bool {
         // If whitelist is empty, allow all
         if self.0.is_empty() {
@@ -45,7 +44,7 @@ impl Whitelist for NoAuth {
 
 #[async_trait]
 impl Auth for NoAuth {
-    type Output = std::io::Result<bool>;
+    type Output = std::io::Result<(bool, Extentions)>;
 
     fn method(&self) -> Method {
         Method::NoAuth
@@ -56,7 +55,7 @@ impl Auth for NoAuth {
         if !self.contains(socket.ip()) {
             return Err(Error::new(ErrorKind::Other, "Ip is not in the whitelist"));
         }
-        Ok(true)
+        Ok((true, Extentions::None))
     }
 }
 
@@ -66,7 +65,7 @@ pub struct Password {
     whitelist: Vec<IpAddr>,
 }
 
-impl Whitelist for Password {
+impl AuthWhitelist for Password {
     fn contains(&self, ip: IpAddr) -> bool {
         // If whitelist is empty, allow all
         if self.whitelist.is_empty() {
@@ -89,7 +88,7 @@ impl Password {
 
 #[async_trait]
 impl Auth for Password {
-    type Output = std::io::Result<bool>;
+    type Output = std::io::Result<(bool, Extentions)>;
 
     fn method(&self) -> Method {
         Method::Password
@@ -99,11 +98,22 @@ impl Auth for Password {
         let req = Request::retrieve_from_async_stream(stream).await?;
         let socket = stream.peer_addr()?;
 
-        let is_equal = (req.user_pass == self.user_pass) || self.contains(socket.ip());
+        // Check if the username and password are correct
+        let is_equal = ({
+            req.user_pass.username.starts_with(&self.user_pass.username)
+                && req.user_pass.password.eq(&self.user_pass.password)
+        }) || self.contains(socket.ip());
+
         let resp = Response::new(if is_equal { Succeeded } else { Failed });
         resp.write_to_async_stream(stream).await?;
         if is_equal {
-            Ok(true)
+            Ok((
+                true,
+                Extentions::from((
+                    self.user_pass.username.as_str(),
+                    req.user_pass.username.as_str(),
+                )),
+            ))
         } else {
             Err(Error::new(
                 ErrorKind::Other,

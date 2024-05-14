@@ -1,6 +1,7 @@
 mod auth;
 mod connect;
 mod http;
+mod murmur;
 mod socks5;
 
 use crate::{AuthMode, BootArgs, Proxy};

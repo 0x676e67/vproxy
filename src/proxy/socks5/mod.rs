@@ -10,8 +10,7 @@ use self::{
         ClientConnection, IncomingConnection, Server, UdpAssociate,
     },
 };
-use super::{connect, ProxyContext};
-use as_any::AsAny;
+use super::{auth::Extentions, connect, ProxyContext};
 pub use error::Error;
 use std::{
     net::{SocketAddr, ToSocketAddrs},
@@ -28,13 +27,18 @@ pub async fn proxy(ctx: ProxyContext) -> crate::Result<()> {
                 username,
                 password,
                 ctx.whitelist.clone(),
-            ));
-            event_loop(auth, ctx).await?;
+            )) as Arc<_>;
+            let server =
+                Server::bind_with_concurrency(ctx.bind, ctx.concurrent as u32, auth).await?;
+
+            event_loop(server, ctx.connector).await?;
         }
 
         _ => {
-            let auth = Arc::new(auth::NoAuth::new(ctx.whitelist.clone()));
-            event_loop(auth, ctx).await?;
+            let auth = Arc::new(auth::NoAuth::new(ctx.whitelist.clone())) as Arc<_>;
+            let server =
+                Server::bind_with_concurrency(ctx.bind, ctx.concurrent as u32, auth).await?;
+            event_loop(server, ctx.connector).await?;
         }
     }
 
@@ -46,12 +50,11 @@ const MAX_UDP_RELAY_PACKET_SIZE: usize = 1500;
 /// The library's `Result` type alias.
 pub type Result<T, E = Error> = std::result::Result<T, E>;
 
-async fn event_loop<S>(auth: auth::AuthAdaptor<S>, ctx: ProxyContext) -> Result<()>
-where
-    S: Send + Sync + 'static,
-{
-    let server = Server::bind_with_concurrency(ctx.bind, auth, ctx.concurrent as u32).await?;
-    let connector = Arc::new(ctx.connector);
+async fn event_loop(
+    server: Server<std::io::Result<(bool, Extentions)>>,
+    connector: connect::Connector,
+) -> Result<()> {
+    let connector = Arc::new(connector);
     while let Ok((conn, _)) = server.accept().await {
         let connector = connector.clone();
         tokio::spawn(async move {
@@ -63,18 +66,17 @@ where
     Ok(())
 }
 
-async fn handle<S>(conn: IncomingConnection<S>, connector: Arc<connect::Connector>) -> Result<()>
-where
-    S: Send + Sync + 'static,
-{
+async fn handle(
+    conn: IncomingConnection<std::io::Result<(bool, Extentions)>>,
+    connector: Arc<connect::Connector>,
+) -> Result<()> {
     let (conn, res) = conn.authenticate().await?;
 
-    if let Some(res) = res.as_any().downcast_ref::<std::io::Result<bool>>() {
-        let res = *res.as_ref().map_err(|err| err.to_string())?;
-        if !res {
-            tracing::info!("authentication failed");
-            return Ok(());
-        }
+    let (res, extention) = res.map(|(res, extention)| (res, extention))?;
+
+    if !res {
+        tracing::info!("authentication failed");
+        return Ok(());
     }
 
     match conn.wait_request().await? {
@@ -90,16 +92,19 @@ where
         ClientConnection::Connect(connect, addr) => {
             let target = match addr {
                 Address::DomainAddress(domain, port) => {
-                    connector.try_connect_for_domain(domain, port).await
+                    connector
+                        .try_connect_for_domain(domain, port, extention)
+                        .await
                 }
-                Address::SocketAddress(addr) => connector.try_connect(addr).await,
+                Address::SocketAddress(addr) => connector.try_connect(addr, extention).await,
             };
 
             if let Ok(mut target) = target {
                 let mut conn = connect
                     .reply(Reply::Succeeded, Address::unspecified())
                     .await?;
-                tokio::io::copy_bidirectional(&mut target, &mut conn).await?;
+                let (a, b) = tokio::io::copy_bidirectional(&mut target, &mut conn).await?;
+                tracing::info!("{} bytes transferred", a + b);
             } else {
                 let mut conn = connect
                     .reply(Reply::HostUnreachable, Address::unspecified())

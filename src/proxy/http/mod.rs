@@ -2,7 +2,7 @@ mod auth;
 pub mod error;
 
 use self::{auth::Authenticator, error::ProxyError};
-use super::{connect::Connector, ProxyContext};
+use super::{auth::Extentions, connect::Connector, ProxyContext};
 use bytes::Bytes;
 use http_body_util::{combinators::BoxBody, BodyExt, Empty, Full};
 use hyper::{
@@ -91,7 +91,7 @@ impl HttpProxy {
         tracing::info!("request: {req:?}, {socket:?}", req = req, socket = socket);
 
         // Check if the client is authorized
-        self.auth.authenticate(req.headers(), socket)?;
+        let extention = self.auth.authenticate(req.headers(), socket)?;
 
         if Method::CONNECT == req.method() {
             // Received an HTTP request like:
@@ -111,7 +111,7 @@ impl HttpProxy {
                 tokio::task::spawn(async move {
                     match hyper::upgrade::on(req).await {
                         Ok(upgraded) => {
-                            if let Err(e) = self.tunnel(upgraded, addr).await {
+                            if let Err(e) = self.tunnel(upgraded, addr, extention).await {
                                 tracing::warn!("server io error: {}", e);
                             };
                         }
@@ -131,7 +131,7 @@ impl HttpProxy {
             let resp = Client::builder(TokioExecutor::new())
                 .http1_title_case_headers(true)
                 .http1_preserve_header_case(true)
-                .build(self.connector.new_http_connector())
+                .build(self.connector.new_http_connector(extention))
                 .request(req)
                 .await?;
 
@@ -141,9 +141,14 @@ impl HttpProxy {
 
     // Create a TCP connection to host:port, build a tunnel between the connection
     // and the upgraded connection
-    async fn tunnel(&self, upgraded: Upgraded, addr_str: String) -> std::io::Result<()> {
+    async fn tunnel(
+        &self,
+        upgraded: Upgraded,
+        addr_str: String,
+        extention: Extentions,
+    ) -> std::io::Result<()> {
         for addr in addr_str.to_socket_addrs()? {
-            match self.connector.try_connect(addr).await {
+            match self.connector.try_connect(addr, extention).await {
                 Ok(mut server) => {
                     return tunnel_proxy(upgraded, &mut server).await;
                 }

@@ -30,8 +30,8 @@ impl<O: 'static + std::marker::Send> Server<O> {
     #[inline]
     pub async fn bind_with_concurrency(
         addr: SocketAddr,
-        auth: AuthAdaptor<O>,
         concurrent: u32,
+        auth: AuthAdaptor<O>,
     ) -> std::io::Result<Self> {
         let socket = if addr.is_ipv4() {
             tokio::net::TcpSocket::new_v4()?

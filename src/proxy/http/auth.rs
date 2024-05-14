@@ -1,4 +1,4 @@
-use crate::proxy::auth::Whitelist;
+use crate::proxy::auth::{AuthWhitelist, Extentions};
 use base64::Engine;
 use http::{header, HeaderMap};
 use std::net::{IpAddr, SocketAddr};
@@ -24,7 +24,7 @@ pub enum Authenticator {
     },
 }
 
-impl Whitelist for Authenticator {
+impl AuthWhitelist for Authenticator {
     fn contains(&self, ip: IpAddr) -> bool {
         let whitelist = match self {
             Authenticator::None(whitelist) => whitelist,
@@ -42,7 +42,11 @@ impl Whitelist for Authenticator {
 }
 
 impl Authenticator {
-    pub fn authenticate(&self, headers: &HeaderMap, socket: SocketAddr) -> Result<(), AuthError> {
+    pub fn authenticate(
+        &self,
+        headers: &HeaderMap,
+        socket: SocketAddr,
+    ) -> Result<Extentions, AuthError> {
         match self {
             Authenticator::None(..) => {
                 // If whitelist is empty, allow all
@@ -50,7 +54,7 @@ impl Authenticator {
                     tracing::warn!("Unauthorized access from {}", socket);
                     return Err(AuthError::Unauthorized);
                 }
-                return Ok(());
+                Ok(Extentions::None)
             }
             Authenticator::Password {
                 username, password, ..
@@ -76,19 +80,18 @@ impl Authenticator {
                     .split_once(':')
                     .ok_or_else(|| AuthError::InvalidCredentials)?;
 
-                // Check credentials
-                if username.ne(auth_username) || password.ne(auth_password) {
-                    // Check if the ip is in the whitelist
-                    if self.contains(socket.ip()) {
-                        tracing::info!("Authorized access from {}", socket);
-                        return Ok(());
-                    }
+                // Check if the username and password are correct
+                let is_equal =
+                    ({ auth_username.starts_with(&*username) && auth_password.eq(&*password) })
+                        || self.contains(socket.ip());
 
+                // Check credentials
+                if is_equal {
+                    Ok(Extentions::from((username.as_str(), auth_username)))
+                } else {
                     tracing::warn!("Unauthorized access from {}", socket);
                     return Err(AuthError::Unauthorized);
                 }
-
-                Ok(())
             }
         }
     }
