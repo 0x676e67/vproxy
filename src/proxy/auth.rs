@@ -1,7 +1,7 @@
 use super::murmur;
 use std::net::IpAddr;
 
-pub trait AuthWhitelist {
+pub trait Whitelist {
     fn contains(&self, ip: IpAddr) -> bool;
 }
 

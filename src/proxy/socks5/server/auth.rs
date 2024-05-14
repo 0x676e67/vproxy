@@ -1,5 +1,5 @@
 use crate::proxy::{
-    auth::{AuthWhitelist, Extentions},
+    auth::{Whitelist, Extentions},
     socks5::proto::{handshake::password, AsyncStreamOperation, Method, UsernamePassword},
 };
 use async_trait::async_trait;
@@ -30,7 +30,7 @@ impl NoAuth {
     }
 }
 
-impl AuthWhitelist for NoAuth {
+impl Whitelist for NoAuth {
     fn contains(&self, ip: IpAddr) -> bool {
         // If whitelist is empty, allow all
         if self.0.is_empty() {
@@ -65,7 +65,7 @@ pub struct Password {
     whitelist: Vec<IpAddr>,
 }
 
-impl AuthWhitelist for Password {
+impl Whitelist for Password {
     fn contains(&self, ip: IpAddr) -> bool {
         // If whitelist is empty, allow all
         if self.whitelist.is_empty() {

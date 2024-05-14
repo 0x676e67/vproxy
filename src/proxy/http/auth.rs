@@ -1,4 +1,4 @@
-use crate::proxy::auth::{AuthWhitelist, Extentions};
+use crate::proxy::auth::{Whitelist, Extentions};
 use base64::Engine;
 use http::{header, HeaderMap};
 use std::net::{IpAddr, SocketAddr};
@@ -24,7 +24,7 @@ pub enum Authenticator {
     },
 }
 
-impl AuthWhitelist for Authenticator {
+impl Whitelist for Authenticator {
     fn contains(&self, ip: IpAddr) -> bool {
         let whitelist = match self {
             Authenticator::None(whitelist) => whitelist,
