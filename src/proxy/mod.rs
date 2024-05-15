@@ -45,12 +45,11 @@ pub async fn run(args: BootArgs) -> crate::Result<()> {
     tracing::info!("Arch: {}", std::env::consts::ARCH);
     tracing::info!("Version: {}", env!("CARGO_PKG_VERSION"));
 
-    // Auto set sysctl
     #[cfg(target_os = "linux")]
-    args.cidr.map(|v6| {
+    if let Some(cidr) = &args.cidr {
         route::sysctl_ipv6_no_local_bind();
-        route::sysctl_route_add_cidr(&v6);
-    });
+        route::sysctl_route_add_cidr(&cidr).await;
+    }
 
     let ctx = move |auth: AuthMode| ProxyContext {
         bind: args.bind,

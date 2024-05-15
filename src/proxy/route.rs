@@ -1,9 +1,17 @@
-/// Attempts to add a route to the given subnet on the loopback interface using
-/// rtnetlink library.
+use futures::TryStreamExt;
+use netlink_packet_route::{
+    route::{RouteAddress, RouteAttribute, RouteProtocol, RouteScope, RouteType},
+    AddressFamily,
+};
+use rtnetlink::{new_connection, Error, Handle, IpVersion};
+
+/// Attempts to add a route to the given subnet on the loopback interface.
 ///
-/// This function checks if the current user has root privileges before
+/// This function uses the `ip` command to add a route to the loopback
+/// interface. It checks if the current user has root privileges before
 /// attempting to add the route. If the user does not have root privileges, the
-/// function returns immediately.
+/// function returns immediately. If the `ip` command fails, it prints an error
+/// message to the console.
 ///
 /// # Arguments
 ///
@@ -13,41 +21,107 @@
 ///
 /// ```
 /// let subnet = cidr::IpCidr::from_str("192.168.1.0/24").unwrap();
-/// sysctl_route_add_cidr(&subnet).await.unwrap();
+/// sysctl_route_add_cidr(&subnet);
 /// ```
-pub async fn sysctl_route_add_cidr(subnet: &cidr::IpCidr) -> Result<(), std::io::Error> {
+pub async fn sysctl_route_add_cidr(subnet: &cidr::IpCidr) {
     if !nix::unistd::Uid::effective().is_root() {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::PermissionDenied,
-            "Root privileges are required to add a route.",
-        ));
+        return;
     }
 
-    let (connection, handle, _) = rtnetlink::new_connection().unwrap();
-    let loopback_link_index = handle
+    let (connection, handle, _) = new_connection().unwrap();
+
+    tokio::spawn(connection);
+
+    if let Err(e) = add_route(handle.clone(), subnet).await {
+        eprintln!("{e}");
+    }
+}
+
+async fn add_route(handle: Handle, cidr: &cidr::IpCidr) -> Result<(), Error> {
+    let route = handle.route();
+    let iface_idx = handle
         .link()
         .get()
-        .set_name_filter("lo".to_string())
+        .match_name("lo".to_owned())
         .execute()
         .try_next()
         .await?
-        .ok_or(std::io::Error::new(
-            std::io::ErrorKind::NotFound,
-            "Loopback interface not found",
-        ))?
+        .unwrap()
         .header
         .index;
 
-    let mut req = handle.route().add();
-    req.message_mut().header.destination_prefix_length = subnet.network_length();
-    req.message_mut().header.destination_prefix = subnet.first_address().into();
-    req.message_mut().header.table = rtnetlink::RouteTable::Main as u32;
-    req.message_mut().header.protocol = rtnetlink::RouteProtocol::Boot as u8;
-    req.message_mut().header.kind = rtnetlink::RouteKind::Unicast;
-    req.message_mut().header.scope = rtnetlink::RouteScope::Universe;
-    req.message_mut().header.link_index = Some(loopback_link_index);
+    // Check if the route already exists
+    let route_check = |ip_version: IpVersion,
+                       address_family: AddressFamily,
+                       destination_prefix_length: u8,
+                       route_address: RouteAddress| async move {
+        let mut routes = handle.route().get(ip_version).execute();
+        while let Some(route) = routes.try_next().await? {
+            let header = route.header;
+            if header.address_family == address_family
+                && header.destination_prefix_length == destination_prefix_length
+            {
+                for attr in route.attributes.iter() {
+                    if let RouteAttribute::Destination(dest) = attr {
+                        if dest == &route_address {
+                            return Ok(true);
+                        }
+                    }
+                }
+            }
+        }
+        Ok(false)
+    };
 
-    req.execute().await?;
+    // Add a route to the loopback interface.
+    match cidr {
+        cidr::IpCidr::V4(v4) => {
+            if route_check(
+                IpVersion::V4,
+                AddressFamily::Inet,
+                v4.network_length(),
+                RouteAddress::Inet(v4.first_address()),
+            )
+            .await?
+            {
+                return Ok(());
+            }
+            route
+                .add()
+                .v4()
+                .destination_prefix(v4.first_address(), v4.network_length())
+                .kind(RouteType::Local)
+                .protocol(RouteProtocol::Boot)
+                .scope(RouteScope::Universe)
+                .output_interface(iface_idx)
+                .priority(1024)
+                .execute()
+                .await?
+        }
+        cidr::IpCidr::V6(v6) => {
+            if route_check(
+                IpVersion::V6,
+                AddressFamily::Inet6,
+                v6.network_length(),
+                RouteAddress::Inet6(v6.first_address()),
+            )
+            .await?
+            {
+                return Ok(());
+            }
+            route
+                .add()
+                .v6()
+                .destination_prefix(v6.first_address(), v6.network_length())
+                .kind(RouteType::Local)
+                .protocol(RouteProtocol::Boot)
+                .scope(RouteScope::Universe)
+                .output_interface(iface_idx)
+                .priority(1024)
+                .execute()
+                .await?
+        }
+    }
 
     Ok(())
 }

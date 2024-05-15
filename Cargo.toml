@@ -46,10 +46,12 @@ snmalloc-rs = { version = "0.3.4", optional = true }
 rpmalloc = { version = "0.2.2", optional = true }
 jemallocator = { package = "tikv-jemallocator", version = "0.5.4", optional = true }
 mimalloc = { version = "0.1.39", default-features = false, optional = true }
-rtnetlink = "0.14.1"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 sysctl = "0.5.5"
+rtnetlink = "0.14"
+netlink-packet-route = "0.19"
+futures = "0.3.30"
 
 [target.'cfg(target_family = "unix")'.dependencies]
 daemonize = "0.5.0"
