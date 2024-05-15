@@ -4,7 +4,6 @@ mod daemon;
 pub mod error;
 mod proxy;
 mod update;
-mod util;
 
 use clap::{Args, Parser, Subcommand};
 use std::net::SocketAddr;
