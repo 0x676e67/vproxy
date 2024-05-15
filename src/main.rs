@@ -99,7 +99,7 @@ pub struct BootArgs {
 // 2. config http_proxy in command line $ export http_proxy=http://127.0.0.1:8100
 //    $ export https_proxy=http://127.0.0.1:8100
 // 3. send requests $ curl -i https://www.some_domain.com/
-fn main() -> anyhow::Result<()> {
+fn main() -> Result<(), Box<dyn std::error::Error>> {
     let opt = Opt::parse();
 
     match opt.commands {

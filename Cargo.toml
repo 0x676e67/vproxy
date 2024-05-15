@@ -29,7 +29,6 @@ bytes = "1.6.0"
 pin-project-lite = "0.2"
 http = "1"
 clap = { version = "4", features = ["derive", "env"] }
-anyhow = "1"
 tokio-stream = "0.1.15"
 percent-encoding = "2.3.1"
 tracing = "0.1.40"
