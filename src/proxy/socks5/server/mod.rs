@@ -56,7 +56,7 @@ impl<O: 'static + std::marker::Send> Server<O> {
     /// valid SOCKS5 connection. You should call
     /// to perform a SOCKS5 authentication handshake.
     ///
-    /// If there is no connection to accept, Poll::Pending is returned and the
+    /// If there is no connection to accept, Poll::Pending is returned, and the
     /// current task will be notified by a waker. Note that on multiple
     /// calls to poll_accept, only the Waker from the Context passed to the most
     /// recent call is scheduled to receive a wakeup.
@@ -70,7 +70,7 @@ impl<O: 'static + std::marker::Send> Server<O> {
             .map_ok(|(stream, addr)| (IncomingConnection::new(stream, self.auth.clone()), addr))
     }
 
-    /// Get the the local socket address binded to this server
+    /// Get the local socket address bound to this server
     #[inline]
     pub fn local_addr(&self) -> std::io::Result<SocketAddr> {
         self.listener.local_addr()

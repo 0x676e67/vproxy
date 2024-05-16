@@ -110,7 +110,7 @@ pub fn status() -> crate::Result<()> {
         Some(pid) => {
             let mut sys = sysinfo::System::new();
 
-            // First we update all information of our `System` struct.
+            // First, we update all information of our `System` struct.
             sys.refresh_all();
 
             // Display processes ID

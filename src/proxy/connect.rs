@@ -30,7 +30,7 @@ impl Connector {
     ///
     /// # Arguments
     ///
-    /// * `extention` - Extensions used to assign an IP address from the CIDR.
+    /// * `extension` - Extensions used to assign an IP address from the CIDR.
     ///
     /// # Returns
     ///
@@ -39,27 +39,27 @@ impl Connector {
     /// # Example
     ///
     /// ```
-    /// let extention = Extensions::new();
-    /// let connector = new_http_connector(extention);
+    /// let extension = Extensions::new();
+    /// let connector = new_http_connector(extension);
     /// ```
-    pub fn new_http_connector(&self, extention: Extensions) -> HttpConnector {
+    pub fn new_http_connector(&self, extension: Extensions) -> HttpConnector {
         let mut connector = HttpConnector::new();
 
         match (self.cidr, self.fallback) {
             (Some(IpCidr::V4(cidr)), Some(IpAddr::V6(v6))) => {
-                let v4 = assign_ipv4_from_extention(&cidr, extention);
+                let v4 = assign_ipv4_from_extension(&cidr, extension);
                 connector.set_local_addresses(v4, v6);
             }
             (Some(IpCidr::V4(cidr)), None) => {
-                let v4 = assign_ipv4_from_extention(&cidr, extention);
+                let v4 = assign_ipv4_from_extension(&cidr, extension);
                 connector.set_local_address(Some(v4.into()));
             }
             (Some(IpCidr::V6(cidr)), Some(IpAddr::V4(v4))) => {
-                let v6 = assign_ipv6_from_extention(&cidr, extention);
+                let v6 = assign_ipv6_from_extension(&cidr, extension);
                 connector.set_local_addresses(v4, v6);
             }
             (Some(IpCidr::V6(v6)), None) => {
-                let v6 = assign_ipv6_from_extention(&v6, extention);
+                let v6 = assign_ipv6_from_extension(&v6, extension);
                 connector.set_local_address(Some(v6.into()));
             }
             // ipv4 or ipv6
@@ -82,7 +82,7 @@ impl Connector {
     ///
     /// * `domain` - The target domain to connect to.
     /// * `port` - The target port to connect to.
-    /// * `extention` - Extensions used to assign an IP address from the CIDR.
+    /// * `extension` - Extensions used to assign an IP address from the CIDR.
     ///
     /// # Returns
     ///
@@ -94,8 +94,8 @@ impl Connector {
     /// ```
     /// let domain = "example.com".to_string();
     /// let port = 80;
-    /// let extention = Extensions::new();
-    /// let stream = try_connect_for_domain(domain, port, extention)
+    /// let extension = Extensions::new();
+    /// let stream = try_connect_for_domain(domain, port, extension)
     ///     .await
     ///     .unwrap();
     /// ```
@@ -103,12 +103,12 @@ impl Connector {
         &self,
         domain: String,
         port: u16,
-        extention: Extensions,
+        extension: Extensions,
     ) -> std::io::Result<TcpStream> {
         let mut last_err = None;
 
         for target_addr in lookup_host((domain, port)).await? {
-            match self.try_connect(target_addr, extention).await {
+            match self.try_connect(target_addr, extension).await {
                 Ok(stream) => return Ok(stream),
                 Err(e) => last_err = Some(e),
             };
@@ -136,7 +136,7 @@ impl Connector {
     /// # Arguments
     ///
     /// * `addr` - The target socket address to connect to.
-    /// * `extention` - Extensions used to assign an IP address from the CIDR.
+    /// * `extension` - Extensions used to assign an IP address from the CIDR.
     ///
     /// # Returns
     ///
@@ -147,19 +147,19 @@ impl Connector {
     ///
     /// ```
     /// let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)), 80);
-    /// let extention = Extensions::new();
-    /// let stream = try_connect(addr, extention).await.unwrap();
+    /// let extension = Extensions::new();
+    /// let stream = try_connect(addr, extension).await.unwrap();
     /// ```
     pub async fn try_connect(
         &self,
         addr: SocketAddr,
-        extention: Extensions,
+        extension: Extensions,
     ) -> std::io::Result<TcpStream> {
         match (self.cidr, self.fallback) {
-            (Some(cidr), None) => try_connect_with_cidr(addr, cidr, extention).await,
+            (Some(cidr), None) => try_connect_with_cidr(addr, cidr, extension).await,
             (None, Some(fallback)) => try_connect_with_fallback(addr, fallback).await,
             (Some(cidr), Some(fallback)) => {
-                try_connect_with_cidr_and_fallback(addr, cidr, fallback, extention).await
+                try_connect_with_cidr_and_fallback(addr, cidr, fallback, extension).await
             }
             (None, None) => TcpStream::connect(addr).await,
         }
@@ -186,7 +186,7 @@ impl Connector {
 ///
 /// * `target_addr` - The target socket address to connect to.
 /// * `cidr` - A CIDR block (either IPv4 or IPv6).
-/// * `extention` - Extensions used to assign an IP address from the CIDR.
+/// * `extension` - Extensions used to assign an IP address from the CIDR.
 ///
 /// # Returns
 ///
@@ -198,17 +198,17 @@ impl Connector {
 /// ```
 /// let target_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)), 80);
 /// let cidr = IpCidr::V4(Ipv4Cidr::new(Ipv4Addr::new(192, 168, 1, 0), 24).unwrap());
-/// let extention = Extensions::new();
-/// let stream = try_connect_with_cidr(target_addr, cidr, extention)
+/// let extension = Extensions::new();
+/// let stream = try_connect_with_cidr(target_addr, cidr, extension)
 ///     .await
 ///     .unwrap();
 /// ```
 async fn try_connect_with_cidr(
     target_addr: SocketAddr,
     cidr: IpCidr,
-    extention: Extensions,
+    extension: Extensions,
 ) -> std::io::Result<TcpStream> {
-    let socket = create_and_bind_socket(cidr, extention).await?;
+    let socket = create_and_bind_socket(cidr, extension).await?;
     socket.connect(target_addr).await
 }
 
@@ -265,7 +265,7 @@ async fn try_connect_with_fallback(
 /// * `target_addr` - The target socket address to connect to.
 /// * `cidr` - A CIDR block (either IPv4 or IPv6).
 /// * `fallback` - The fallback IP address to use if the connection fails.
-/// * `extention` - Extensions used to assign an IP address from the CIDR.
+/// * `extension` - Extensions used to assign an IP address from the CIDR.
 ///
 /// # Returns
 ///
@@ -278,8 +278,8 @@ async fn try_connect_with_fallback(
 /// let target_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)), 80);
 /// let cidr = IpCidr::V4(Ipv4Cidr::new(Ipv4Addr::new(192, 168, 1, 0), 24).unwrap());
 /// let fallback = IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1));
-/// let extention = Extensions::new();
-/// let stream = try_connect_with_cidr_and_fallback(target_addr, cidr, fallback, extention)
+/// let extension = Extensions::new();
+/// let stream = try_connect_with_cidr_and_fallback(target_addr, cidr, fallback, extension)
 ///     .await
 ///     .unwrap();
 /// ```
@@ -287,9 +287,9 @@ async fn try_connect_with_cidr_and_fallback(
     target_addr: SocketAddr,
     cidr: IpCidr,
     fallback: IpAddr,
-    extention: Extensions,
+    extension: Extensions,
 ) -> std::io::Result<TcpStream> {
-    let socket = create_and_bind_socket(cidr, extention).await?;
+    let socket = create_and_bind_socket(cidr, extension).await?;
     // Try to connect with ipv6
     match socket.connect(target_addr).await {
         Ok(first) => Ok(first),
@@ -315,7 +315,7 @@ async fn try_connect_with_cidr_and_fallback(
 /// # Arguments
 ///
 /// * `cidr` - A CIDR block (either IPv4 or IPv6).
-/// * `extention` - Extensions used to assign an IP address from the CIDR.
+/// * `extension` - Extensions used to assign an IP address from the CIDR.
 ///
 /// # Returns
 ///
@@ -326,20 +326,20 @@ async fn try_connect_with_cidr_and_fallback(
 ///
 /// ```
 /// let cidr = IpCidr::V4(Ipv4Cidr::new(Ipv4Addr::new(192, 168, 1, 0), 24).unwrap());
-/// let extention = Extensions::new();
-/// let (ip, socket) = create_and_bind_socket(cidr, extention).await.unwrap();
+/// let extension = Extensions::new();
+/// let (ip, socket) = create_and_bind_socket(cidr, extension).await.unwrap();
 /// ```
-async fn create_and_bind_socket(cidr: IpCidr, extention: Extensions) -> std::io::Result<TcpSocket> {
+async fn create_and_bind_socket(cidr: IpCidr, extension: Extensions) -> std::io::Result<TcpSocket> {
     match cidr {
         IpCidr::V4(cidr) => {
             let socket = TcpSocket::new_v4()?;
-            let bind = IpAddr::V4(assign_ipv4_from_extention(&cidr, extention));
+            let bind = IpAddr::V4(assign_ipv4_from_extension(&cidr, extension));
             socket.bind(SocketAddr::new(bind, 0))?;
             Ok(socket)
         }
         IpCidr::V6(cidr) => {
             let socket = TcpSocket::new_v6()?;
-            let bind = IpAddr::V6(assign_ipv6_from_extention(&cidr, extention));
+            let bind = IpAddr::V6(assign_ipv6_from_extension(&cidr, extension));
             socket.bind(SocketAddr::new(bind, 0))?;
             Ok(socket)
         }
@@ -378,8 +378,8 @@ fn create_tcp_socket_for_ip(ip: &IpAddr) -> std::io::Result<TcpSocket> {
 /// ID. The network part of the address is preserved, and the host part is
 /// generated from the hash. If the extension is not a Session, the function
 /// generates a random IPv4 address within the CIDR range.
-fn assign_ipv4_from_extention(cidr: &Ipv4Cidr, extention: Extensions) -> Ipv4Addr {
-    match extention {
+fn assign_ipv4_from_extension(cidr: &Ipv4Cidr, extension: Extensions) -> Ipv4Addr {
+    match extension {
         Extensions::Session((a, _)) => {
             // Calculate the subnet mask and apply it to ensure the base_ip is preserved in
             // the non-variable part
@@ -401,8 +401,8 @@ fn assign_ipv4_from_extention(cidr: &Ipv4Cidr, extention: Extensions) -> Ipv4Add
 /// ID. The network part of the address is preserved, and the host part is
 /// generated from the hash. If the extension is not a Session, the function
 /// generates a random IPv6 address within the CIDR range.
-fn assign_ipv6_from_extention(cidr: &Ipv6Cidr, extention: Extensions) -> Ipv6Addr {
-    match extention {
+fn assign_ipv6_from_extension(cidr: &Ipv6Cidr, extension: Extensions) -> Ipv6Addr {
+    match extension {
         Extensions::Session((a, b)) => {
             let combined = ((a as u128) << 64) | (b as u128);
             // Calculate the subnet mask and apply it to ensure the base_ip is preserved in
@@ -465,12 +465,12 @@ mod tests {
 
         let mut result = Vec::new();
         for x in &mut sessions {
-            result.push(assign_ipv6_from_extention(&cidr, x.clone()));
+            result.push(assign_ipv6_from_extension(&cidr, x.clone()));
         }
 
         let mut check = Vec::new();
         for x in &mut sessions {
-            check.push(assign_ipv6_from_extention(&cidr, x.clone()));
+            check.push(assign_ipv6_from_extension(&cidr, x.clone()));
         }
 
         for x in &result {
@@ -494,12 +494,12 @@ mod tests {
 
         let mut result = Vec::new();
         for x in &mut sessions {
-            result.push(assign_ipv4_from_extention(&cidr, x.clone()));
+            result.push(assign_ipv4_from_extension(&cidr, x.clone()));
         }
 
         let mut check = Vec::new();
         for x in &mut sessions {
-            check.push(assign_ipv4_from_extention(&cidr, x.clone()));
+            check.push(assign_ipv4_from_extension(&cidr, x.clone()));
         }
 
         for x in &result {

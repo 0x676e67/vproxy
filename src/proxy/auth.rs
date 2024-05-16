@@ -3,7 +3,7 @@ use std::net::IpAddr;
 
 /// Trait for checking if an IP address is in the whitelist.
 pub trait Whitelist {
-    /// Checks is empty.
+    /// Checks are empty.
     fn is_empty(&self) -> bool;
 
     /// Checks if the given IP address is in the whitelist.

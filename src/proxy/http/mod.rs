@@ -61,7 +61,7 @@ pub async fn proxy(ctx: ProxyContext) -> crate::Result<()> {
 struct HttpProxy {
     /// Authentication type
     auth: Authenticator,
-    /// Connecetor
+    /// Connector
     connector: Connector,
 }
 
@@ -91,7 +91,7 @@ impl HttpProxy {
         tracing::info!("request: {req:?}, {socket:?}", req = req, socket = socket);
 
         // Check if the client is authorized
-        let extention = self.auth.authenticate(req.headers(), socket)?;
+        let extension = self.auth.authenticate(req.headers(), socket)?;
 
         if Method::CONNECT == req.method() {
             // Received an HTTP request like:
@@ -101,7 +101,7 @@ impl HttpProxy {
             // Proxy-Connection: Keep-Alive
             // ```
             //
-            // When HTTP method is CONNECT we should return an empty body
+            // When HTTP method is CONNECT we should return an empty body,
             // then we can eventually upgrade the connection and talk a new protocol.
             //
             // Note: only after client received an empty body with STATUS_OK can the
@@ -111,7 +111,7 @@ impl HttpProxy {
                 tokio::task::spawn(async move {
                     match hyper::upgrade::on(req).await {
                         Ok(upgraded) => {
-                            if let Err(e) = self.tunnel(upgraded, addr, extention).await {
+                            if let Err(e) = self.tunnel(upgraded, addr, extension).await {
                                 tracing::warn!("server io error: {}", e);
                             };
                         }
@@ -131,7 +131,7 @@ impl HttpProxy {
             let resp = Client::builder(TokioExecutor::new())
                 .http1_title_case_headers(true)
                 .http1_preserve_header_case(true)
-                .build(self.connector.new_http_connector(extention))
+                .build(self.connector.new_http_connector(extension))
                 .request(req)
                 .await?;
 
@@ -145,10 +145,10 @@ impl HttpProxy {
         &self,
         upgraded: Upgraded,
         addr_str: String,
-        extention: Extensions,
+        extension: Extensions,
     ) -> std::io::Result<()> {
         for addr in addr_str.to_socket_addrs()? {
-            match self.connector.try_connect(addr, extention).await {
+            match self.connector.try_connect(addr, extension).await {
                 Ok(mut server) => {
                     return tunnel_proxy(upgraded, &mut server).await;
                 }

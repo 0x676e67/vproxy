@@ -72,7 +72,7 @@ async fn handle(
 ) -> Result<()> {
     let (conn, res) = conn.authenticate().await?;
 
-    let (res, extention) = res.map(|(res, extention)| (res, extention))?;
+    let (res, extension) = res.map(|(res, extension)| (res, extension))?;
 
     if !res {
         tracing::info!("authentication failed");
@@ -93,10 +93,10 @@ async fn handle(
             let target = match addr {
                 Address::DomainAddress(domain, port) => {
                     connector
-                        .try_connect_for_domain(domain, port, extention)
+                        .try_connect_for_domain(domain, port, extension)
                         .await
                 }
-                Address::SocketAddress(addr) => connector.try_connect(addr, extention).await,
+                Address::SocketAddress(addr) => connector.try_connect(addr, extension).await,
             };
 
             if let Ok(mut target) = target {

@@ -8,9 +8,9 @@ pub enum Method {
     GssApi              = 0x01,
     /// A username + password authentication.
     Password            = 0x02,
-    /// IANA reserved 0x03..=0x7f.
+    /// IANA reserved 0x03…=0x7f.
     IanaReserved(u8),
-    /// A private authentication method 0x80..=0xfe.
+    /// A private authentication method 0x80…=0xfe.
     Private(u8),
     /// X'FF' NO ACCEPTABLE METHODS
     NoAcceptableMethods = 0xff,
