@@ -56,7 +56,7 @@ pub async fn run(args: BootArgs) -> crate::Result<()> {
         concurrent: args.concurrent,
         auth,
         whitelist: args.whitelist,
-        connector: connect::Connector::new(args.cidr, args.fallback),
+        connector: connect::Connector::new(args.cidr, args.fallback, args.connect_timeout),
     };
 
     match args.proxy {

@@ -2,8 +2,14 @@ use super::auth::Extensions;
 use cidr::{IpCidr, Ipv4Cidr, Ipv6Cidr};
 use hyper_util::client::legacy::connect::HttpConnector;
 use rand::Rng;
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
-use tokio::net::{lookup_host, TcpSocket, TcpStream};
+use std::{
+    net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
+    time::Duration,
+};
+use tokio::{
+    net::{lookup_host, TcpSocket, TcpStream},
+    time::timeout,
+};
 
 /// `Connector` struct is used to create HTTP connectors, optionally configured
 /// with an IPv6 CIDR and a fallback IP address.
@@ -14,13 +20,23 @@ pub struct Connector {
     cidr: Option<IpCidr>,
     /// Optional IP address as a fallback option in case of connection failure.
     fallback: Option<IpAddr>,
+    /// Connect timeout in milliseconds.
+    connect_timeout: Duration,
 }
 
 impl Connector {
     /// Constructs a new `Connector` instance, accepting optional IPv6 CIDR and
     /// fallback IP address as parameters.
-    pub(super) fn new(cidr: Option<IpCidr>, fallback: Option<IpAddr>) -> Self {
-        Connector { cidr, fallback }
+    pub(super) fn new(
+        cidr: Option<IpCidr>,
+        fallback: Option<IpAddr>,
+        connect_timeout: u64,
+    ) -> Self {
+        Connector {
+            cidr,
+            fallback,
+            connect_timeout: Duration::from_secs(connect_timeout),
+        }
     }
 
     /// Generates a new `HttpConnector` based on the configuration.
@@ -155,22 +171,40 @@ impl Connector {
         addr: SocketAddr,
         extension: Extensions,
     ) -> std::io::Result<TcpStream> {
-        match (self.cidr, self.fallback) {
-            (Some(cidr), None) => try_connect_with_cidr(addr, cidr, extension).await,
-            (None, Some(fallback)) => try_connect_with_fallback(addr, fallback).await,
-            (Some(cidr), Some(fallback)) => {
-                try_connect_with_cidr_and_fallback(addr, cidr, fallback, extension).await
+        let result = match (self.cidr, self.fallback) {
+            (Some(cidr), None) => {
+                timeout(
+                    self.connect_timeout,
+                    try_connect_with_cidr(addr, cidr, extension),
+                )
+                .await
             }
-            (None, None) => TcpStream::connect(addr).await,
-        }
-        .and_then(|stream| {
-            tracing::info!("connect {} via {}", addr, stream.local_addr()?);
-            Ok(stream)
-        })
-        .map_err(|e| {
-            tracing::error!("failed to connect {}: {}", addr, e);
-            e
-        })
+            (None, Some(fallback)) => {
+                timeout(
+                    self.connect_timeout,
+                    try_connect_with_fallback(addr, fallback),
+                )
+                .await
+            }
+            (Some(cidr), Some(fallback)) => {
+                timeout(
+                    self.connect_timeout,
+                    try_connect_with_cidr_and_fallback(addr, cidr, fallback, extension),
+                )
+                .await
+            }
+            (None, None) => timeout(self.connect_timeout, TcpStream::connect(addr)).await,
+        }?;
+
+        result
+            .and_then(|stream| {
+                tracing::info!("connect {} via {}", addr, stream.local_addr()?);
+                Ok(stream)
+            })
+            .map_err(|e| {
+                tracing::error!("failed to connect {}: {}", addr, e);
+                e
+            })
     }
 }
 

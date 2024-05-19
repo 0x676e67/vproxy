@@ -79,6 +79,9 @@ pub struct BootArgs {
     /// Concurrent connections
     #[clap(short, long, default_value = "1024")]
     concurrent: usize,
+    /// Connection timeout
+    #[clap(short = 'T', long, default_value = "10")]
+    connect_timeout: u64,
     /// IP addresses whitelist, e.g. 47.253.53.46,47.253.81.245
     #[clap(short, long, value_parser, value_delimiter = ',')]
     whitelist: Vec<std::net::IpAddr>,

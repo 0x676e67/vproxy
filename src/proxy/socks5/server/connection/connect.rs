@@ -15,8 +15,8 @@ use tokio::{
 
 /// Socks5 connection type `Connect`
 ///
-/// This connection can be used as a regular async TCP stream after replying to the
-/// client.
+/// This connection can be used as a regular async TCP stream after replying to
+/// the client.
 #[derive(Debug)]
 pub struct Connect<S> {
     stream: TcpStream,
