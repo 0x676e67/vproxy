@@ -14,4 +14,8 @@ pub enum ProxyError {
     /// Hyper HTTP Error
     #[error("{0:?}")]
     AuthError(#[from] AuthError),
+
+    /// Tokio timeout Error
+    #[error("{0:?}")]
+    Timeout(#[from] tokio::time::error::Elapsed),
 }

@@ -93,7 +93,7 @@ async fn handle(
             let target = match addr {
                 Address::DomainAddress(domain, port) => {
                     connector
-                        .try_connect_for_domain(domain, port, extension)
+                        .try_connect_for_domain((domain, port), extension)
                         .await
                 }
                 Address::SocketAddress(addr) => connector.try_connect(addr, extension).await,

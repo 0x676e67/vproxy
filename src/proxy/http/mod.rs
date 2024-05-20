@@ -8,10 +8,7 @@ use http_body_util::{combinators::BoxBody, BodyExt, Empty, Full};
 use hyper::{
     server::conn::http1, service::service_fn, upgrade::Upgraded, Method, Request, Response,
 };
-use hyper_util::{
-    client::legacy::Client,
-    rt::{TokioExecutor, TokioIo},
-};
+use hyper_util::rt::TokioIo;
 use std::{
     net::{SocketAddr, ToSocketAddrs},
     sync::Arc,
@@ -128,14 +125,11 @@ impl HttpProxy {
                 Ok(resp)
             }
         } else {
-            let resp = Client::builder(TokioExecutor::new())
-                .http1_title_case_headers(true)
-                .http1_preserve_header_case(true)
-                .build(self.connector.new_http_connector(extension))
-                .request(req)
-                .await?;
-
-            Ok(resp.map(|b| b.boxed()))
+            Ok(self
+                .connector
+                .new_http_request(req, extension)
+                .await?
+                .map(|b| b.boxed()))
         }
     }
 

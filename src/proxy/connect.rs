@@ -1,6 +1,11 @@
-use super::auth::Extensions;
+use super::{auth::Extensions, http::error::ProxyError};
 use cidr::{IpCidr, Ipv4Cidr, Ipv6Cidr};
-use hyper_util::client::legacy::connect::HttpConnector;
+use http::{Request, Response};
+use hyper::body::Incoming;
+use hyper_util::{
+    client::legacy::{connect::HttpConnector, Client},
+    rt::TokioExecutor,
+};
 use rand::Rng;
 use std::{
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
@@ -39,27 +44,51 @@ impl Connector {
         }
     }
 
-    /// Generates a new `HttpConnector` based on the configuration.
+    /// Asynchronously creates and sends a new HTTP request with custom local addresses.
     ///
-    /// This method configures the connector considering the IPv6 CIDR and
-    /// fallback IP address.
+    /// This method constructs an `HttpConnector` and sets its local addresses based on
+    /// the provided CIDR and fallback IP configuration. It then sends the request using
+    /// a hyper `Client` and returns the response or a `ProxyError` if the request fails.
     ///
     /// # Arguments
     ///
-    /// * `extension` - Extensions used to assign an IP address from the CIDR.
+    /// * `req` - The incoming HTTP request to be forwarded.
+    /// * `extension` - Additional data used for setting local addresses based on CIDR.
     ///
     /// # Returns
     ///
-    /// * `HttpConnector` - The configured HTTP connector.
+    /// A `Result` containing the HTTP response on success, or a `ProxyError` on failure.
     ///
-    /// # Example
+    /// # Examples
     ///
+    /// ```rust
+    /// let response = proxy.new_http_request(request, extensions).await?;
     /// ```
-    /// let extension = Extensions::new();
-    /// let connector = new_http_connector(extension);
-    /// ```
-    pub fn new_http_connector(&self, extension: Extensions) -> HttpConnector {
+    ///
+    /// # Details
+    ///
+    /// The method checks the provided CIDR and fallback IP configuration and sets the
+    /// local addresses of the connector accordingly:
+    ///
+    /// * If both CIDR (IPv4) and fallback (IPv6) are provided, it assigns a local IPv4
+    ///   address from the CIDR and sets both IPv4 and IPv6 addresses.
+    /// * If only CIDR (IPv4) is provided, it assigns a local IPv4 address from the CIDR
+    ///   and sets it.
+    /// * If both CIDR (IPv6) and fallback (IPv4) are provided, it assigns a local IPv6
+    ///   address from the CIDR and sets both IPv4 and IPv6 addresses.
+    /// * If only CIDR (IPv6) is provided, it assigns a local IPv6 address from the CIDR
+    ///   and sets it.
+    /// * If no CIDR is provided but a fallback IP is present, it sets the fallback IP
+    ///   address.
+    ///
+    /// The request is sent with a timeout specified by `self.connect_timeout`.
+    pub async fn new_http_request(
+        &self,
+        req: Request<Incoming>,
+        extension: Extensions,
+    ) -> Result<Response<Incoming>, ProxyError> {
         let mut connector = HttpConnector::new();
+        connector.set_connect_timeout(Some(self.connect_timeout));
 
         match (self.cidr, self.fallback) {
             (Some(IpCidr::V4(cidr)), Some(IpAddr::V6(v6))) => {
@@ -74,8 +103,8 @@ impl Connector {
                 let v6 = assign_ipv6_from_extension(&cidr, extension);
                 connector.set_local_addresses(v4, v6);
             }
-            (Some(IpCidr::V6(v6)), None) => {
-                let v6 = assign_ipv6_from_extension(&v6, extension);
+            (Some(IpCidr::V6(cidr)), None) => {
+                let v6 = assign_ipv6_from_extension(&cidr, extension);
                 connector.set_local_address(Some(v6.into()));
             }
             // ipv4 or ipv6
@@ -83,7 +112,14 @@ impl Connector {
             _ => {}
         }
 
-        connector
+        let resp = Client::builder(TokioExecutor::new())
+            .http1_title_case_headers(true)
+            .http1_preserve_header_case(true)
+            .build(connector)
+            .request(req)
+            .await?;
+
+        Ok(resp)
     }
 
     /// Attempts to establish a connection to a given domain and port.
@@ -111,19 +147,18 @@ impl Connector {
     /// let domain = "example.com".to_string();
     /// let port = 80;
     /// let extension = Extensions::new();
-    /// let stream = try_connect_for_domain(domain, port, extension)
+    /// let stream = try_connect_for_domain((domain, port), extension)
     ///     .await
     ///     .unwrap();
     /// ```
     pub async fn try_connect_for_domain(
         &self,
-        domain: String,
-        port: u16,
+        host: (String, u16),
         extension: Extensions,
     ) -> std::io::Result<TcpStream> {
         let mut last_err = None;
 
-        for target_addr in lookup_host((domain, port)).await? {
+        for target_addr in lookup_host(host).await? {
             match self.try_connect(target_addr, extension).await {
                 Ok(stream) => return Ok(stream),
                 Err(e) => last_err = Some(e),
