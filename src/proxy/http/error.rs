@@ -1,6 +1,3 @@
-use super::auth::AuthError;
-
-/// Proxy Error
 #[derive(thiserror::Error, Debug)]
 pub enum ProxyError {
     /// Hyper Error
@@ -13,7 +10,7 @@ pub enum ProxyError {
 
     /// Hyper HTTP Error
     #[error(transparent)]
-    AuthError(#[from] AuthError),
+    AuthError(#[from] super::auth::AuthError),
 
     /// Tokio timeout Error
     #[error(transparent)]

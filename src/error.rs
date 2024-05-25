@@ -1,7 +1,4 @@
-use thiserror::Error;
-
-#[allow(clippy::enum_variant_names)]
-#[derive(Error, Debug)]
+#[derive(thiserror::Error, Debug)]
 pub enum Error {
     #[error(transparent)]
     IOError(#[from] std::io::Error),
@@ -16,7 +13,7 @@ pub enum Error {
     AddressParseError(#[from] std::net::AddrParseError),
 
     #[error(transparent)]
-    SelfUpdateError(#[from] self_update::errors::Error),
+    SelfUpdateError(#[from] self_github_update::errors::Error),
 
     #[error(transparent)]
     Socks5Error(#[from] crate::proxy::Error),

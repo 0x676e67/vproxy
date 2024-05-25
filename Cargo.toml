@@ -33,8 +33,7 @@ tokio-stream = "0.1.15"
 percent-encoding = "2.3.1"
 tracing = "0.1.40"
 tracing-subscriber = { version = "0.3.18", features = ["env-filter"] }
-self_update = { version = "0.40.0", default-features = false, features = [
-    "rustls",
+self-github-update = { version = "0.39", features = [
     "archive-tar",
     "compression-flate2",
 ] }
