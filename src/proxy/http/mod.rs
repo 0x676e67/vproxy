@@ -1,9 +1,13 @@
 mod auth;
 pub mod error;
 
-use self::{auth::Authenticator, error::ProxyError};
+use self::{
+    auth::{AuthError, Authenticator},
+    error::ProxyError,
+};
 use super::{auth::Extensions, connect::Connector, ProxyContext};
 use bytes::Bytes;
+use http::{header, StatusCode};
 use http_body_util::{combinators::BoxBody, BodyExt, Empty, Full};
 use hyper::{
     server::conn::http1, service::service_fn, upgrade::Upgraded, Method, Request, Response,
@@ -88,7 +92,11 @@ impl HttpProxy {
         tracing::info!("request: {req:?}, {socket:?}", req = req, socket = socket);
 
         // Check if the client is authorized
-        let extension = self.auth.authenticate(req.headers(), socket)?;
+        let extension = match self.auth.authenticate(req.headers(), socket) {
+            Ok(extension) => extension,
+            // If the client is not authorized, return an error response
+            Err(e) => return Ok(e.into()),
+        };
 
         if Method::CONNECT == req.method() {
             // Received an HTTP request like:
@@ -162,6 +170,22 @@ async fn tunnel_proxy(upgraded: Upgraded, server: &mut TcpStream) -> std::io::Re
         from_server
     );
     Ok(())
+}
+
+impl Into<Response<BoxBody<Bytes, hyper::Error>>> for AuthError {
+    fn into(self) -> Response<BoxBody<Bytes, hyper::Error>> {
+        match self {
+            AuthError::ProxyAuthenticationRequired => Response::builder()
+                .status(StatusCode::PROXY_AUTHENTICATION_REQUIRED)
+                .header(header::PROXY_AUTHENTICATE, "Basic realm=\"Proxy\"")
+                .body(empty())
+                .unwrap(),
+            AuthError::Forbidden => Response::builder()
+                .status(StatusCode::FORBIDDEN)
+                .body(empty())
+                .unwrap(),
+        }
+    }
 }
 
 fn host_addr(uri: &http::Uri) -> Option<String> {

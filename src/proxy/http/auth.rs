@@ -6,12 +6,10 @@ use std::net::{IpAddr, SocketAddr};
 /// Auth Error
 #[derive(thiserror::Error, Debug)]
 pub enum AuthError {
-    #[error("Missing credentials")]
-    MissingCredentials,
     #[error("Invalid credentials")]
-    InvalidCredentials,
-    #[error("Unauthorized")]
-    Unauthorized,
+    ProxyAuthenticationRequired,
+    #[error("Forbidden")]
+    Forbidden,
 }
 
 /// Enum representing different types of authenticators.
@@ -61,33 +59,31 @@ impl Authenticator {
                 let is_equal = self.contains(socket.ip()) || self.is_empty();
                 if !is_equal {
                     tracing::warn!("Unauthorized access from {}", socket);
-                    return Err(AuthError::Unauthorized);
+                    return Err(AuthError::Forbidden);
                 }
                 Ok(Extensions::None)
             }
             Authenticator::Password {
                 username, password, ..
             } => {
-                let hv = headers
-                    .get(header::PROXY_AUTHORIZATION)
-                    .ok_or_else(|| AuthError::MissingCredentials)?;
-
                 // Extract basic auth
-                let basic_auth = hv
-                    .to_str()
-                    .map_err(|_| AuthError::InvalidCredentials)?
-                    .strip_prefix("Basic ")
-                    .ok_or_else(|| AuthError::InvalidCredentials)?;
+                let basic_auth = headers
+                    .get(header::PROXY_AUTHORIZATION)
+                    .and_then(|hv| hv.to_str().ok())
+                    .and_then(|s| s.strip_prefix("Basic "))
+                    .ok_or_else(|| AuthError::ProxyAuthenticationRequired)?;
 
                 // Convert to string
                 let auth_bytes = base64::engine::general_purpose::STANDARD
                     .decode(basic_auth.as_bytes())
-                    .map_err(|_| AuthError::InvalidCredentials)?;
-                let auth_str =
-                    String::from_utf8(auth_bytes).map_err(|_| AuthError::InvalidCredentials)?;
+                    .map_err(|_| AuthError::ProxyAuthenticationRequired)?;
+
+                let auth_str = String::from_utf8(auth_bytes)
+                    .map_err(|_| AuthError::ProxyAuthenticationRequired)?;
+
                 let (auth_username, auth_password) = auth_str
                     .split_once(':')
-                    .ok_or_else(|| AuthError::InvalidCredentials)?;
+                    .ok_or_else(|| AuthError::ProxyAuthenticationRequired)?;
 
                 // Check if the username and password are correct
                 let is_equal =
@@ -99,7 +95,7 @@ impl Authenticator {
                     Ok(Extensions::from((username.as_str(), auth_username)))
                 } else {
                     tracing::warn!("Unauthorized access from {}", socket);
-                    return Err(AuthError::Unauthorized);
+                    return Err(AuthError::Forbidden);
                 }
             }
         }
