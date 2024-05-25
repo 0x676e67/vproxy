@@ -42,32 +42,34 @@ cargo install vproxy
 If you run the program with sudo, it will automatically configure sysctl net.ipv6.ip_nonlocal_bind=1 and ip route add local 2001:470:e953::/48 dev lo for you. If you do not run it with sudo, you will need to configure these manually.
 
 ```shell
-sysctl net.ipv6.ip_nonlocal_bind=1
+# Enable binding to non-local IPv6 addresses
+sudo sysctl net.ipv6.ip_nonlocal_bind=1
 
-# Replace your IPv6 subnet
-ip route add local 2001:470:e953::/48 dev lo
+# Replace with your IPv6 subnet
+sudo ip route add local 2001:470:e953::/48 dev lo
 
-# Run
+# Run the server http/socks5
 vproxy run -i 2001:470:e953::/48 http
 
-# Start Daemon (Run in the background), must use sudo
-vproxy start -i 2001:470:e953::/48 http
+# Start the daemon (runs in the background), requires sudo
+sudo vproxy start -i 2001:470:e953::/48 http
 
-# Restart Daemon, must use sudo
-vproxy restart
+# Restart the daemon, requires sudo
+sudo vproxy restart
 
-# Stop Daemon, must use sudo
-vproxy stop
+# Stop the daemon, requires sudo
+sudo vproxy stop
 
-# Show Daemon log
+# Show daemon log
 vproxy log
 
-# Show Daemon status
+# Show daemon status
 vproxy status
 
-# Online Update
+# Online update
 vproxy update
 
+# Test loop request
 while true; do curl -x http://127.0.0.1:8100 -s https://api.ip.sb/ip -A Mozilla; done
 ...
 2001:470:e953:5b75:c862:3328:3e8f:f4d1
@@ -76,6 +78,7 @@ while true; do curl -x http://127.0.0.1:8100 -s https://api.ip.sb/ip -A Mozilla;
 2001:470:e953:29f3:41e2:d3f2:4a49:1f22
 2001:470:e953:98f6:cb40:9dfd:c7ab:18c4
 2001:470:e953:f1d7:eb68:cc59:b2d0:2c6f
+
 ```
 
 ### Manual
@@ -83,7 +86,7 @@ while true; do curl -x http://127.0.0.1:8100 -s https://api.ip.sb/ip -A Mozilla;
 If no subnet is configured, the local default network proxy request will be used. When the local machine sets the priority `Ipv4`/`Ipv6` and the priority is `Ipv4`, it will always use `Ipv4` to make requests (if any).
 
 - When using passwordless authorization, if an IP whitelist exists, only authorized IPs can pass the request.
-- Add -session-id to the username, where session is a fixed value and ID is an arbitrary random value. Keep the Session ID unchanged to use a fixed IP.
+- Append `-session-id` to the username, where session is a fixed value and ID is an arbitrary random value (e.g., `username-session-123456`). Keep the Session ID unchanged to use a fixed IP.
 
 ```shell
 $ vproxy -h
