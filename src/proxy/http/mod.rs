@@ -141,21 +141,14 @@ impl HttpProxy {
         addr_str: String,
         extension: Extensions,
     ) -> std::io::Result<()> {
-        for addr in addr_str.to_socket_addrs()? {
-            match self.connector.try_connect(addr, extension).await {
-                Ok(mut server) => {
-                    return tunnel_proxy(upgraded, &mut server).await;
-                }
-                Err(err) => {
-                    tracing::debug!("try connect: {} failed: {}", addr_str, err);
-                }
-            }
-        }
+        let mut server = {
+            let addrs = addr_str.to_socket_addrs()?;
+            self.connector
+                .try_connect_with_addrs(addrs, extension)
+                .await?
+        };
 
-        // All attempts failed
-        tracing::warn!("tunnel: {} failed", addr_str);
-
-        Ok(())
+        tunnel_proxy(upgraded, &mut server).await
     }
 }
 

@@ -44,20 +44,24 @@ impl Connector {
         }
     }
 
-    /// Asynchronously creates and sends a new HTTP request with custom local addresses.
+    /// Asynchronously creates and sends a new HTTP request with custom local
+    /// addresses.
     ///
-    /// This method constructs an `HttpConnector` and sets its local addresses based on
-    /// the provided CIDR and fallback IP configuration. It then sends the request using
-    /// a hyper `Client` and returns the response or a `ProxyError` if the request fails.
+    /// This method constructs an `HttpConnector` and sets its local addresses
+    /// based on the provided CIDR and fallback IP configuration. It then
+    /// sends the request using a hyper `Client` and returns the response or
+    /// a `ProxyError` if the request fails.
     ///
     /// # Arguments
     ///
     /// * `req` - The incoming HTTP request to be forwarded.
-    /// * `extension` - Additional data used for setting local addresses based on CIDR.
+    /// * `extension` - Additional data used for setting local addresses based
+    ///   on CIDR.
     ///
     /// # Returns
     ///
-    /// A `Result` containing the HTTP response on success, or a `ProxyError` on failure.
+    /// A `Result` containing the HTTP response on success, or a `ProxyError` on
+    /// failure.
     ///
     /// # Examples
     ///
@@ -67,19 +71,21 @@ impl Connector {
     ///
     /// # Details
     ///
-    /// The method checks the provided CIDR and fallback IP configuration and sets the
-    /// local addresses of the connector accordingly:
+    /// The method checks the provided CIDR and fallback IP configuration and
+    /// sets the local addresses of the connector accordingly:
     ///
-    /// * If both CIDR (IPv4) and fallback (IPv6) are provided, it assigns a local IPv4
-    ///   address from the CIDR and sets both IPv4 and IPv6 addresses.
-    /// * If only CIDR (IPv4) is provided, it assigns a local IPv4 address from the CIDR
-    ///   and sets it.
-    /// * If both CIDR (IPv6) and fallback (IPv4) are provided, it assigns a local IPv6
-    ///   address from the CIDR and sets both IPv4 and IPv6 addresses.
-    /// * If only CIDR (IPv6) is provided, it assigns a local IPv6 address from the CIDR
-    ///   and sets it.
-    /// * If no CIDR is provided but a fallback IP is present, it sets the fallback IP
-    ///   address.
+    /// * If both CIDR (IPv4) and fallback (IPv6) are provided, it assigns a
+    ///   local IPv4 address from the CIDR and sets both IPv4 and IPv6
+    ///   addresses.
+    /// * If only CIDR (IPv4) is provided, it assigns a local IPv4 address from
+    ///   the CIDR and sets it.
+    /// * If both CIDR (IPv6) and fallback (IPv4) are provided, it assigns a
+    ///   local IPv6 address from the CIDR and sets both IPv4 and IPv6
+    ///   addresses.
+    /// * If only CIDR (IPv6) is provided, it assigns a local IPv6 address from
+    ///   the CIDR and sets it.
+    /// * If no CIDR is provided but a fallback IP is present, it sets the
+    ///   fallback IP address.
     ///
     /// The request is sent with a timeout specified by `self.connect_timeout`.
     pub async fn new_http_request(
@@ -122,43 +128,82 @@ impl Connector {
         Ok(resp)
     }
 
-    /// Attempts to establish a connection to a given domain and port.
-    ///
-    /// This function first resolves the domain, then tries to connect to each
-    /// resolved address, until it successfully connects to an address or
-    /// has tried all addresses. If all connection attempts fail, it will
-    /// return the error from the last attempt. If no connection attempts
-    /// were made, it will return a new `Error` object.
-    ///
-    /// # Arguments
-    ///
-    /// * `domain` - The target domain to connect to.
-    /// * `port` - The target port to connect to.
-    /// * `extension` - Extensions used to assign an IP address from the CIDR.
-    ///
-    /// # Returns
-    ///
-    /// * `std::io::Result<TcpStream>` - The established TCP connection, or an
-    ///   error if the connection failed.
-    ///
-    /// # Example
-    ///
-    /// ```
-    /// let domain = "example.com".to_string();
-    /// let port = 80;
-    /// let extension = Extensions::new();
-    /// let stream = try_connect_for_domain((domain, port), extension)
-    ///     .await
-    ///     .unwrap();
-    /// ```
-    pub async fn try_connect_for_domain(
+    // This function attempts to establish a TCP connection to a series of
+    // addresses. It takes two parameters:
+    // - `addrs`: an iterator of `SocketAddr` that the function will try to connect
+    //   to.
+    // - `extension`: an `Extensions` object that may be used for additional
+    //   configuration.
+    //
+    // The function works as follows:
+    // 1. It converts the `addrs` parameter into an iterator.
+    // 2. It calls the `try_connect_with_iter` function, passing the iterator and
+    //    the `extension` parameter.
+    // 3. The `try_connect_with_iter` function attempts to establish a connection to
+    //    each address in the iterator. If a connection is successfully established,
+    //    it immediately returns the `TcpStream`. If all attempts fail, it returns
+    //    the last error encountered. If no attempts were made (i.e., if `addrs` was
+    //    empty), it returns a `ConnectionAborted` error.
+    pub async fn try_connect_with_addrs(
+        &self,
+        addrs: impl IntoIterator<Item = SocketAddr>,
+        extension: Extensions,
+    ) -> std::io::Result<TcpStream> {
+        self.try_connect_with_iter(addrs.into_iter(), extension)
+            .await
+    }
+
+    // This function attempts to establish a TCP connection to a domain.
+    // It takes two parameters:
+    // - `host`: a tuple containing a domain name and a port number.
+    // - `extension`: an `Extensions` object that may be used for additional
+    //   configuration.
+    //
+    // The function works as follows:
+    // 1. It uses the `lookup_host` function to resolve the domain name into a
+    //    series of `SocketAddr`.
+    // 2. It calls the `try_connect_with_iter` function, passing the resolved
+    //    addresses and the `extension` parameter.
+    // 3. The `try_connect_with_iter` function attempts to establish a connection to
+    //    each address. If a connection is successfully established, it immediately
+    //    returns the `TcpStream`. If all attempts fail, it returns the last error
+    //    encountered. If no attempts were made (i.e., if the domain name could not
+    //    be resolved to any addresses), it returns a `ConnectionAborted` error.
+    pub async fn try_connect_with_domain(
         &self,
         host: (String, u16),
         extension: Extensions,
     ) -> std::io::Result<TcpStream> {
+        let addrs = lookup_host(host).await?;
+        self.try_connect_with_iter(addrs, extension).await
+    }
+
+    // This private helper function attempts to establish a TCP connection to a
+    // series of addresses. It takes two parameters:
+    // - `addrs`: an iterator of `SocketAddr` that the function will try to connect
+    //   to.
+    // - `extension`: an `Extensions` object that may be used for additional
+    //   configuration.
+    //
+    // The function works as follows:
+    // 1. It iterates over each `SocketAddr` in `addrs`.
+    // 2. For each address, it attempts to establish a connection using the
+    //    `try_connect` method.
+    // 3. If the connection is successful, it immediately returns the `TcpStream`.
+    // 4. If the connection fails, it stores the error and moves on to the next
+    //    address.
+    // 5. If all addresses have been tried and none of them succeeded, it returns
+    //    the last error encountered.
+    // 6. If no addresses were tried at all (i.e., if `addrs` was empty), it returns
+    //    a `ConnectionAborted` error.
+    async fn try_connect_with_iter(
+        &self,
+        addrs: impl Iterator<Item = SocketAddr>,
+        extension: Extensions,
+    ) -> std::io::Result<TcpStream> {
         let mut last_err = None;
 
-        for target_addr in lookup_host(host).await? {
+        for target_addr in addrs {
             match self.try_connect(target_addr, extension).await {
                 Ok(stream) => return Ok(stream),
                 Err(e) => last_err = Some(e),
