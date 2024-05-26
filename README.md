@@ -87,7 +87,48 @@ If no subnet is configured, the local default network proxy request will be used
 
 - When using passwordless authorization, if an IP whitelist exists, only authorized IPs can pass the request.
 - Append `-session-id` to the username, where session is a fixed value and ID is an arbitrary random value (e.g., `username-session-123456`). Keep the Session ID unchanged to use a fixed IP.
-- For HTTP users who are using password-less authorization and need a fixed IP address, you can add the `session-id` header to the request (e.g., `session-id: 123456`). By keeping the Session ID unchanged, you can use a fixed IP.
+- For HTTP users who are using password-less authorization and need a fixed IP address, you can add the `session-id` header to the request (e.g., `session-id: 123456`). By keeping the Session ID unchanged, you can use a fixed IP. Keep in mind Chrome and Firefox can't set `--proxy-header` like curl.
+### Examples
+#### Http proxy session with username and password:
+```shell
+./vproxy run --bind 127.0.0.1:8101 -i 2001:470:70c6::/48 http -u test -p test
+
+$ for i in `seq 1 10`; do curl -x "http://test-session-123456789:test@127.0.0.1:8101" https://api6.ipify.org; done
+2001:470:70c6:93ee:9b7c:b4f9:4913:22f5
+2001:470:70c6:93ee:9b7c:b4f9:4913:22f5
+2001:470:70c6:93ee:9b7c:b4f9:4913:22f5
+$ for i in `seq 1 10`; do curl -x "http://test-session-987654321:test@127.0.0.1:8101" https://api6.ipify.org; done
+2001:470:70c6:41d0:14fd:d025:835a:d102
+2001:470:70c6:41d0:14fd:d025:835a:d102
+2001:470:70c6:41d0:14fd:d025:835a:d102
+```
+#### Http proxy session with passwordless authorization:
+```shell
+./vproxy run --bind 127.0.0.1:8101 -w 127.0.0.1 -i 2001:470:70c6::/48 http
+
+$ for i in `seq 1 3`; do curl --proxy-header "session-id: 123456789" -x "http://159.223.22.161:8101" https://api6.ipify.org; done
+2001:470:70c6:93ee:9b7c:b4f9:4913:22f5
+2001:470:70c6:93ee:9b7c:b4f9:4913:22f5
+2001:470:70c6:93ee:9b7c:b4f9:4913:22f5
+for i in `seq 1 3`; do curl --proxy-header "session-id: 987654321" -x "http://159.223.22.161:8101" https://api6.ipify.org; done
+2001:470:70c6:41d0:14fd:d025:835a:d102
+2001:470:70c6:41d0:14fd:d025:835a:d102
+2001:470:70c6:41d0:14fd:d025:835a:d102
+```
+#### Socks5 proxy session with username and password
+```shell
+./vproxy run --bind 127.0.0.1:8101 -i 2001:470:70c6::/48 socks5 -u test -p test
+
+$ for i in `seq 1 3`; do curl -x "socks5h://test-session-123456789:test@127.0.0.1:8101" https://api6.ipify.org; done
+2001:470:70c6:93ee:9b7c:b4f9:4913:22f5
+2001:470:70c6:93ee:9b7c:b4f9:4913:22f5
+2001:470:70c6:93ee:9b7c:b4f9:4913:22f5
+$ for i in `seq 1 3`; do curl -x "socks5h://test-session-987654321:test@127.0.0.1:8101" https://api6.ipify.org; done
+2001:470:70c6:41d0:14fd:d025:835a:d102
+2001:470:70c6:41d0:14fd:d025:835a:d102
+2001:470:70c6:41d0:14fd:d025:835a:d102
+
+```
 
 ```shell
 $ vproxy -h
