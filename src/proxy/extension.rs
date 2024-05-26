@@ -69,11 +69,9 @@ impl From<&mut HeaderMap> for Extensions {
             if let Ok(s) = value.to_str() {
                 // If the remaining string is not empty, it is considered as the session ID.
                 // Return it wrapped in the `Session` variant of `AuthExpand`.
-                if !s.is_empty() {
-                    let extensions = Self::new(s);
-                    headers.remove(Self::SESSION_ID_HEADER);
-                    return extensions;
-                }
+                let extensions = Self::new(s);
+                headers.remove(Self::SESSION_ID_HEADER);
+                return extensions;
             }
         }
         // If the `x-session-id` header is not present, or if the value is not a valid
