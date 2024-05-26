@@ -1,4 +1,4 @@
-use super::{auth::Extensions, http::error::ProxyError};
+use super::{extension::Extensions, http::error::ProxyError};
 use cidr::{IpCidr, Ipv4Cidr, Ipv6Cidr};
 use http::{Request, Response};
 use hyper::body::Incoming;
@@ -211,7 +211,10 @@ impl Connector {
         }
 
         match last_err {
-            Some(e) => Err(e),
+            Some(e) => {
+                tracing::error!("Failed to connect to any resolved address: {}", e);
+                Err(e)
+            }
             None => Err(std::io::Error::new(
                 std::io::ErrorKind::ConnectionAborted,
                 "Failed to connect to any resolved address",
@@ -276,15 +279,10 @@ impl Connector {
             (None, None) => timeout(self.connect_timeout, TcpStream::connect(addr)).await,
         }?;
 
-        result
-            .and_then(|stream| {
-                tracing::info!("connect {} via {}", addr, stream.local_addr()?);
-                Ok(stream)
-            })
-            .map_err(|e| {
-                tracing::error!("failed to connect {}: {}", addr, e);
-                e
-            })
+        result.and_then(|stream| {
+            tracing::info!("connect {} via {}", addr, stream.local_addr()?);
+            Ok(stream)
+        })
     }
 }
 

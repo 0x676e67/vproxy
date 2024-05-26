@@ -5,12 +5,13 @@ use self::{
     auth::{AuthError, Authenticator},
     error::ProxyError,
 };
-use super::{auth::Extensions, connect::Connector, ProxyContext};
+use super::{connect::Connector, extension::Extensions, ProxyContext};
 use bytes::Bytes;
 use http::{header, StatusCode};
 use http_body_util::{combinators::BoxBody, BodyExt, Empty, Full};
 use hyper::{
-    server::conn::http1, service::service_fn, upgrade::Upgraded, Method, Request, Response,
+    body::Incoming, server::conn::http1, service::service_fn, upgrade::Upgraded, Method, Request,
+    Response,
 };
 use hyper_util::rt::TokioIo;
 use std::{
@@ -87,12 +88,12 @@ impl HttpProxy {
     async fn proxy(
         self,
         socket: SocketAddr,
-        req: Request<hyper::body::Incoming>,
+        mut req: Request<Incoming>,
     ) -> Result<Response<BoxBody<Bytes, hyper::Error>>, ProxyError> {
         tracing::info!("request: {req:?}, {socket:?}", req = req, socket = socket);
 
         // Check if the client is authorized
-        let extension = match self.auth.authenticate(req.headers(), socket) {
+        let extension = match self.auth.authenticate(req.headers_mut(), socket) {
             Ok(extension) => extension,
             // If the client is not authorized, return an error response
             Err(e) => return Ok(e.into()),

@@ -1,11 +1,12 @@
-mod auth;
 mod connect;
+mod extension;
 mod http;
 mod murmur;
 #[cfg(target_os = "linux")]
 mod route;
 mod socks5;
 
+use self::connect::Connector;
 use crate::{AuthMode, BootArgs, Proxy};
 pub use socks5::Error;
 use std::net::{IpAddr, SocketAddr};
@@ -21,7 +22,7 @@ struct ProxyContext {
     /// Ip whitelist
     pub whitelist: Vec<IpAddr>,
     /// Connector
-    pub connector: connect::Connector,
+    pub connector: Connector,
 }
 
 #[tokio::main(flavor = "multi_thread")]
@@ -56,7 +57,7 @@ pub async fn run(args: BootArgs) -> crate::Result<()> {
         concurrent: args.concurrent,
         auth,
         whitelist: args.whitelist,
-        connector: connect::Connector::new(args.cidr, args.fallback, args.connect_timeout),
+        connector: Connector::new(args.cidr, args.fallback, args.connect_timeout),
     };
 
     match args.proxy {

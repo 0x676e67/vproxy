@@ -5,12 +5,11 @@ pub use self::{
     request::Request,
     response::{Response, Status},
 };
-use serde::{Deserialize, Serialize};
 
 pub const SUBNEGOTIATION_VERSION: u8 = 0x01;
 
 /// Required for a username + password authentication.
-#[derive(Default, Debug, Eq, PartialEq, Clone, Hash, Deserialize, Serialize)]
+#[derive(Default, Debug, Eq, PartialEq, Clone, Hash)]
 pub struct UsernamePassword {
     pub username: String,
     pub password: String,

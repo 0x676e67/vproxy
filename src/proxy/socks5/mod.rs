@@ -10,7 +10,7 @@ use self::{
         ClientConnection, IncomingConnection, Server, UdpAssociate,
     },
 };
-use super::{auth::Extensions, connect, ProxyContext};
+use super::{connect, extension::Extensions, ProxyContext};
 pub use error::Error;
 use std::{
     net::{SocketAddr, ToSocketAddrs},

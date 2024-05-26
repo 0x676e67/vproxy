@@ -1,4 +1,5 @@
 use super::murmur;
+use http::HeaderMap;
 use std::net::IpAddr;
 
 /// Trait for checking if an IP address is in the whitelist.
@@ -46,6 +47,27 @@ impl From<(&str, &str)> for Extensions {
         // If the string `s` does not start with the prefix, or if the remaining string
         // after removing the prefix and "-" is empty, return the `None` variant
         // of `AuthExpand`.
+        Extensions::None
+    }
+}
+
+impl From<&mut HeaderMap> for Extensions {
+    fn from(headers: &mut HeaderMap) -> Self {
+        // Get the value of the `x-session-id` header from the headers.
+        if let Some(value) = headers.get("x-session-id") {
+            // Convert the value to a string.
+            if let Ok(s) = value.to_str() {
+                // If the remaining string is not empty, it is considered as the session ID.
+                // Return it wrapped in the `Session` variant of `AuthExpand`.
+                if !s.is_empty() {
+                    let (a, b) = murmur::murmurhash3_x64_128(s.as_bytes(), s.len() as u64);
+                    headers.remove("x-session-id");
+                    return Extensions::Session((a, b));
+                }
+            }
+        }
+        // If the `x-session-id` header is not present, or if the value is not a valid
+        // string, return the `None` variant of `AuthExpand`.
         Extensions::None
     }
 }
