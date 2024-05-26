@@ -20,6 +20,19 @@ pub enum Extensions {
     Session((u64, u64)),
 }
 
+impl Extensions {
+    const SESSION_ID_HEADER: &'static str = "session-id";
+
+    fn new(s: &str) -> Self {
+        if !s.is_empty() {
+            let (a, b) = murmur::murmurhash3_x64_128(s.as_bytes(), s.len() as u64);
+            Extensions::Session((a, b))
+        } else {
+            Extensions::None
+        }
+    }
+}
+
 impl Default for Extensions {
     fn default() -> Self {
         Extensions::None
@@ -38,10 +51,7 @@ impl From<(&str, &str)> for Extensions {
                 let s = s.trim_start_matches("-session-");
                 // If the remaining string is not empty, it is considered as the session ID.
                 // Return it wrapped in the `Session` variant of `AuthExpand`.
-                if !s.is_empty() {
-                    let (a, b) = murmur::murmurhash3_x64_128(s.as_bytes(), s.len() as u64);
-                    return Extensions::Session((a, b));
-                }
+                return Self::new(s);
             }
         }
         // If the string `s` does not start with the prefix, or if the remaining string
@@ -54,15 +64,15 @@ impl From<(&str, &str)> for Extensions {
 impl From<&mut HeaderMap> for Extensions {
     fn from(headers: &mut HeaderMap) -> Self {
         // Get the value of the `x-session-id` header from the headers.
-        if let Some(value) = headers.get("x-session-id") {
+        if let Some(value) = headers.get(Self::SESSION_ID_HEADER) {
             // Convert the value to a string.
             if let Ok(s) = value.to_str() {
                 // If the remaining string is not empty, it is considered as the session ID.
                 // Return it wrapped in the `Session` variant of `AuthExpand`.
                 if !s.is_empty() {
-                    let (a, b) = murmur::murmurhash3_x64_128(s.as_bytes(), s.len() as u64);
-                    headers.remove("x-session-id");
-                    return Extensions::Session((a, b));
+                    let extensions = Self::new(s);
+                    headers.remove(Self::SESSION_ID_HEADER);
+                    return extensions;
                 }
             }
         }
