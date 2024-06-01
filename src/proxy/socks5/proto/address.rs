@@ -9,9 +9,9 @@ use tokio::io::{AsyncRead, AsyncReadExt};
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 #[repr(u8)]
 pub enum AddressType {
-    IPv4 = 0x01,
+    IPv4   = 0x01,
     Domain = 0x03,
-    IPv6 = 0x04,
+    IPv6   = 0x04,
 }
 
 impl TryFrom<u8> for AddressType {

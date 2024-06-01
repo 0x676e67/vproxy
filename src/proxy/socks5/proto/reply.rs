@@ -1,14 +1,14 @@
 #[repr(u8)]
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum Reply {
-    Succeeded = 0x00,
-    GeneralFailure = 0x01,
+    Succeeded            = 0x00,
+    GeneralFailure       = 0x01,
     ConnectionNotAllowed = 0x02,
-    NetworkUnreachable = 0x03,
-    HostUnreachable = 0x04,
-    ConnectionRefused = 0x05,
-    TtlExpired = 0x06,
-    CommandNotSupported = 0x07,
+    NetworkUnreachable   = 0x03,
+    HostUnreachable      = 0x04,
+    ConnectionRefused    = 0x05,
+    TtlExpired           = 0x06,
+    CommandNotSupported  = 0x07,
     AddressTypeNotSupported = 0x08,
 }
 

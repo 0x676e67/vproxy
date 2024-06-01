@@ -492,14 +492,13 @@ fn create_tcp_socket_for_ip(ip: &IpAddr) -> std::io::Result<TcpSocket> {
 /// generates a random IPv4 address within the CIDR range.
 fn assign_ipv4_from_extension(cidr: &Ipv4Cidr, extension: Extensions) -> Ipv4Addr {
     match extension {
-        Extensions::Session((a, b)) => {
-            let combined = combine(a, b);
+        Extensions::Session((a, _)) => {
             // Calculate the subnet mask and apply it to ensure the base_ip is preserved in
             // the non-variable part
             let subnet_mask = !((1u32 << (32 - cidr.network_length())) - 1);
             let base_ip_bits = u32::from(cidr.first_address()) & subnet_mask;
             let capacity = 2u32.pow(32 - cidr.network_length() as u32) - 1;
-            let ip_num = base_ip_bits | ((combined as u32) % capacity);
+            let ip_num = base_ip_bits | ((a as u32) % capacity);
             return Ipv4Addr::from(ip_num);
         }
         _ => {}
@@ -517,7 +516,7 @@ fn assign_ipv4_from_extension(cidr: &Ipv4Cidr, extension: Extensions) -> Ipv4Add
 fn assign_ipv6_from_extension(cidr: &Ipv6Cidr, extension: Extensions) -> Ipv6Addr {
     match extension {
         Extensions::Session((a, b)) => {
-            let combined = combine(a, b);
+            let combined = ((a as u128) << 64) | (b as u128);
             // Calculate the subnet mask and apply it to ensure the base_ip is preserved in
             // the non-variable part
             let subnet_mask = !((1u128 << (128 - cidr.network_length())) - 1);
@@ -530,11 +529,6 @@ fn assign_ipv6_from_extension(cidr: &Ipv6Cidr, extension: Extensions) -> Ipv6Add
     }
 
     assign_rand_ipv6(cidr.first_address().into(), cidr.network_length())
-}
-
-/// Combines two 64-bit integers into a single 128-bit integer.
-fn combine(a: u64, b: u64) -> u128 {
-    ((a as u128) << 64) | (b as u128)
 }
 
 /// Generates a random IPv4 address within the specified subnet.
@@ -566,14 +560,6 @@ mod tests {
     use super::*;
     use crate::proxy::murmur;
     use std::str::FromStr;
-
-    #[test]
-    fn test_combine() {
-        let a: u64 = 0x1234567890abcdef;
-        let b: u64 = 0xfedcba0987654321;
-        let expected: u128 = 0x1234567890abcdef_fedcba0987654321;
-        assert_eq!(combine(a, b), expected);
-    }
 
     #[test]
     fn test_generate_ipv6_from_cidr() {
