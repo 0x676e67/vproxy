@@ -1,7 +1,7 @@
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum Command {
-    Connect      = 0x01,
-    Bind         = 0x02,
+    Connect = 0x01,
+    Bind = 0x02,
     UdpAssociate = 0x03,
 }
 

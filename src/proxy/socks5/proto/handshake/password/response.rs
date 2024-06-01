@@ -5,7 +5,7 @@ use tokio::io::{AsyncRead, AsyncReadExt};
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum Status {
     Succeeded = 0x00,
-    Failed    = 0xff,
+    Failed = 0xff,
 }
 
 impl From<Status> for u8 {

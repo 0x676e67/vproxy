@@ -3,11 +3,11 @@
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum Method {
     /// No authentication required.
-    NoAuth              = 0x00,
+    NoAuth = 0x00,
     /// GSS API.
-    GssApi              = 0x01,
+    GssApi = 0x01,
     /// A username + password authentication.
-    Password            = 0x02,
+    Password = 0x02,
     /// IANA reserved 0x03…=0x7f.
     IanaReserved(u8),
     /// A private authentication method 0x80…=0xfe.
