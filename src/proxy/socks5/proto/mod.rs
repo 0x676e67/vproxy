@@ -7,7 +7,7 @@ mod response;
 mod udp;
 
 pub use self::{
-    address::Address,
+    address::{Address, AddressType},
     command::Command,
     handshake::{password::UsernamePassword, Method},
     reply::Reply,
@@ -59,19 +59,9 @@ pub trait StreamOperation {
         R: std::io::Read,
         Self: Sized;
 
-    fn write_to_stream<W: std::io::Write>(&self, w: &mut W) -> std::io::Result<()> {
-        let mut buf = Vec::with_capacity(self.len());
-        self.write_to_buf(&mut buf);
-        w.write_all(&buf)
-    }
-
     fn write_to_buf<B: bytes::BufMut>(&self, buf: &mut B);
 
     fn len(&self) -> usize;
-
-    fn is_empty(&self) -> bool {
-        self.len() == 0
-    }
 }
 
 pub trait AsyncStreamOperation: StreamOperation {

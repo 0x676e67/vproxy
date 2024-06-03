@@ -1,3 +1,4 @@
+pub mod client;
 pub mod error;
 pub mod proto;
 pub mod server;
@@ -96,7 +97,7 @@ async fn handle(
                         .try_connect_with_domain((domain, port), extension)
                         .await
                 }
-                Address::SocketAddress(addr) => connector.try_connect(addr, extension).await,
+                Address::SocketAddress(addr) => connector.try_connect(addr, &extension).await,
             };
 
             if let Ok(mut target) = target {

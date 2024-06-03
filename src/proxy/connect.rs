@@ -1,4 +1,8 @@
-use super::{extension::Extensions, http::error::ProxyError};
+use super::{
+    extension::Extensions,
+    http::error::ProxyError,
+    socks5::{self, proto::UsernamePassword},
+};
 use cidr::{IpCidr, Ipv4Cidr, Ipv6Cidr};
 use http::{Request, Response};
 use hyper::body::Incoming;
@@ -98,22 +102,21 @@ impl Connector {
 
         match (self.cidr, self.fallback) {
             (Some(IpCidr::V4(cidr)), Some(IpAddr::V6(v6))) => {
-                let v4 = assign_ipv4_from_extension(&cidr, extension);
+                let v4 = assign_ipv4_from_extension(&cidr, &extension);
                 connector.set_local_addresses(v4, v6);
             }
             (Some(IpCidr::V4(cidr)), None) => {
-                let v4 = assign_ipv4_from_extension(&cidr, extension);
+                let v4 = assign_ipv4_from_extension(&cidr, &extension);
                 connector.set_local_address(Some(v4.into()));
             }
             (Some(IpCidr::V6(cidr)), Some(IpAddr::V4(v4))) => {
-                let v6 = assign_ipv6_from_extension(&cidr, extension);
+                let v6 = assign_ipv6_from_extension(&cidr, &extension);
                 connector.set_local_addresses(v4, v6);
             }
             (Some(IpCidr::V6(cidr)), None) => {
-                let v6 = assign_ipv6_from_extension(&cidr, extension);
+                let v6 = assign_ipv6_from_extension(&cidr, &extension);
                 connector.set_local_address(Some(v6.into()));
             }
-            // ipv4 or ipv6
             (None, Some(ip)) => connector.set_local_address(Some(ip)),
             _ => {}
         }
@@ -128,359 +131,435 @@ impl Connector {
         Ok(resp)
     }
 
-    // This function attempts to establish a TCP connection to a series of
-    // addresses. It takes two parameters:
-    // - `addrs`: an iterator of `SocketAddr` that the function will try to connect
-    //   to.
-    // - `extension`: an `Extensions` object that may be used for additional
-    //   configuration.
-    //
-    // The function works as follows:
-    // 1. It converts the `addrs` parameter into an iterator.
-    // 2. It calls the `try_connect_with_iter` function, passing the iterator and
-    //    the `extension` parameter.
-    // 3. The `try_connect_with_iter` function attempts to establish a connection to
-    //    each address in the iterator. If a connection is successfully established,
-    //    it immediately returns the `TcpStream`. If all attempts fail, it returns
-    //    the last error encountered. If no attempts were made (i.e., if `addrs` was
-    //    empty), it returns a `ConnectionAborted` error.
+    /// Attempts to establish a TCP connection to each of the target addresses
+    /// in the provided iterator using the provided extensions.
+    ///
+    /// This function takes an `IntoIterator` of `SocketAddr` for the target
+    /// addresses and an `Extensions` reference. It attempts to connect to
+    /// each target address in turn using the `try_connect_with_iter` function.
+    ///
+    /// If a connection to any of the target addresses is established, it
+    /// returns the connected `TcpStream`. If all connection attempts fail,
+    /// it returns the last error encountered. If no connection attempts were
+    /// made because the iterator is empty, it returns a `ConnectionAborted`
+    /// error.
+    ///
+    /// # Arguments
+    ///
+    /// * `addrs` - An `IntoIterator` of the target addresses to connect to.
+    /// * `extension` - A reference to the extensions to use for the connection
+    ///   attempt.
+    ///
+    /// # Returns
+    ///
+    /// This function returns a `std::io::Result<TcpStream>`. If a connection is
+    /// successfully established, it returns `Ok(stream)`. If there is an
+    /// error at any step, it returns the error in the `Result`.
     pub async fn try_connect_with_addrs(
         &self,
         addrs: impl IntoIterator<Item = SocketAddr>,
         extension: Extensions,
     ) -> std::io::Result<TcpStream> {
-        self.try_connect_with_iter(addrs.into_iter(), extension)
-            .await
+        let mut last_err = None;
+
+        for target_addr in addrs {
+            match self.try_connect(target_addr, &extension).await {
+                Ok(stream) => return Ok(stream),
+                Err(e) => last_err = Some(e),
+            };
+        }
+
+        Err(error(last_err))
     }
 
-    // This function attempts to establish a TCP connection to a domain.
-    // It takes two parameters:
-    // - `host`: a tuple containing a domain name and a port number.
-    // - `extension`: an `Extensions` object that may be used for additional
-    //   configuration.
-    //
-    // The function works as follows:
-    // 1. It uses the `lookup_host` function to resolve the domain name into a
-    //    series of `SocketAddr`.
-    // 2. It calls the `try_connect_with_iter` function, passing the resolved
-    //    addresses and the `extension` parameter.
-    // 3. The `try_connect_with_iter` function attempts to establish a connection to
-    //    each address. If a connection is successfully established, it immediately
-    //    returns the `TcpStream`. If all attempts fail, it returns the last error
-    //    encountered. If no attempts were made (i.e., if the domain name could not
-    //    be resolved to any addresses), it returns a `ConnectionAborted` error.
+    /// Attempts to establish a TCP connection to the target domain using the
+    /// provided extensions.
+    ///
+    /// This function takes a tuple of a `String` and a `u16` for the host and
+    /// port of the target domain and an `Extensions` reference. It resolves
+    /// the host to a list of IP addresses using the `lookup_host` function and
+    /// then attempts to connect to each IP address in turn using the
+    /// `try_connect_with_iter` function.
+    ///
+    /// If a connection to any of the IP addresses is established, it returns
+    /// the connected `TcpStream`. If all connection attempts fail, it
+    /// returns the last error encountered. If no connection attempts were made
+    /// because the host could not be resolved to any IP addresses,
+    /// it returns a `ConnectionAborted` error.
+    ///
+    /// # Arguments
+    ///
+    /// * `host` - The host and port of the target domain.
+    /// * `extension` - A reference to the extensions to use for the connection
+    ///   attempt.
+    ///
+    /// # Returns
+    ///
+    /// This function returns a `std::io::Result<TcpStream>`. If a connection is
+    /// successfully established, it returns `Ok(stream)`. If there is an
+    /// error at any step, it returns the error in the `Result`.
     pub async fn try_connect_with_domain(
         &self,
         host: (String, u16),
         extension: Extensions,
     ) -> std::io::Result<TcpStream> {
         let addrs = lookup_host(host).await?;
-        self.try_connect_with_iter(addrs, extension).await
+        self.try_connect_with_addrs(addrs, extension).await
     }
 
-    // This private helper function attempts to establish a TCP connection to a
-    // series of addresses. It takes two parameters:
-    // - `addrs`: an iterator of `SocketAddr` that the function will try to connect
-    //   to.
-    // - `extension`: an `Extensions` object that may be used for additional
-    //   configuration.
-    //
-    // The function works as follows:
-    // 1. It iterates over each `SocketAddr` in `addrs`.
-    // 2. For each address, it attempts to establish a connection using the
-    //    `try_connect` method.
-    // 3. If the connection is successful, it immediately returns the `TcpStream`.
-    // 4. If the connection fails, it stores the error and moves on to the next
-    //    address.
-    // 5. If all addresses have been tried and none of them succeeded, it returns
-    //    the last error encountered.
-    // 6. If no addresses were tried at all (i.e., if `addrs` was empty), it returns
-    //    a `ConnectionAborted` error.
-    async fn try_connect_with_iter(
-        &self,
-        addrs: impl Iterator<Item = SocketAddr>,
-        extension: Extensions,
-    ) -> std::io::Result<TcpStream> {
-        let mut last_err = None;
-
-        for target_addr in addrs {
-            match self.try_connect(target_addr, extension).await {
-                Ok(stream) => return Ok(stream),
-                Err(e) => last_err = Some(e),
-            };
-        }
-
-        match last_err {
-            Some(e) => {
-                tracing::error!("Failed to connect to any resolved address: {}", e);
-                Err(e)
-            }
-            None => Err(std::io::Error::new(
-                std::io::ErrorKind::ConnectionAborted,
-                "Failed to connect to any resolved address",
-            )),
-        }
-    }
-
-    /// Tries to establish a TCP connection to a given SocketAddr.
+    /// Attempts to establish a TCP connection to the target address using the
+    /// provided extensions, CIDR range, and fallback IP address.
     ///
-    /// This function attempts to establish a connection in the following order:
-    /// 1. If an IPv6 subnet is provided, it will attempt to connect using the
-    ///    subnet.
-    /// 2. If no IPv6 subnet is provided but a fallback IP is, it will attempt
-    ///    to connect using the fallback IP.
-    /// 3. If neither a subnet nor a fallback IP are provided, it will attempt
-    ///    to connect directly to the given SocketAddr.
+    /// This function takes a `SocketAddr` for the target address and an
+    /// `Extensions` reference. It first checks the type of the extension.
+    /// If the extension is `HttpToSocks5`, it attempts to connect to the target
+    /// address via the SOCKS5 proxy using the `try_connect_to_socks5` function.
+    /// If the extension is `None` or `Session`, it checks the CIDR range and
+    /// fallback IP address.
+    ///
+    /// If only the CIDR range is provided, it attempts to connect to the target
+    /// address using an IP address from the CIDR range with the
+    /// `try_connect_with_cidr` function. If only the fallback IP address is
+    /// provided, it attempts to connect to the target address using the
+    /// fallback IP address with the `try_connect_with_fallback` function.
+    /// If both the CIDR range and fallback IP address are provided, it attempts
+    /// to connect to the target address using an IP address from the CIDR range
+    /// and falls back to the fallback IP address if the connection attempt
+    /// fails with the `try_connect_with_cidr_and_fallback` function.
+    /// If neither the CIDR range nor the fallback IP address is provided, it
+    /// attempts to connect to the target address directly using
+    /// `TcpStream::connect`.
+    ///
+    /// Each connection attempt is wrapped in a timeout. If the connection
+    /// attempt does not complete within the timeout, it is cancelled and a
+    /// `TimedOut` error is returned.
     ///
     /// # Arguments
     ///
-    /// * `addr` - The target socket address to connect to.
-    /// * `extension` - Extensions used to assign an IP address from the CIDR.
+    /// * `target_addr` - The target address to connect to.
+    /// * `extension` - A reference to the extensions to use for the connection
+    ///   attempt.
     ///
     /// # Returns
     ///
-    /// * `std::io::Result<TcpStream>` - The established TCP connection, or an
-    ///   error if the connection failed.
-    ///
-    /// # Example
-    ///
-    /// ```
-    /// let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)), 80);
-    /// let extension = Extensions::new();
-    /// let stream = try_connect(addr, extension).await.unwrap();
-    /// ```
+    /// This function returns a `std::io::Result<TcpStream>`. If a connection is
+    /// successfully established, it returns `Ok(stream)`. If there is an
+    /// error at any step, it returns the error in the `Result`.
     pub async fn try_connect(
         &self,
-        addr: SocketAddr,
-        extension: Extensions,
+        target_addr: SocketAddr,
+        extension: &Extensions,
     ) -> std::io::Result<TcpStream> {
-        let result = match (self.cidr, self.fallback) {
-            (Some(cidr), None) => {
+        match extension {
+            Extensions::HttpToSocks5((host, auth)) => {
                 timeout(
                     self.connect_timeout,
-                    try_connect_with_cidr(addr, cidr, extension),
+                    try_connect_to_socks5(target_addr, host, auth),
                 )
-                .await
+                .await?
             }
-            (None, Some(fallback)) => {
-                timeout(
-                    self.connect_timeout,
-                    try_connect_with_fallback(addr, fallback),
-                )
-                .await
-            }
-            (Some(cidr), Some(fallback)) => {
-                timeout(
-                    self.connect_timeout,
-                    try_connect_with_cidr_and_fallback(addr, cidr, fallback, extension),
-                )
-                .await
-            }
-            (None, None) => timeout(self.connect_timeout, TcpStream::connect(addr)).await,
-        }?;
 
-        result.and_then(|stream| {
-            tracing::info!("connect {} via {}", addr, stream.local_addr()?);
+            Extensions::None | Extensions::Session(_) => match (self.cidr, self.fallback) {
+                (Some(cidr), None) => {
+                    timeout(
+                        self.connect_timeout,
+                        try_connect_with_cidr(target_addr, cidr, &extension),
+                    )
+                    .await?
+                }
+                (None, Some(fallback)) => {
+                    timeout(
+                        self.connect_timeout,
+                        try_connect_with_fallback(target_addr, fallback),
+                    )
+                    .await?
+                }
+                (Some(cidr), Some(fallback)) => {
+                    timeout(
+                        self.connect_timeout,
+                        try_connect_with_cidr_and_fallback(target_addr, cidr, fallback, &extension),
+                    )
+                    .await?
+                }
+                (None, None) => {
+                    timeout(self.connect_timeout, TcpStream::connect(target_addr)).await?
+                }
+            },
+        }
+        .and_then(|stream| {
+            tracing::info!("connect {} via {}", target_addr, stream.local_addr()?);
             Ok(stream)
         })
     }
 }
 
-/// Tries to establish a TCP connection to the target address using a specific
-/// CIDR and extensions.
+/// Attempts to establish a TCP connection to the target SOCKS5 proxy and then
+/// to the target address.
 ///
-/// This function creates and binds a new TCP socket based on the provided CIDR
-/// and extensions, and then tries to connect to the target address.
+/// This function takes a `SocketAddr` for the target address and a `Url` for
+/// the SOCKS5 proxy. It resolves the host of the SOCKS5 proxy to a list of IP
+/// addresses and then attempts to connect to each IP address in turn.
+/// If a connection to the SOCKS5 proxy is established, it sends a CONNECT
+/// command to the proxy to establish a connection to the target address. If the
+/// connection to the target address is successful, it returns the connected
+/// `TcpStream`.
 ///
-/// If the connection fails, the error is returned.
+/// If all connection attempts fail, it returns the last error encountered. If
+/// no connection attempts were made because the host could not be resolved to
+/// any IP addresses, it returns a `ConnectionAborted` error.
 ///
 /// # Arguments
 ///
-/// * `target_addr` - The target socket address to connect to.
-/// * `cidr` - A CIDR block (either IPv4 or IPv6).
-/// * `extension` - Extensions used to assign an IP address from the CIDR.
+/// * `target_addr` - The target address to connect to.
+/// * `url` - The URL of the SOCKS5 proxy.
 ///
 /// # Returns
 ///
-/// * `std::io::Result<TcpStream>` - The established TCP connection, or an error
-///   if the connection failed.
+/// This function returns a `std::io::Result<TcpStream>`. If a connection is
+/// successfully established, it returns `Ok(stream)`. If there is an error at
+/// any step, it returns the error in the `Result`.
+async fn try_connect_to_socks5(
+    target_addr: SocketAddr,
+    host: &(String, u16),
+    auth: &Option<UsernamePassword>,
+) -> std::io::Result<TcpStream> {
+    let mut last_err = None;
+
+    let host = (host.0.as_str(), host.1);
+    let addrs = lookup_host(host).await?;
+
+    for socket_addr in addrs {
+        match TcpStream::connect(socket_addr).await {
+            Ok(mut stream) => {
+                let connect =
+                    socks5::client::connect(&mut stream, target_addr, auth.clone()).await?;
+                tracing::info!("http to socks5 connect {socket_addr} via {connect}");
+                return Ok(stream);
+            }
+            Err(err) => {
+                last_err = Some(err);
+            }
+        }
+    }
+
+    Err(error(last_err))
+}
+
+/// Attempts to establish a TCP connection to the target address using an IP
+/// address from the provided CIDR range.
 ///
-/// # Example
+/// This function takes a `SocketAddr` for the target address, an `IpCidr` for
+/// the CIDR range, and an `Extensions` reference for assigning the IP address.
+/// It creates a socket and assigns an IP address from the CIDR range using the
+/// `create_socket_with_cidr` function. It then attempts to connect to the
+/// target address using the created socket.
 ///
-/// ```
-/// let target_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)), 80);
-/// let cidr = IpCidr::V4(Ipv4Cidr::new(Ipv4Addr::new(192, 168, 1, 0), 24).unwrap());
-/// let extension = Extensions::new();
-/// let stream = try_connect_with_cidr(target_addr, cidr, extension)
-///     .await
-///     .unwrap();
-/// ```
+/// If the connection attempt is successful, it returns the connected
+/// `TcpStream`. If the connection attempt fails, it returns the error in the
+/// `Result`.
+///
+/// # Arguments
+///
+/// * `target_addr` - The target address to connect to.
+/// * `cidr` - The CIDR range to assign the IP address from.
+/// * `extension` - A reference to the extensions to use when assigning the IP
+///   address.
+///
+/// # Returns
+///
+/// This function returns a `std::io::Result<TcpStream>`. If a connection is
+/// successfully established, it returns `Ok(stream)`. If there is an error at
+/// any step, it returns the error in the `Result`.
 async fn try_connect_with_cidr(
     target_addr: SocketAddr,
     cidr: IpCidr,
-    extension: Extensions,
+    extension: &Extensions,
 ) -> std::io::Result<TcpStream> {
-    let socket = create_and_bind_socket(cidr, extension).await?;
+    let socket = create_socket_with_cidr(cidr, extension).await?;
     socket.connect(target_addr).await
 }
 
-/// Tries to establish a TCP connection to the target address using a fallback
-/// IP address.
+/// Attempts to establish a TCP connection to the target address using the
+/// provided fallback IP address.
 ///
-/// This function creates a new TCP socket suitable for the fallback IP address,
-/// binds the socket to the fallback IP address, and then tries to connect to
-/// the target address.
+/// This function takes a `SocketAddr` for the target address and an `IpAddr`
+/// for the fallback IP address. It creates a socket and binds it to the
+/// fallback IP address using the `create_socket_with_ip` function.
+/// It then attempts to connect to the target address using the created socket.
 ///
-/// If the connection fails, the error is returned.
+/// If the connection attempt is successful, it returns the connected
+/// `TcpStream`. If the connection attempt fails, it returns the error in the
+/// `Result`.
 ///
 /// # Arguments
 ///
-/// * `target_addr` - The target socket address to connect to.
-/// * `fallback` - The fallback IP address to use for the connection.
+/// * `target_addr` - The target address to connect to.
+/// * `fallback` - The fallback IP address to use for the connection attempt.
 ///
 /// # Returns
 ///
-/// * `std::io::Result<TcpStream>` - The established TCP connection, or an error
-///   if the connection failed.
-///
-/// # Example
-///
-/// ```
-/// let target_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)), 80);
-/// let fallback = IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1));
-/// let stream = try_connect_with_fallback(target_addr, fallback)
-///     .await
-///     .unwrap();
-/// ```
+/// This function returns a `std::io::Result<TcpStream>`. If a connection is
+/// successfully established, it returns `Ok(stream)`. If there is an error at
+/// any step, it returns the error in the `Result`.
 async fn try_connect_with_fallback(
     target_addr: SocketAddr,
     fallback: IpAddr,
 ) -> std::io::Result<TcpStream> {
-    let socket = create_tcp_socket_for_ip(&fallback)?;
-    let bind_addr = SocketAddr::new(fallback, 0);
-    socket.bind(bind_addr)?;
+    let socket = create_socket_with_addr(&fallback)?;
     socket.connect(target_addr).await
 }
 
-/// Tries to establish a TCP connection to the target address using a specific
-/// CIDR and extensions, with a fallback IP address.
+/// Attempts to establish a TCP connection to the target address using an IP
+/// address from the provided CIDR range. If the connection attempt fails, it
+/// falls back to using the provided fallback IP address.
 ///
-/// This function creates and binds a new TCP socket based on the provided CIDR
-/// and extensions, and then tries to connect to the target address.
+/// This function takes a `SocketAddr` for the target address, an `IpCidr` for
+/// the CIDR range, an `IpAddr` for the fallback IP address, and an `Extensions`
+/// reference for assigning the IP address. It first creates a socket and
+/// assigns an IP address from the CIDR range
+/// using the `create_socket_with_cidr` function. It then attempts to connect to
+/// the target address using the created socket.
 ///
-/// If the connection fails, it creates a new TCP socket suitable for the
-/// fallback IP address, binds the socket to the fallback IP address, and then
-/// tries to connect to the target address again.
+/// If the connection attempt is successful, it returns the connected
+/// `TcpStream`. If the connection attempt fails, it logs the error
+/// and then attempts to connect to the target address using the fallback IP
+/// address with the `try_connect_with_fallback` function.
 ///
 /// # Arguments
 ///
-/// * `target_addr` - The target socket address to connect to.
-/// * `cidr` - A CIDR block (either IPv4 or IPv6).
-/// * `fallback` - The fallback IP address to use if the connection fails.
-/// * `extension` - Extensions used to assign an IP address from the CIDR.
+/// * `target_addr` - The target address to connect to.
+/// * `cidr` - The CIDR range to assign the IP address from.
+/// * `fallback` - The fallback IP address to use if the connection attempt
+///   fails.
+/// * `extension` - A reference to the extensions to use when assigning the IP
+///   address.
 ///
 /// # Returns
 ///
-/// * `std::io::Result<TcpStream>` - The established TCP connection, or an error
-///   if the connection failed.
-///
-/// # Example
-///
-/// ```
-/// let target_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)), 80);
-/// let cidr = IpCidr::V4(Ipv4Cidr::new(Ipv4Addr::new(192, 168, 1, 0), 24).unwrap());
-/// let fallback = IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1));
-/// let extension = Extensions::new();
-/// let stream = try_connect_with_cidr_and_fallback(target_addr, cidr, fallback, extension)
-///     .await
-///     .unwrap();
-/// ```
+/// This function returns a `std::io::Result<TcpStream>`. If a connection is
+/// successfully established, it returns `Ok(stream)`. If there is an error at
+/// any step, it returns the error in the `Result`.
 async fn try_connect_with_cidr_and_fallback(
     target_addr: SocketAddr,
     cidr: IpCidr,
     fallback: IpAddr,
-    extension: Extensions,
+    extension: &Extensions,
 ) -> std::io::Result<TcpStream> {
-    let socket = create_and_bind_socket(cidr, extension).await?;
-    // Try to connect with ipv6
+    let socket = create_socket_with_cidr(cidr, &extension).await?;
     match socket.connect(target_addr).await {
         Ok(first) => Ok(first),
         Err(err) => {
             tracing::debug!("try connect with ipv6 failed: {}", err);
-            // Try to connect with fallback ip (ipv4 or ipv6)
-            let socket = create_tcp_socket_for_ip(&fallback)?;
-            let bind_addr = SocketAddr::new(fallback, 0);
-            socket.bind(bind_addr)?;
-            socket.connect(target_addr).await
+            try_connect_with_fallback(target_addr, fallback).await
         }
     }
 }
 
-/// Creates and binds a new TCP socket based on the provided CIDR and
-/// extensions.
+/// Creates a TCP socket and binds it to the provided IP address.
 ///
-/// This function first determines whether the CIDR is IPv4 or IPv6.
-/// Then, it creates a new TCP socket of the appropriate type.
-/// It assigns an IP address from the CIDR using the provided extensions,
-/// and binds the socket to this IP address.
+/// This function takes an `IpAddr` reference as an argument and creates a new
+/// TCP socket based on the IP version. If the IP address is IPv4, it creates a
+/// new IPv4 socket. If the IP address is IPv6, it creates a new IPv6 socket.
+/// After creating the socket, it binds the socket to the provided IP address on
+/// port 0.
 ///
 /// # Arguments
 ///
-/// * `cidr` - A CIDR block (either IPv4 or IPv6).
-/// * `extension` - Extensions used to assign an IP address from the CIDR.
+/// * `ip` - A reference to the IP address to bind the socket to.
 ///
 /// # Returns
 ///
-/// * `std::io::Result<(IpAddr, TcpSocket)>` - A tuple containing the assigned
-///   IP address and the new, bound TCP socket.
+/// This function returns a `std::io::Result<TcpSocket>`. If the socket is
+/// successfully created and bound, it returns `Ok(socket)`. If there is an
+/// error creating or binding the socket, it returns the error in the `Result`.
+fn create_socket_with_addr(ip: &IpAddr) -> std::io::Result<TcpSocket> {
+    match ip {
+        IpAddr::V4(_) => {
+            let socket = TcpSocket::new_v4()?;
+            let bind_addr = SocketAddr::new(*ip, 0);
+            socket.bind(bind_addr)?;
+            Ok(socket)
+        }
+        IpAddr::V6(_) => {
+            let socket = TcpSocket::new_v6()?;
+            let bind_addr = SocketAddr::new(*ip, 0);
+            socket.bind(bind_addr)?;
+            Ok(socket)
+        }
+    }
+}
+
+/// Creates a TCP socket and binds it to an IP address within the provided CIDR
+/// range.
 ///
-/// # Example
+/// This function takes an `IpCidr` and an `Extensions` reference as arguments.
+/// It creates a new TCP socket based on the IP version of the CIDR. If the CIDR
+/// is IPv4, it creates a new IPv4 socket and assigns an IPv4 address from the
+/// CIDR range using the `assign_ipv4_from_extension` function. If the CIDR is
+/// IPv6, it creates a new IPv6 socket and assigns an IPv6 address from the CIDR
+/// range using the `assign_ipv6_from_extension` function. After creating the
+/// socket and assigning the IP address, it binds the socket to the assigned IP
+/// address on port 0.
 ///
-/// ```
-/// let cidr = IpCidr::V4(Ipv4Cidr::new(Ipv4Addr::new(192, 168, 1, 0), 24).unwrap());
-/// let extension = Extensions::new();
-/// let (ip, socket) = create_and_bind_socket(cidr, extension).await.unwrap();
-/// ```
-async fn create_and_bind_socket(cidr: IpCidr, extension: Extensions) -> std::io::Result<TcpSocket> {
+/// # Arguments
+///
+/// * `cidr` - The CIDR range to assign the IP address from.
+/// * `extension` - A reference to the extensions to use when assigning the IP
+///   address.
+///
+/// # Returns
+///
+/// This function returns a `std::io::Result<TcpSocket>`. If the socket is
+/// successfully created, assigned an IP address, and bound, it returns
+/// `Ok(socket)`. If there is an error at any step, it returns the error in the
+/// `Result`.
+async fn create_socket_with_cidr(
+    cidr: IpCidr,
+    extension: &Extensions,
+) -> std::io::Result<TcpSocket> {
     match cidr {
         IpCidr::V4(cidr) => {
             let socket = TcpSocket::new_v4()?;
-            let bind = IpAddr::V4(assign_ipv4_from_extension(&cidr, extension));
+            let bind = IpAddr::V4(assign_ipv4_from_extension(&cidr, &extension));
             socket.bind(SocketAddr::new(bind, 0))?;
             Ok(socket)
         }
         IpCidr::V6(cidr) => {
             let socket = TcpSocket::new_v6()?;
-            let bind = IpAddr::V6(assign_ipv6_from_extension(&cidr, extension));
+            let bind = IpAddr::V6(assign_ipv6_from_extension(&cidr, &extension));
             socket.bind(SocketAddr::new(bind, 0))?;
             Ok(socket)
         }
     }
 }
 
-/// Creates a new TCP socket suitable for the provided IP address.
-/// If the IP address is IPv4, it creates a new IPv4 socket.
-/// If the IP address is IPv6, it creates a new IPv6 socket.
+/// Returns the last error encountered during a series of connection attempts,
+/// or a `ConnectionAborted` error if no connection attempts were made.
+///
+/// This function takes an `Option<std::io::Error>` for the last error
+/// encountered. If an error is provided, it logs the error and returns it.
+/// If no error is provided, it returns a `ConnectionAborted` error with the
+/// message "Failed to connect to any resolved address".
 ///
 /// # Arguments
 ///
-/// * `ip` - An IP address (either IPv4 or IPv6).
+/// * `last_err` - An `Option<std::io::Error>` for the last error encountered.
 ///
 /// # Returns
 ///
-/// * `std::io::Result<TcpSocket>` - A new TCP socket suitable for the provided
-///   IP address.
-///
-/// # Example
-///
-/// ```
-/// let ip = IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1));
-/// let socket = create_tcp_socket_for_ip(ip);
-/// ```
-fn create_tcp_socket_for_ip(ip: &IpAddr) -> std::io::Result<TcpSocket> {
-    match ip {
-        IpAddr::V4(_) => TcpSocket::new_v4(),
-        IpAddr::V6(_) => TcpSocket::new_v6(),
+/// This function returns a `std::io::Error`. If an error is provided, it
+/// returns the provided error. If no error is provided, it returns a
+/// `ConnectionAborted` error.
+fn error(last_err: Option<std::io::Error>) -> std::io::Error {
+    match last_err {
+        Some(e) => {
+            tracing::error!("Failed to connect to any resolved address: {}", e);
+            e
+        }
+        None => std::io::Error::new(
+            std::io::ErrorKind::ConnectionAborted,
+            "Failed to connect to any resolved address",
+        ),
     }
 }
 
@@ -490,10 +569,10 @@ fn create_tcp_socket_for_ip(ip: &IpAddr) -> std::io::Result<TcpSocket> {
 /// ID. The network part of the address is preserved, and the host part is
 /// generated from the hash. If the extension is not a Session, the function
 /// generates a random IPv4 address within the CIDR range.
-fn assign_ipv4_from_extension(cidr: &Ipv4Cidr, extension: Extensions) -> Ipv4Addr {
+fn assign_ipv4_from_extension(cidr: &Ipv4Cidr, extension: &Extensions) -> Ipv4Addr {
     match extension {
         Extensions::Session((a, b)) => {
-            let combined = combine(a, b);
+            let combined = combine(*a, *b);
             // Calculate the subnet mask and apply it to ensure the base_ip is preserved in
             // the non-variable part
             let subnet_mask = !((1u32 << (32 - cidr.network_length())) - 1);
@@ -514,10 +593,10 @@ fn assign_ipv4_from_extension(cidr: &Ipv4Cidr, extension: Extensions) -> Ipv4Add
 /// ID. The network part of the address is preserved, and the host part is
 /// generated from the hash. If the extension is not a Session, the function
 /// generates a random IPv6 address within the CIDR range.
-fn assign_ipv6_from_extension(cidr: &Ipv6Cidr, extension: Extensions) -> Ipv6Addr {
+fn assign_ipv6_from_extension(cidr: &Ipv6Cidr, extension: &Extensions) -> Ipv6Addr {
     match extension {
         Extensions::Session((a, b)) => {
-            let combined = combine(a, b);
+            let combined = combine(*a, *b);
             // Calculate the subnet mask and apply it to ensure the base_ip is preserved in
             // the non-variable part
             let subnet_mask = !((1u128 << (128 - cidr.network_length())) - 1);
@@ -591,12 +670,12 @@ mod tests {
 
         let mut result = Vec::new();
         for x in &mut sessions {
-            result.push(assign_ipv6_from_extension(&cidr, x.clone()));
+            result.push(assign_ipv6_from_extension(&cidr, &x));
         }
 
         let mut check = Vec::new();
         for x in &mut sessions {
-            check.push(assign_ipv6_from_extension(&cidr, x.clone()));
+            check.push(assign_ipv6_from_extension(&cidr, &x));
         }
 
         for x in &result {
@@ -620,12 +699,12 @@ mod tests {
 
         let mut result = Vec::new();
         for x in &mut sessions {
-            result.push(assign_ipv4_from_extension(&cidr, x.clone()));
+            result.push(assign_ipv4_from_extension(&cidr, &x));
         }
 
         let mut check = Vec::new();
         for x in &mut sessions {
-            check.push(assign_ipv4_from_extension(&cidr, x.clone()));
+            check.push(assign_ipv4_from_extension(&cidr, &x));
         }
 
         for x in &result {
