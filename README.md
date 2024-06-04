@@ -20,7 +20,9 @@ An easy and powerful Rust HTTP/Socks5 proxy that allows initiating network reque
 - Service binding `IP-CIDR` address
 - Fallback address when `IP-CIDR` address is unreachable
 - Basic authentication
-- IP whitelist
+- Whitelist Extension
+- Session Extension
+- Http2Socks5 Extension
 - Proxy support (HTTP, SOCKS5)
 
 ### Install
@@ -85,9 +87,17 @@ while true; do curl -x http://127.0.0.1:8100 -s https://api.ip.sb/ip -A Mozilla;
 
 If no subnet is configured, the local default network proxy request will be used. When the local machine sets the priority `Ipv4`/`Ipv6` and the priority is `Ipv4`, it will always use `Ipv4` to make requests (if any).
 
-- When using passwordless authorization, if an IP whitelist exists, only authorized IPs can pass the request.
-- Append `-session-id` to the username, where session is a fixed value and ID is an arbitrary random value (e.g., `username-session-123456`). Keep the Session ID unchanged to use a fixed IP.
-- For HTTP users who are using password-less authorization and need a fixed IP address, you can add the `session-id` header to the request (e.g., `session-id: 123456`). By keeping the Session ID unchanged, you can use a fixed IP. Keep in mind Chrome and Firefox can't set `--proxy-header` like curl.
+- Whitelist extension
+
+When using passwordless authorization, if an IP whitelist exists, only authorized IPs can pass the request.
+
+- Session extension
+
+Append `-session-id` to the username, where session is a fixed value and ID is an arbitrary random value (e.g., `username-session-123456`). Keep the Session ID unchanged to use a fixed IP.For HTTP users who are using password-less authorization and need a fixed IP address, you can add the `session-id` header to the request (e.g., `session-id: 123456`). By keeping the Session ID unchanged, you can use a fixed IP. Keep in mind Chrome and Firefox can't set `--proxy-header` like curl.
+
+- Http2Socks5 extension
+
+Append `-h2s-host|port|username|password` to the username, or `-h2s-host|port` if password is not required. For HTTP users using passwordless authorization, you can add an `http-to-socks5` header to the request (e.g. `http-to-socks5: host|port|username|password`). Chrome and Firefox cannot set `--proxy-header` like curl can.
 
 #### Examples
 
