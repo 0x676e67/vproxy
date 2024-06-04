@@ -212,7 +212,7 @@ impl Connector {
     ///
     /// This function takes a `SocketAddr` for the target address and an
     /// `Extensions` reference. It first checks the type of the extension.
-    /// If the extension is `HttpToSocks5`, it attempts to connect to the target
+    /// If the extension is `Http2Socks5`, it attempts to connect to the target
     /// address via the SOCKS5 proxy using the `try_connect_to_socks5` function.
     /// If the extension is `None` or `Session`, it checks the CIDR range and
     /// fallback IP address.
@@ -251,7 +251,7 @@ impl Connector {
         extension: &Extensions,
     ) -> std::io::Result<TcpStream> {
         match extension {
-            Extensions::HttpToSocks5((host, auth)) => {
+            Extensions::Http2Socks5((host, auth)) => {
                 timeout(
                     self.connect_timeout,
                     try_connect_to_socks5(target_addr, host, auth),
