@@ -93,8 +93,6 @@ impl Auth for Password {
         let req = Request::retrieve_from_async_stream(stream).await?;
         let socket = stream.peer_addr()?;
 
-        println!("{}", self.pass(socket.ip()));
-
         // Check if the username and password are correct
         let is_equal = ({
             req.user_pass.username.starts_with(&self.user_pass.username)
