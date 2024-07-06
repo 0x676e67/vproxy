@@ -251,7 +251,7 @@ impl Connector {
         extension: &Extensions,
     ) -> std::io::Result<TcpStream> {
         match extension {
-            Extensions::Http2Socks5((host, auth)) => {
+            Extensions::Http2Socks5(host, auth) => {
                 timeout(
                     self.connect_timeout,
                     try_connect_to_socks5(target_addr, host, auth),

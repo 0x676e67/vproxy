@@ -1,5 +1,5 @@
 use super::{murmur, socks5::proto::UsernamePassword};
-use http::HeaderMap;
+use http::{header, HeaderMap};
 use std::net::IpAddr;
 
 /// Trait for checking if an IP address is in the whitelist.
@@ -16,16 +16,14 @@ pub enum Extensions {
     /// Session extension with a tuple of two 64-bit integers.
     Session((u64, u64)),
     /// Http to Socks5 extension. e.g. host:port:username:password
-    Http2Socks5(((String, u16), Option<UsernamePassword>)),
+    Http2Socks5((String, u16), Option<UsernamePassword>),
 }
 
 impl Extensions {
-    /// Header names
-    const HEADER_HTTP_TO_SOCKS5: &'static str = "http2socks5";
-    const HEADER_SESSION_ID: &'static str = "session-id";
-    /// Split tag
-    const TAG_HTTP2SOCKS5: &'static str = "-h2s-";
     const TAG_SESSION: &'static str = "-session-";
+    const TAG_HTTP2SOCKS5: &'static str = "-h2s-";
+    const HEADER_SESSION_ID: &'static str = "session-id";
+    const HEADER_HTTP_TO_SOCKS5: &'static str = "http2socks5";
 }
 
 impl Default for Extensions {
@@ -36,24 +34,22 @@ impl Default for Extensions {
 
 impl From<(&str, &str)> for Extensions {
     // This function takes a tuple of two strings as input: a prefix (the username)
-    // and a string `s` (the username-session-id).
-    fn from((prefix, s): (&str, &str)) -> Self {
-        // Check if the string `s` starts with the prefix (username).
-        if s.starts_with(prefix) {
-            // If it does, remove the prefix from `s`.
-            if let Some(s) = s.strip_prefix(prefix) {
-                // Parse session extension
-                if let Some(extension) =
-                    handle_extension(s, Self::TAG_SESSION, parse_session_extension)
-                {
-                    return extension;
-                }
-                // Parse socks5 extension
-                if let Some(extension) =
-                    handle_extension(s, Self::TAG_HTTP2SOCKS5, parse_socks5_extension)
-                {
-                    return extension;
-                }
+    // and a string `full` (the username-session-id).
+    fn from((prefix, full): (&str, &str)) -> Self {
+        // If it does, remove the prefix from `s`.
+        if let Some(tag) = full.strip_prefix(prefix) {
+            // Parse session extension
+            if let Some(extension) =
+                handle_extension(false, full, Self::TAG_SESSION, parse_session_extension)
+            {
+                return extension;
+            }
+
+            // Parse socks5 extension
+            if let Some(extension) =
+                handle_extension(true, tag, Self::TAG_HTTP2SOCKS5, parse_socks5_extension)
+            {
+                return extension;
             }
         }
         // If the string `s` does not start with the prefix, or if the remaining string
@@ -66,14 +62,26 @@ impl From<(&str, &str)> for Extensions {
 impl From<&HeaderMap> for Extensions {
     fn from(headers: &HeaderMap) -> Self {
         // Get the value of the `session-id` header from the headers.
-        if let Some(value) = headers.get(Self::HEADER_SESSION_ID) {
+        if let (Some(value), ident) = (
+            headers.get(Self::HEADER_SESSION_ID),
+            headers.get(header::PROXY_AUTHORIZATION),
+        ) {
             // Convert the value to a string.
-            if let Ok(s) = value.to_str() {
-                // Return it wrapped in the `Session` variant of `Extensions`.
-                let extensions = parse_session_extension(s);
-                return extensions;
+            let ident = ident.and_then(|v| v.to_str().ok());
+            // Return it wrapped in the `Session` variant of `Extensions`.
+            match (value.to_str(), ident) {
+                (Ok(s), Some(ident)) => {
+                    let extensions = parse_session_extension(format!("{s}{ident}").as_str());
+                    return extensions;
+                }
+                (Ok(s), None) => {
+                    let extensions = parse_session_extension(s);
+                    return extensions;
+                }
+                _ => {}
             }
         }
+
         // Get the value of the `http2socks5` header from the headers.
         if let Some(value) = headers.get(Self::HEADER_HTTP_TO_SOCKS5) {
             // Convert the value to a string.
@@ -102,6 +110,7 @@ impl From<&HeaderMap> for Extensions {
 ///
 /// # Arguments
 ///
+/// * `trim` - Whether to trim the string before checking the prefix.
 /// * `s` - The string to handle.
 /// * `prefix` - The prefix to check and remove from the string.
 /// * `handler` - The function to apply to the string after removing the prefix.
@@ -110,13 +119,19 @@ impl From<&HeaderMap> for Extensions {
 ///
 /// This function returns an `Option<Extensions>`. If the string starts with the
 /// prefix, it returns `Some(Extensions)`. Otherwise, it returns `None`.
-fn handle_extension(s: &str, prefix: &str, handler: fn(&str) -> Extensions) -> Option<Extensions> {
-    if s.starts_with(prefix) {
-        let s = s.trim_start_matches(prefix);
-        Some(handler(s))
-    } else {
-        None
+fn handle_extension(
+    trim: bool,
+    s: &str,
+    prefix: &str,
+    handler: fn(&str) -> Extensions,
+) -> Option<Extensions> {
+    tracing::debug!("before handle_extension: s={}, prefix={}", s, prefix);
+    if !s.contains(prefix) {
+        return None;
     }
+    let s = trim.then(|| s.trim_start_matches(prefix)).unwrap_or(s);
+    tracing::debug!("after handle_extension: s={}", s);
+    Some(handler(s))
 }
 
 /// Parses a session extension string.
@@ -140,13 +155,8 @@ fn handle_extension(s: &str, prefix: &str, handler: fn(&str) -> Extensions) -> O
 /// will return a `Extensions::Session` variant containing a tuple `(a, b)`.
 /// Otherwise, it will return `Extensions::None`.
 fn parse_session_extension(s: &str) -> Extensions {
-    // If the remaining string is not empty, it is considered as the session ID.
-    if !s.is_empty() {
-        let (a, b) = murmur::murmurhash3_x64_128(s.as_bytes(), s.len() as u64);
-        return Extensions::Session((a, b));
-    }
-
-    Extensions::None
+    let (a, b) = murmur::murmurhash3_x64_128(s.as_bytes(), s.len() as u64);
+    Extensions::Session((a, b))
 }
 
 /// Parses a SOCKS5 extension string.
@@ -181,7 +191,7 @@ fn parse_socks5_extension(s: &str) -> Extensions {
         2 => {
             if let Ok(port) = parts[1].parse::<u16>() {
                 let host = parts[0];
-                return Extensions::Http2Socks5(((host.to_string(), port), None));
+                return Extensions::Http2Socks5((host.to_string(), port), None);
             }
         }
         4 => {
@@ -189,13 +199,13 @@ fn parse_socks5_extension(s: &str) -> Extensions {
                 let host = parts[0];
                 let username = parts[2];
                 let password = parts[3];
-                return Extensions::Http2Socks5((
+                return Extensions::Http2Socks5(
                     (host.to_string(), port),
                     Some(UsernamePassword::new(
                         username.to_string(),
                         password.to_string(),
                     )),
-                ));
+                );
             }
         }
         _ => {}
