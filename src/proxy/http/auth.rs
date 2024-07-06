@@ -26,24 +26,13 @@ pub enum Authenticator {
 }
 
 impl Whitelist for Authenticator {
-    fn is_empty(&self) -> bool {
+    fn pass(&self, ip: IpAddr) -> bool {
         let whitelist = match self {
             Authenticator::None(whitelist) => whitelist,
             Authenticator::Password { whitelist, .. } => whitelist,
         };
-
-        // Check if the whitelist is empty
-        whitelist.is_empty()
-    }
-
-    fn contains(&self, ip: IpAddr) -> bool {
-        let whitelist = match self {
-            Authenticator::None(whitelist) => whitelist,
-            Authenticator::Password { whitelist, .. } => whitelist,
-        };
-
         // If whitelist is empty, allow all
-        whitelist.contains(&ip)
+        whitelist.is_empty() || whitelist.contains(&ip)
     }
 }
 
@@ -56,7 +45,7 @@ impl Authenticator {
         match self {
             Authenticator::None(..) => {
                 // If whitelist is empty, allow all
-                let is_equal = self.contains(socket.ip()) || self.is_empty();
+                let is_equal = self.pass(socket.ip());
                 if !is_equal {
                     tracing::warn!("Unauthorized access from {}", socket);
                     return Err(AuthError::Forbidden);
@@ -79,7 +68,7 @@ impl Authenticator {
                 // Check if the username and password are correct
                 let is_equal =
                     ({ auth_username.starts_with(&*username) && auth_password.eq(&*password) })
-                        || self.contains(socket.ip());
+                        || self.pass(socket.ip());
 
                 // Check credentials
                 if is_equal {

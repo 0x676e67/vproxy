@@ -32,14 +32,8 @@ impl NoAuth {
 }
 
 impl Whitelist for NoAuth {
-    fn is_empty(&self) -> bool {
-        // Check if the whitelist is empty
-        self.0.is_empty()
-    }
-
-    fn contains(&self, ip: IpAddr) -> bool {
-        // If whitelist is empty, allow all
-        self.0.contains(&ip)
+    fn pass(&self, ip: IpAddr) -> bool {
+        self.0.is_empty() || self.0.contains(&ip)
     }
 }
 
@@ -53,7 +47,7 @@ impl Auth for NoAuth {
 
     async fn execute(&self, stream: &mut TcpStream) -> Self::Output {
         let socket = stream.peer_addr()?;
-        let is_equal = self.contains(socket.ip()) || self.is_empty();
+        let is_equal = self.pass(socket.ip());
         if !is_equal {
             return Err(Error::new(
                 ErrorKind::Other,
@@ -71,19 +65,8 @@ pub struct Password {
 }
 
 impl Whitelist for Password {
-    fn is_empty(&self) -> bool {
-        // Check if the whitelist is empty
-        self.whitelist.is_empty()
-    }
-
-    fn contains(&self, ip: IpAddr) -> bool {
-        // If whitelist is empty, allow all
-        if self.whitelist.is_empty() {
-            return true;
-        } else {
-            // Check if the ip is in the whitelist
-            return self.whitelist.contains(&ip);
-        }
+    fn pass(&self, ip: IpAddr) -> bool {
+        !self.whitelist.is_empty() && self.whitelist.contains(&ip)
     }
 }
 
@@ -110,11 +93,13 @@ impl Auth for Password {
         let req = Request::retrieve_from_async_stream(stream).await?;
         let socket = stream.peer_addr()?;
 
+        println!("{}", self.pass(socket.ip()));
+
         // Check if the username and password are correct
         let is_equal = ({
             req.user_pass.username.starts_with(&self.user_pass.username)
                 && req.user_pass.password.eq(&self.user_pass.password)
-        }) || self.contains(socket.ip());
+        }) || self.pass(socket.ip());
 
         let resp = Response::new(if is_equal { Succeeded } else { Failed });
         resp.write_to_async_stream(stream).await?;

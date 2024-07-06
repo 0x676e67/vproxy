@@ -281,9 +281,7 @@ impl Connector {
                     )
                     .await?
                 }
-                _ => {
-                    timeout(self.connect_timeout, TcpStream::connect(target_addr)).await?
-                }
+                _ => timeout(self.connect_timeout, TcpStream::connect(target_addr)).await?,
             },
         }
         .and_then(|stream| {
