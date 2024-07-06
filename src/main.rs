@@ -74,7 +74,7 @@ pub struct BootArgs {
     #[clap(long, env = "VPROXY_DEBUG")]
     debug: bool,
     /// Bind address
-    #[clap(short, long, default_value = "0.0.0.0:8100")]
+    #[clap(short, long, default_value = "0.0.0.0:1080")]
     bind: SocketAddr,
     /// Concurrent connections
     #[clap(short, long, default_value = "1024")]
