@@ -12,11 +12,12 @@
 
 # vproxy
 
-An easy and powerful Rust `HTTP`/`Socks5`/`HTTP2Socks5` proxy that allows initiating network requests using IP binding calculated from CIDR addresses.
+An easy and powerful Rust `HTTP`/`Socks5`/`HTTP2Socks5` proxy
 
 ## Features
 
 - IPv4/IPv6 priority
+- Configurable concurrency limits
 - Service binding `IP-CIDR` address
 - Fallback address when `IP-CIDR` address is unreachable
 - Basic authentication
