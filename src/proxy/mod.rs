@@ -10,7 +10,7 @@ use self::connect::Connector;
 use crate::{AuthMode, BootArgs, Proxy};
 pub use socks5::Error;
 use std::net::{IpAddr, SocketAddr};
-use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
+use tracing::Level;
 
 struct ProxyContext {
     /// Bind address
@@ -27,29 +27,33 @@ struct ProxyContext {
 
 #[tokio::main(flavor = "multi_thread")]
 pub async fn run(args: BootArgs) -> crate::Result<()> {
-    if args.debug {
-        std::env::set_var("RUST_LOG", "debug");
-    } else {
-        std::env::set_var("RUST_LOG", "info");
-    }
-
-    // Init tracing logger
-    tracing_subscriber::registry()
-        .with(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "RUST_LOG=info".into()),
-        )
-        .with(tracing_subscriber::fmt::layer())
+    // Initialize the logger.
+    tracing_subscriber::fmt()
+        .with_max_level(if args.debug {
+            Level::DEBUG
+        } else {
+            Level::INFO
+        })
         .init();
 
     tracing::info!("OS: {}", std::env::consts::OS);
     tracing::info!("Arch: {}", std::env::consts::ARCH);
     tracing::info!("Version: {}", env!("CARGO_PKG_VERSION"));
+    tracing::info!("Concurrent: {}", args.concurrent);
+    tracing::info!("Connect timeout: {:?}s", args.connect_timeout);
 
     #[cfg(target_os = "linux")]
     if let Some(cidr) = &args.cidr {
         route::sysctl_ipv6_no_local_bind();
         route::sysctl_route_add_cidr(&cidr).await;
+    }
+
+    #[cfg(target_family = "unix")]
+    {
+        use nix::sys::resource::{setrlimit, Resource};
+        let soft_limit = (args.concurrent + 50) as u64;
+        let hard_limit = 1048576;
+        setrlimit(Resource::RLIMIT_NOFILE, soft_limit.into(), hard_limit)?;
     }
 
     let ctx = move |auth: AuthMode| ProxyContext {

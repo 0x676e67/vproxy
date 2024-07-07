@@ -17,4 +17,7 @@ pub enum Error {
 
     #[error(transparent)]
     Socks5Error(#[from] crate::proxy::Error),
+
+    #[error(transparent)]
+    NixError(#[from] nix::Error),
 }
