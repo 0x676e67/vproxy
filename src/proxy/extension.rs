@@ -22,7 +22,7 @@ pub enum Extensions {
 impl Extensions {
     const TAG_SESSION: &'static str = "-session-";
     const TAG_HTTP2SOCKS5: &'static str = "-h2s-";
-    const HEADER_SESSION_ID: &'static str = "session-id";
+    const HEADER_SESSION_ID: &'static str = "session";
     const HEADER_HTTP_TO_SOCKS5: &'static str = "http2socks5";
 }
 

@@ -97,7 +97,7 @@ When using passwordless authorization, if an IP whitelist exists, only authorize
 
 - Session extension
 
-Append `-session-id` to the username, where session is a fixed value and ID is an arbitrary random value (e.g., `username-session-123456`). Keep the Session ID unchanged to use a fixed IP.For HTTP users who are using password-less authorization and need a fixed IP address, you can add the `session-id` header to the request (e.g., `session-id: 123456`). By keeping the Session ID unchanged, you can use a fixed IP. Keep in mind Chrome and Firefox can't set `--proxy-header` like curl.
+Append `-session-id` to the username, where session is a fixed value and ID is an arbitrary random value (e.g., `username-session-123456`). Keep the Session ID unchanged to use a fixed IP.For HTTP users who are using password-less authorization and need a fixed IP address, you can add the `session` header to the request (e.g., `session: 123456`). By keeping the Session ID unchanged, you can use a fixed IP. Keep in mind Chrome and Firefox can't set `--proxy-header` like curl.
 
 - Http2Socks5 extension
 

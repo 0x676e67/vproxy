@@ -18,11 +18,23 @@ use std::{
     net::{SocketAddr, ToSocketAddrs},
     sync::Arc,
 };
-use tokio::net::TcpStream;
+use tokio::net::{TcpListener, TcpStream};
 
 pub async fn proxy(ctx: ProxyContext) -> crate::Result<()> {
     tracing::info!("Http server listening on {}", ctx.bind);
 
+    let listener = setup_listener(&ctx).await?;
+    let proxy = HttpProxy::from(ctx);
+
+    while let Ok((stream, socket)) = listener.accept().await {
+        let http_proxy = proxy.clone();
+        tokio::spawn(handle_connection(http_proxy, stream, socket));
+    }
+
+    Ok(())
+}
+
+async fn setup_listener(ctx: &ProxyContext) -> std::io::Result<TcpListener> {
     let socket = if ctx.bind.is_ipv4() {
         tokio::net::TcpSocket::new_v4()?
     } else {
@@ -30,57 +42,41 @@ pub async fn proxy(ctx: ProxyContext) -> crate::Result<()> {
     };
     socket.set_reuseaddr(true)?;
     socket.bind(ctx.bind)?;
-    let listener = socket.listen(ctx.concurrent as u32)?;
+    socket.listen(ctx.concurrent as u32)
+}
 
-    // Create a proxy instance
-    let proxy = Arc::new(HttpProxy::from(ctx));
-
-    loop {
-        let (stream, socket) = listener.accept().await?;
-        let io = TokioIo::new(stream);
-        let http_proxy = proxy.clone();
-
-        tokio::task::spawn(async move {
-            if let Err(err) = http1::Builder::new()
-                .preserve_header_case(true)
-                .title_case_headers(true)
-                .serve_connection(
-                    io,
-                    service_fn(move |req| {
-                        <HttpProxy as Clone>::clone(&http_proxy).proxy(socket, req)
-                    }),
-                )
-                .with_upgrades()
-                .await
-            {
-                tracing::error!("Failed to serve connection: {:?}", err);
-            }
-        });
+async fn handle_connection(proxy: HttpProxy, stream: TcpStream, socket: SocketAddr) {
+    let io = TokioIo::new(stream);
+    if let Err(err) = http1::Builder::new()
+        .preserve_header_case(true)
+        .title_case_headers(true)
+        .serve_connection(
+            io,
+            service_fn(move |req| <HttpProxy as Clone>::clone(&proxy).proxy(socket, req)),
+        )
+        .with_upgrades()
+        .await
+    {
+        tracing::error!("Failed to serve connection: {:?}", err);
     }
 }
 
 #[derive(Clone)]
-struct HttpProxy {
-    /// Authentication type
-    auth: Authenticator,
-    /// Connector
-    connector: Connector,
-}
+struct HttpProxy(Arc<Authenticator>, Arc<Connector>);
 
 impl From<ProxyContext> for HttpProxy {
     fn from(ctx: ProxyContext) -> Self {
-        Self {
-            auth: match (ctx.auth.username, ctx.auth.password) {
-                (Some(username), Some(password)) => Authenticator::Password {
-                    username,
-                    password,
-                    whitelist: ctx.whitelist,
-                },
-
-                _ => Authenticator::None(ctx.whitelist),
+        let auth = match (ctx.auth.username, ctx.auth.password) {
+            (Some(username), Some(password)) => Authenticator::Password {
+                username,
+                password,
+                whitelist: ctx.whitelist,
             },
-            connector: ctx.connector,
-        }
+
+            _ => Authenticator::None(ctx.whitelist),
+        };
+
+        HttpProxy(Arc::new(auth), Arc::new(ctx.connector))
     }
 }
 
@@ -93,7 +89,7 @@ impl HttpProxy {
         tracing::info!("request: {req:?}, {socket:?}", req = req, socket = socket);
 
         // Check if the client is authorized
-        let extension = match self.auth.authenticate(req.headers_mut(), socket) {
+        let extension = match self.0.authenticate(req.headers_mut(), socket) {
             Ok(extension) => extension,
             // If the client is not authorized, return an error response
             Err(e) => return Ok(e.into()),
@@ -129,13 +125,13 @@ impl HttpProxy {
             } else {
                 tracing::warn!("CONNECT host is not socket addr: {:?}", req.uri());
                 let mut resp = Response::new(full("CONNECT must be to a socket address"));
-                *resp.status_mut() = http::StatusCode::BAD_REQUEST;
+                *resp.status_mut() = StatusCode::BAD_REQUEST;
 
                 Ok(resp)
             }
         } else {
             Ok(self
-                .connector
+                .1
                 .new_http_request(req, extension)
                 .await?
                 .map(|b| b.boxed()))
@@ -152,9 +148,7 @@ impl HttpProxy {
     ) -> std::io::Result<()> {
         let mut server = {
             let addrs = addr_str.to_socket_addrs()?;
-            self.connector
-                .try_connect_with_addrs(addrs, extension)
-                .await?
+            self.1.try_connect_with_addrs(addrs, extension).await?
         };
 
         tunnel_proxy(upgraded, &mut server).await

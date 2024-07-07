@@ -60,7 +60,7 @@ async fn event_loop(
         let connector = connector.clone();
         tokio::spawn(async move {
             if let Err(err) = handle(conn, connector).await {
-                tracing::error!("{err}");
+                tracing::info!("{err}");
             }
         });
     }
@@ -72,8 +72,7 @@ async fn handle(
     connector: Arc<connect::Connector>,
 ) -> Result<()> {
     let (conn, res) = conn.authenticate().await?;
-
-    let (res, extension) = res.map(|(res, extension)| (res, extension))?;
+    let (res, extension) = res?;
 
     if !res {
         tracing::info!("authentication failed");
