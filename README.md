@@ -152,6 +152,29 @@ $ for i in `seq 1 3`; do curl -x "socks5h://test-session-987654321:test@127.0.0.
 
 ```
 
+- TTL proxy session with passwordless authorization
+
+```shell
+./vproxy run --bind 127.0.0.1:8101 -i 2001:470:70c6::/48 socks5 -u test -p test
+
+$ for i in `seq 1 3`; do curl -x "socks5h://test-ttl-2:test@127.0.0.1:8101" https://api6.ipify.org; done
+2001:470:70c6:93ee:9b7c:b4f9:4913:22f5
+2001:470:70c6:93ee:9b7c:b4f9:4913:22f5
+2001:470:70c6:93ee:9b7c:b4f9:4913:22f6
+$ for i in `seq 1 3`; do curl -x "socks5h://test-ttl-2:test@127.0.0.1:8101" https://api6.ipify.org; done
+2001:470:70c6:41d0:14fd:d025:835a:d102
+2001:470:70c6:41d0:14fd:d025:835a:d102
+2001:470:70c6:41d0:14fd:d025:835a:d105
+```
+
+- Http2Socks5 proxy session with username and password
+
+```shell
+./vproxy run --bind "127.0.0.1:1080" http -u username -p password
+./vproxy run --bind "127.0.0.1:1081" socks5 -u user -p pass
+curl -x "http://username-h2s-127.0.0.1|1081|user|pass:password@127.0.0.1:1080" -s https://api.ip.sb/ip -A Mozilla
+```
+
 ```shell
 $ vproxy -h
 An easy and powerful Rust HTTP/Socks5 Proxy
