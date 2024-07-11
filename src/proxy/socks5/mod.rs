@@ -11,7 +11,8 @@ use self::{
         ClientConnection, IncomingConnection, Server, UdpAssociate,
     },
 };
-use super::{connect, extension::Extensions, ProxyContext};
+use super::{extension::Extensions, ProxyContext};
+use crate::proxy::connector::Connector;
 pub use error::Error;
 use std::{
     net::{SocketAddr, ToSocketAddrs},
@@ -53,7 +54,7 @@ pub type Result<T, E = Error> = std::result::Result<T, E>;
 
 async fn event_loop(
     server: Server<std::io::Result<(bool, Extensions)>>,
-    connector: connect::Connector,
+    connector: Connector,
 ) -> Result<()> {
     let connector = Arc::new(connector);
     while let Ok((conn, _)) = server.accept().await {
@@ -69,7 +70,7 @@ async fn event_loop(
 
 async fn handle(
     conn: IncomingConnection<std::io::Result<(bool, Extensions)>>,
-    connector: Arc<connect::Connector>,
+    connector: Arc<Connector>,
 ) -> Result<()> {
     let (conn, res) = conn.authenticate().await?;
     let (res, extension) = res?;
@@ -103,8 +104,13 @@ async fn handle(
                 let mut conn = connect
                     .reply(Reply::Succeeded, Address::unspecified())
                     .await?;
-                let (a, b) = tokio::io::copy_bidirectional(&mut target, &mut conn).await?;
-                tracing::info!("{} bytes transferred", a + b);
+                let (from_client, from_server) =
+                    tokio::io::copy_bidirectional(&mut target, &mut conn).await?;
+                tracing::debug!(
+                    "client wrote {} bytes and received {} bytes",
+                    from_client,
+                    from_server
+                );
             } else {
                 let mut conn = connect
                     .reply(Reply::HostUnreachable, Address::unspecified())

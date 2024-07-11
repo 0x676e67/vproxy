@@ -6,7 +6,6 @@ use http::{header, HeaderMap, Response, StatusCode};
 use http_body_util::combinators::BoxBody;
 use std::net::{IpAddr, SocketAddr};
 
-/// Auth Error
 #[derive(thiserror::Error, Debug)]
 pub enum AuthError {
     #[error("Invalid credentials")]
@@ -49,7 +48,6 @@ impl Whitelist for Authenticator {
             Authenticator::None(whitelist) => whitelist,
             Authenticator::Password { whitelist, .. } => whitelist,
         };
-        // If whitelist is empty, allow all
         whitelist.is_empty() || whitelist.contains(&ip)
     }
 }
@@ -65,7 +63,6 @@ impl Authenticator {
                 // If whitelist is empty, allow all
                 let is_equal = self.pass(socket.ip());
                 if !is_equal {
-                    tracing::warn!("Unauthorized access from {}", socket);
                     return Err(AuthError::Forbidden);
                 }
 
@@ -92,7 +89,6 @@ impl Authenticator {
                 if is_equal {
                     Ok(Extensions::from((username.as_str(), auth_username)))
                 } else {
-                    tracing::warn!("Unauthorized access from {}", socket);
                     Err(AuthError::Forbidden)
                 }
             }
@@ -106,7 +102,6 @@ fn option_ext(headers: &HeaderMap) -> Option<String> {
         .and_then(|hv| hv.to_str().ok())
         .and_then(|s| s.strip_prefix("Basic "))?;
 
-    // Convert to string
     let auth_bytes = base64::engine::general_purpose::STANDARD
         .decode(basic_auth.as_bytes())
         .ok()?;

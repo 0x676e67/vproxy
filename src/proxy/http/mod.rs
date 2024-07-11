@@ -2,7 +2,7 @@ mod auth;
 pub mod error;
 
 use self::{auth::Authenticator, error::Error};
-use super::{connect::Connector, extension::Extensions, ProxyContext};
+use super::{connector::Connector, extension::Extensions, ProxyContext};
 use bytes::Bytes;
 use http::StatusCode;
 use http_body_util::{combinators::BoxBody, BodyExt, Empty, Full};
@@ -149,20 +149,16 @@ impl HttpProxy {
             self.0 .1.try_connect_with_addrs(addrs, extension).await?
         };
 
-        tunnel_proxy(upgraded, &mut server).await
-    }
-}
+        let (from_client, from_server) =
+            tokio::io::copy_bidirectional(&mut TokioIo::new(upgraded), &mut server).await?;
+        tracing::debug!(
+            "client wrote {} bytes and received {} bytes",
+            from_client,
+            from_server
+        );
 
-/// Proxy data between upgraded connection and server
-async fn tunnel_proxy(upgraded: Upgraded, server: &mut TcpStream) -> std::io::Result<()> {
-    let (from_client, from_server) =
-        tokio::io::copy_bidirectional(&mut TokioIo::new(upgraded), server).await?;
-    tracing::debug!(
-        "client wrote {} bytes and received {} bytes",
-        from_client,
-        from_server
-    );
-    Ok(())
+        Ok(())
+    }
 }
 
 fn host_addr(uri: &http::Uri) -> Option<String> {

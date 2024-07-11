@@ -13,6 +13,8 @@ pub trait Whitelist {
 pub enum Extensions {
     /// No extension.
     None,
+    /// TTL extension with a 64-bit integer.
+    TTL(u64),
     /// Session extension with a tuple of two 64-bit integers.
     Session(u64, u64),
     /// Http to Socks5 extension. e.g. host:port:username:password
@@ -20,8 +22,11 @@ pub enum Extensions {
 }
 
 impl Extensions {
+    const TAG_TTL: &'static str = "-ttl-";
     const TAG_SESSION: &'static str = "-session-";
     const TAG_HTTP2SOCKS5: &'static str = "-h2s-";
+
+    const HEADER_TTL: &'static str = "ttl";
     const HEADER_SESSION_ID: &'static str = "session";
     const HEADER_HTTP_TO_SOCKS5: &'static str = "http2socks5";
 }
@@ -48,6 +53,12 @@ impl From<(&str, &str)> for Extensions {
             // Parse socks5 extension
             if let Some(extension) =
                 handle_extension(true, tag, Self::TAG_HTTP2SOCKS5, parse_socks5_extension)
+            {
+                return extension;
+            }
+
+            // Parse ttl extension
+            if let Some(extension) = handle_extension(true, tag, Self::TAG_TTL, parse_ttl_extension)
             {
                 return extension;
             }
@@ -91,6 +102,17 @@ impl From<&HeaderMap> for Extensions {
                 return extensions;
             }
         }
+
+        // Get the value of the `ttl` header from the headers.
+        if let Some(value) = headers.get(Self::HEADER_TTL) {
+            // Convert the value to a string.
+            if let Ok(s) = value.to_str() {
+                // Parse TTL extension
+                let extensions = parse_ttl_extension(s);
+                return extensions;
+            }
+        }
+
         // If the `session-id` header is not present, or if the value is not a valid
         // string, return the `None` variant of `Extensions`.
         Extensions::None
@@ -212,5 +234,28 @@ fn parse_socks5_extension(s: &str) -> Extensions {
     }
 
     // do nothing
+    Extensions::None
+}
+
+/// Parses a TTL (Time To Live) extension string.
+///
+/// This function attempts to parse a given string `s` into a `u64` representing
+/// the TTL value. If successful, it returns an `Extensions::Session` variant
+/// with the parsed TTL value and a fixed value of `1`. If the string cannot be
+/// parsed into a `u64`, it returns `Extensions::None`.
+///
+/// # Arguments
+///
+/// * `s` - The string to parse as a TTL value.
+///
+/// # Returns
+///
+/// Returns an `Extensions` enum variant. If parsing is successful, returns
+/// `Extensions::Session` with the TTL value and `1`. Otherwise, returns
+/// `Extensions::None`.
+fn parse_ttl_extension(s: &str) -> Extensions {
+    if let Ok(ttl) = s.parse::<u64>() {
+        return Extensions::TTL(ttl);
+    }
     Extensions::None
 }
