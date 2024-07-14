@@ -30,23 +30,24 @@ struct ProxyContext {
 pub async fn run(args: BootArgs) -> crate::Result<()> {
     // Initialize the logger with a filter that ignores WARN level logs for netlink_proto
     let filter = EnvFilter::from_default_env()
-        .add_directive(LevelFilter::INFO.into())
+        .add_directive(
+            if args.debug {
+                Level::DEBUG
+            } else {
+                Level::INFO
+            }
+            .into(),
+        )
         .add_directive(
             "netlink_proto=error"
                 .parse()
                 .expect("failed to parse directive"),
         );
 
-    let subscriber = FmtSubscriber::builder()
-        .with_max_level(if cfg!(debug_assertions) {
-            Level::DEBUG
-        } else {
-            Level::INFO
-        })
-        .with_env_filter(filter)
-        .finish();
-
-    tracing::subscriber::set_global_default(subscriber).expect("setting default subscriber failed");
+    tracing::subscriber::set_global_default(
+        FmtSubscriber::builder().with_env_filter(filter).finish(),
+    )
+    .expect("setting default subscriber failed");
 
     tracing::info!("OS: {}", std::env::consts::OS);
     tracing::info!("Arch: {}", std::env::consts::ARCH);
