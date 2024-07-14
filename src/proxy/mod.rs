@@ -10,7 +10,7 @@ use self::connector::Connector;
 use crate::{AuthMode, BootArgs, Proxy};
 pub use socks5::Error;
 use std::net::{IpAddr, SocketAddr};
-use tracing::{level_filters::LevelFilter, Level};
+use tracing::Level;
 use tracing_subscriber::{EnvFilter, FmtSubscriber};
 
 struct ProxyContext {
