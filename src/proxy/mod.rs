@@ -26,8 +26,7 @@ struct ProxyContext {
     pub connector: Connector,
 }
 
-#[tokio::main(flavor = "multi_thread")]
-pub async fn run(args: BootArgs) -> crate::Result<()> {
+pub fn run(args: BootArgs) -> crate::Result<()> {
     // Initialize the logger with a filter that ignores WARN level logs for netlink_proto
     let filter = EnvFilter::from_default_env()
         .add_directive(
@@ -77,8 +76,14 @@ pub async fn run(args: BootArgs) -> crate::Result<()> {
         connector: Connector::new(args.cidr, args.fallback, args.connect_timeout),
     };
 
-    match args.proxy {
-        Proxy::Http { auth } => http::proxy(ctx(auth)).await,
-        Proxy::Socks5 { auth } => socks5::proxy(ctx(auth)).await,
-    }
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .max_blocking_threads(args.concurrent)
+        .build()?
+        .block_on(async {
+            match args.proxy {
+                Proxy::Http { auth } => http::proxy(ctx(auth)).await,
+                Proxy::Socks5 { auth } => socks5::proxy(ctx(auth)).await,
+            }
+        })
 }
