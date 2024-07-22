@@ -1,4 +1,4 @@
-use crate::proxy::extension::{Extensions, Whitelist};
+use crate::proxy::extension::{Extension, Whitelist};
 use crate::proxy::http::empty;
 use base64::Engine;
 use bytes::Bytes;
@@ -53,11 +53,11 @@ impl Whitelist for Authenticator {
 }
 
 impl Authenticator {
-    pub fn authenticate(
+    pub async fn authenticate(
         &self,
-        headers: &HeaderMap,
+        headers: HeaderMap,
         socket: SocketAddr,
-    ) -> Result<Extensions, AuthError> {
+    ) -> Result<Extension, AuthError> {
         match self {
             Authenticator::None(..) => {
                 // If whitelist is empty, allow all
@@ -66,13 +66,18 @@ impl Authenticator {
                     return Err(AuthError::Forbidden);
                 }
 
-                Ok(Extensions::from(headers))
+                let extensions = Extension::try_from_headers(&headers)
+                    .await
+                    .map_err(|_| AuthError::Forbidden)?;
+
+                Ok(extensions)
             }
             Authenticator::Password {
                 username, password, ..
             } => {
                 // Extract basic auth
-                let auth_str = option_ext(headers).ok_or(AuthError::ProxyAuthenticationRequired)?;
+                let auth_str =
+                    option_ext(&headers).ok_or(AuthError::ProxyAuthenticationRequired)?;
                 // Find last ':' index
                 let last_colon_index = auth_str
                     .rfind(':')
@@ -87,7 +92,10 @@ impl Authenticator {
 
                 // Check credentials
                 if is_equal {
-                    Ok(Extensions::from((username.as_str(), auth_username)))
+                    let extensions = Extension::try_from((username, auth_username))
+                        .await
+                        .map_err(|_| AuthError::Forbidden)?;
+                    Ok(extensions)
                 } else {
                     Err(AuthError::Forbidden)
                 }

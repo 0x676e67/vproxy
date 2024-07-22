@@ -1,5 +1,5 @@
 use crate::proxy::{
-    extension::{Extensions, Whitelist},
+    extension::{Extension, Whitelist},
     socks5::proto::{handshake::password, AsyncStreamOperation, Method, UsernamePassword},
 };
 use async_trait::async_trait;
@@ -39,7 +39,7 @@ impl Whitelist for NoAuth {
 
 #[async_trait]
 impl Auth for NoAuth {
-    type Output = std::io::Result<(bool, Extensions)>;
+    type Output = std::io::Result<(bool, Extension)>;
 
     fn method(&self) -> Method {
         Method::NoAuth
@@ -54,7 +54,7 @@ impl Auth for NoAuth {
                 format!("Address {} is not in the whitelist", socket.ip()),
             ));
         }
-        Ok((true, Extensions::None))
+        Ok((true, Extension::None))
     }
 }
 
@@ -83,7 +83,7 @@ impl Password {
 
 #[async_trait]
 impl Auth for Password {
-    type Output = std::io::Result<(bool, Extensions)>;
+    type Output = std::io::Result<(bool, Extension)>;
 
     fn method(&self) -> Method {
         Method::Password
@@ -102,13 +102,12 @@ impl Auth for Password {
         let resp = Response::new(if is_equal { Succeeded } else { Failed });
         resp.write_to_async_stream(stream).await?;
         if is_equal {
-            Ok((
-                true,
-                Extensions::from((
-                    self.user_pass.username.as_str(),
-                    req.user_pass.username.as_str(),
-                )),
-            ))
+            let extension =
+                Extension::try_from((&self.user_pass.username, &req.user_pass.username))
+                    .await
+                    .map_err(|_| Error::new(ErrorKind::Other, "failed to parse extension"))?;
+
+            Ok((true, extension))
         } else {
             Err(Error::new(
                 ErrorKind::Other,

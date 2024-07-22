@@ -2,7 +2,7 @@ mod auth;
 pub mod error;
 
 use self::{auth::Authenticator, error::Error};
-use super::{connector::Connector, extension::Extensions, ProxyContext};
+use super::{connect::Connector, extension::Extension, ProxyContext};
 use bytes::Bytes;
 use http::StatusCode;
 use http_body_util::{combinators::BoxBody, BodyExt, Empty, Full};
@@ -81,12 +81,12 @@ impl HttpProxy {
     async fn proxy(
         self,
         socket: SocketAddr,
-        mut req: Request<Incoming>,
+        req: Request<Incoming>,
     ) -> Result<Response<BoxBody<Bytes, hyper::Error>>, Error> {
         tracing::info!("request: {req:?}, {socket:?}", req = req, socket = socket);
 
         // Check if the client is authorized
-        let extension = match self.0 .0.authenticate(req.headers_mut(), socket) {
+        let extension = match self.0 .0.authenticate(req.headers().clone(), socket).await {
             Ok(extension) => extension,
             // If the client is not authorized, return an error response
             Err(e) => return Ok(e.try_into()?),
@@ -142,7 +142,7 @@ impl HttpProxy {
         &self,
         upgraded: Upgraded,
         addr_str: String,
-        extension: Extensions,
+        extension: Extension,
     ) -> std::io::Result<()> {
         let mut server = {
             let addrs = addr_str.to_socket_addrs()?;

@@ -1,6 +1,7 @@
 use super::{murmur, socks5::proto::UsernamePassword};
 use http::{header, HeaderMap};
 use std::net::IpAddr;
+use tokio::task::JoinError;
 
 /// Trait for checking if an IP address is in the whitelist.
 pub trait Whitelist {
@@ -10,7 +11,7 @@ pub trait Whitelist {
 
 /// Enum representing different types of extensions.
 #[derive(Clone)]
-pub enum Extensions {
+pub enum Extension {
     /// No extension.
     None,
     /// TTL extension with a 64-bit integer.
@@ -21,7 +22,7 @@ pub enum Extensions {
     Http2Socks5((String, u16), Option<UsernamePassword>),
 }
 
-impl Extensions {
+impl Extension {
     const TAG_TTL: &'static str = "-ttl-";
     const TAG_SESSION: &'static str = "-session-";
     const TAG_HTTP2SOCKS5: &'static str = "-h2s-";
@@ -29,15 +30,30 @@ impl Extensions {
     const HEADER_TTL: &'static str = "ttl";
     const HEADER_SESSION_ID: &'static str = "session";
     const HEADER_HTTP_TO_SOCKS5: &'static str = "http2socks5";
-}
 
-impl Default for Extensions {
-    fn default() -> Self {
-        Extensions::None
+    pub async fn try_from_headers(headers: &HeaderMap) -> Result<Extension, JoinError> {
+        let headers = headers.clone();
+        let extension = tokio::task::spawn_blocking(move || Extension::from(&headers)).await?;
+        Ok(extension)
+    }
+
+    pub async fn try_from((prefix, full): (&str, &str)) -> Result<Extension, JoinError> {
+        let prefix = prefix.to_owned();
+        let full = full.to_owned();
+        let extension =
+            tokio::task::spawn_blocking(move || Extension::from((prefix.as_str(), full.as_str())))
+                .await?;
+        Ok(extension)
     }
 }
 
-impl From<(&str, &str)> for Extensions {
+impl Default for Extension {
+    fn default() -> Self {
+        Extension::None
+    }
+}
+
+impl From<(&str, &str)> for Extension {
     // This function takes a tuple of two strings as input: a prefix (the username)
     // and a string `full` (the username-session-id).
     fn from((prefix, full): (&str, &str)) -> Self {
@@ -66,11 +82,11 @@ impl From<(&str, &str)> for Extensions {
         // If the string `s` does not start with the prefix, or if the remaining string
         // after removing the prefix and "-" is empty, return the `None` variant
         // of `Extensions`.
-        Extensions::None
+        Extension::None
     }
 }
 
-impl From<&HeaderMap> for Extensions {
+impl From<&HeaderMap> for Extension {
     fn from(headers: &HeaderMap) -> Self {
         // Get the value of the `session-id` header from the headers.
         if let (Some(value), ident) = (
@@ -115,7 +131,7 @@ impl From<&HeaderMap> for Extensions {
 
         // If the `session-id` header is not present, or if the value is not a valid
         // string, return the `None` variant of `Extensions`.
-        Extensions::None
+        Extension::None
     }
 }
 
@@ -145,8 +161,8 @@ fn handle_extension(
     trim: bool,
     s: &str,
     prefix: &str,
-    handler: fn(&str) -> Extensions,
-) -> Option<Extensions> {
+    handler: fn(&str) -> Extension,
+) -> Option<Extension> {
     tracing::debug!("before handle_extension: s={}, prefix={}", s, prefix);
     if !s.contains(prefix) {
         return None;
@@ -176,9 +192,9 @@ fn handle_extension(
 /// This function returns an `Extensions` enum. If the string is not empty, it
 /// will return a `Extensions::Session` variant containing a tuple `(a, b)`.
 /// Otherwise, it will return `Extensions::None`.
-fn parse_session_extension(s: &str) -> Extensions {
+fn parse_session_extension(s: &str) -> Extension {
     let (a, b) = murmur::murmurhash3_x64_128(s.as_bytes(), s.len() as u64);
-    Extensions::Session(a, b)
+    Extension::Session(a, b)
 }
 
 /// Parses a SOCKS5 extension string.
@@ -207,13 +223,13 @@ fn parse_session_extension(s: &str) -> Extensions {
 /// This function returns an `Extensions` enum. If the string can be
 /// successfully parsed, it will return a `Extensions::Http2Socks5` variant.
 /// Otherwise, it will return `Extensions::None`.
-fn parse_socks5_extension(s: &str) -> Extensions {
+fn parse_socks5_extension(s: &str) -> Extension {
     let parts: Vec<&str> = s.split("|").collect();
     match parts.len() {
         2 => {
             if let Ok(port) = parts[1].parse::<u16>() {
                 let host = parts[0];
-                return Extensions::Http2Socks5((host.to_string(), port), None);
+                return Extension::Http2Socks5((host.to_string(), port), None);
             }
         }
         4 => {
@@ -221,7 +237,7 @@ fn parse_socks5_extension(s: &str) -> Extensions {
                 let host = parts[0];
                 let username = parts[2];
                 let password = parts[3];
-                return Extensions::Http2Socks5(
+                return Extension::Http2Socks5(
                     (host.to_string(), port),
                     Some(UsernamePassword::new(
                         username.to_string(),
@@ -234,7 +250,7 @@ fn parse_socks5_extension(s: &str) -> Extensions {
     }
 
     // do nothing
-    Extensions::None
+    Extension::None
 }
 
 /// Parses a TTL (Time To Live) extension string.
@@ -253,9 +269,9 @@ fn parse_socks5_extension(s: &str) -> Extensions {
 /// Returns an `Extensions` enum variant. If parsing is successful, returns
 /// `Extensions::Session` with the TTL value and `1`. Otherwise, returns
 /// `Extensions::None`.
-fn parse_ttl_extension(s: &str) -> Extensions {
+fn parse_ttl_extension(s: &str) -> Extension {
     if let Ok(ttl) = s.parse::<u64>() {
-        return Extensions::TTL(ttl);
+        return Extension::TTL(ttl);
     }
-    Extensions::None
+    Extension::None
 }

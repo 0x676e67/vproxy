@@ -1,4 +1,4 @@
-mod connector;
+mod connect;
 mod extension;
 mod http;
 mod murmur;
@@ -6,7 +6,7 @@ mod murmur;
 mod route;
 mod socks5;
 
-use self::connector::Connector;
+use self::connect::Connector;
 use crate::{AuthMode, BootArgs, Proxy};
 pub use socks5::Error;
 use std::net::{IpAddr, SocketAddr};

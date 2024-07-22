@@ -1,7 +1,7 @@
 mod ttl;
 
 use super::{
-    extension::Extensions,
+    extension::Extension,
     http::error::Error,
     socks5::{self, proto::UsernamePassword},
 };
@@ -100,7 +100,7 @@ impl Connector {
     pub async fn new_http_request(
         &self,
         req: Request<Incoming>,
-        extension: Extensions,
+        extension: Extension,
     ) -> Result<Response<Incoming>, Error> {
         let mut connector = HttpConnector::new();
         connector.set_connect_timeout(Some(self.connect_timeout));
@@ -163,7 +163,7 @@ impl Connector {
     pub async fn try_connect_with_addrs(
         &self,
         addrs: impl IntoIterator<Item = SocketAddr>,
-        extension: Extensions,
+        extension: Extension,
     ) -> std::io::Result<TcpStream> {
         let mut last_err = None;
 
@@ -206,7 +206,7 @@ impl Connector {
     pub async fn try_connect_with_domain(
         &self,
         host: (String, u16),
-        extension: Extensions,
+        extension: Extension,
     ) -> std::io::Result<TcpStream> {
         let addrs = lookup_host(host).await?;
         self.try_connect_with_addrs(addrs, extension).await
@@ -253,10 +253,10 @@ impl Connector {
     pub async fn try_connect(
         &self,
         target_addr: SocketAddr,
-        extension: &Extensions,
+        extension: &Extension,
     ) -> std::io::Result<TcpStream> {
         match extension {
-            Extensions::Http2Socks5(host, auth) => {
+            Extension::Http2Socks5(host, auth) => {
                 timeout(
                     self.connect_timeout,
                     self.try_connect_to_socks5(target_addr, host, auth),
@@ -264,7 +264,7 @@ impl Connector {
                 .await?
             }
 
-            Extensions::None | Extensions::Session(_, _) | Extensions::TTL(_) => {
+            Extension::None | Extension::Session(_, _) | Extension::TTL(_) => {
                 match (self.cidr, self.fallback) {
                     (None, Some(fallback)) => {
                         timeout(
@@ -384,7 +384,7 @@ impl Connector {
         &self,
         target_addr: SocketAddr,
         cidr: IpCidr,
-        extension: &Extensions,
+        extension: &Extension,
     ) -> std::io::Result<TcpStream> {
         let socket = self.create_socket_with_cidr(cidr, extension).await?;
         socket.connect(target_addr).await
@@ -456,7 +456,7 @@ impl Connector {
         target_addr: SocketAddr,
         cidr: IpCidr,
         fallback: IpAddr,
-        extension: &Extensions,
+        extension: &Extension,
     ) -> std::io::Result<TcpStream> {
         match self
             .try_connect_with_cidr(target_addr, cidr, extension)
@@ -531,7 +531,7 @@ impl Connector {
     async fn create_socket_with_cidr(
         &self,
         cidr: IpCidr,
-        extension: &Extensions,
+        extension: &Extension,
     ) -> std::io::Result<TcpSocket> {
         match cidr {
             IpCidr::V4(cidr) => {
@@ -555,7 +555,7 @@ impl Connector {
     /// ID. The network part of the address is preserved, and the host part is
     /// generated from the hash. If the extension is not a Session, the function
     /// generates a random IPv4 address within the CIDR range.
-    fn assign_ipv4_from_extension(&self, cidr: &Ipv4Cidr, extension: &Extensions) -> Ipv4Addr {
+    fn assign_ipv4_from_extension(&self, cidr: &Ipv4Cidr, extension: &Extension) -> Ipv4Addr {
         if let Some(combined) = self.combined(extension) {
             // Calculate the subnet mask and apply it to ensure the base_ip is preserved in
             // the non-variable part
@@ -575,7 +575,7 @@ impl Connector {
     /// ID. The network part of the address is preserved, and the host part is
     /// generated from the hash. If the extension is not a Session, the function
     /// generates a random IPv6 address within the CIDR range.
-    fn assign_ipv6_from_extension(&self, cidr: &Ipv6Cidr, extension: &Extensions) -> Ipv6Addr {
+    fn assign_ipv6_from_extension(&self, cidr: &Ipv6Cidr, extension: &Extension) -> Ipv6Addr {
         if let Some(combined) = self.combined(extension) {
             // Calculate the subnet mask and apply it to ensure the base_ip is preserved in
             // the non-variable part
@@ -611,10 +611,10 @@ impl Connector {
     /// Returns an `Option<u128>` which is `Some(combined_value)` if the operation
     /// is applicable and successful, or `None` if the `extension` variant does not
     /// support combination into a `u128` value.
-    fn combined(&self, extension: &Extensions) -> Option<u128> {
+    fn combined(&self, extension: &Extension) -> Option<u128> {
         match extension {
-            Extensions::Session(a, b) => Some(combine(*a, *b)),
-            Extensions::TTL(ttl) => Some(self.ttl.ttl_boundary(*ttl) as u128),
+            Extension::Session(a, b) => Some(combine(*a, *b)),
+            Extension::TTL(ttl) => Some(self.ttl.ttl_boundary(*ttl) as u128),
             _ => None,
         }
     }
