@@ -86,7 +86,13 @@ while true; do curl -x http://127.0.0.1:8100 -s https://api.ip.sb/ip -A Mozilla;
 2001:470:e953:f1d7:eb68:cc59:b2d0:2c6f
 
 ```
-
+Example with Fixed Subnet
+To run the server with a fixed subnet, use the --fixed-subnet-48 option:
+  
+```shell
+# Run the server http/socks5 with fixed subnet
+vproxy run -i 2001:470:e953::/48 --fixed-subnet-48 2001:470:e953::/48 http
+```
 ## Manual
 
 If no subnet is configured, the local default network proxy request will be used. When the local machine sets the priority `Ipv4`/`Ipv6` and the priority is `Ipv4`, it will always use `Ipv4` to make requests (if any).

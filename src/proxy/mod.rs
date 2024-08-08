@@ -13,21 +13,16 @@ use std::net::{IpAddr, SocketAddr};
 use tracing::Level;
 use tracing_subscriber::{EnvFilter, FmtSubscriber};
 
-struct ProxyContext {
-    /// Bind address
+pub struct ProxyContext {
     pub bind: SocketAddr,
-    /// Number of concurrent connections
     pub concurrent: usize,
-    /// Authentication type
     pub auth: AuthMode,
-    /// Ip whitelist
     pub whitelist: Vec<IpAddr>,
-    /// Connector
     pub connector: Connector,
 }
 
+
 pub fn run(args: BootArgs) -> crate::Result<()> {
-    // Initialize the logger with a filter that ignores WARN level logs for netlink_proto
     let filter = EnvFilter::from_default_env()
         .add_directive(
             if args.debug {
@@ -54,8 +49,6 @@ pub fn run(args: BootArgs) -> crate::Result<()> {
     tracing::info!("Concurrent: {}", args.concurrent);
     tracing::info!("Connect timeout: {:?}s", args.connect_timeout);
 
-
-
     #[cfg(target_family = "unix")]
     {
         use nix::sys::resource::{setrlimit, Resource};
@@ -69,9 +62,8 @@ pub fn run(args: BootArgs) -> crate::Result<()> {
         concurrent: args.concurrent,
         auth,
         whitelist: args.whitelist,
-        connector: Connector::new(args.cidr, args.fallback, args.connect_timeout),
+        connector: Connector::new(args.cidr, args.fallback, args.connect_timeout,args.fixed_subnet_48),
     };
-
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .max_blocking_threads(args.concurrent)

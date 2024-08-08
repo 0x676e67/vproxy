@@ -35,6 +35,8 @@ pub struct Connector {
     connect_timeout: Duration,
     /// TTL Calculator
     ttl: ttl::TTLCalculator,
+    fixed_subnet_48: Option<Ipv6Cidr>,
+    fixed_subnet_part: u16,
 }
 
 impl Connector {
@@ -44,12 +46,15 @@ impl Connector {
         cidr: Option<IpCidr>,
         fallback: Option<IpAddr>,
         connect_timeout: u64,
+        fixed_subnet_48: Option<Ipv6Cidr>,
     ) -> Self {
         Connector {
             cidr,
             fallback,
             connect_timeout: Duration::from_secs(connect_timeout),
             ttl: ttl::TTLCalculator,
+            fixed_subnet_48,
+            fixed_subnet_part: random::<u16>(),
         }
     }
 
@@ -575,7 +580,12 @@ impl Connector {
     /// ID. The network part of the address is preserved, and the host part is
     /// generated from the hash. If the extension is not a Session, the function
     /// generates a random IPv6 address within the CIDR range.
+
     fn assign_ipv6_from_extension(&self, cidr: &Ipv6Cidr, extension: &Extension) -> Ipv6Addr {
+        if let Some(fixed_subnet_48) = &self.fixed_subnet_48 {
+            return self.assign_ipv6_from_fixed_subnet(fixed_subnet_48, self.fixed_subnet_part);
+        }
+
         if let Some(combined) = self.combined(extension) {
             // Calculate the subnet mask and apply it to ensure the base_ip is preserved in
             // the non-variable part
@@ -588,6 +598,15 @@ impl Connector {
 
         assign_rand_ipv6(cidr.first_address().into(), cidr.network_length())
     }
+
+    fn assign_ipv6_from_fixed_subnet(&self, fixed_subnet: &Ipv6Cidr, fixed_part: u16) -> Ipv6Addr {
+        let base_ip = u128::from(fixed_subnet.first_address());
+        let subnet_with_fixed = (base_ip & 0xFFFF_FFFF_FFFF_0000_0000_0000_0000_0000) | ((fixed_part as u128) << 64);
+        let host_part: u64 = random();
+        let ip_num = subnet_with_fixed | (host_part as u128);
+        Ipv6Addr::from(ip_num)
+    }
+
 
     /// Combines values from an `Extensions` variant into a single `u128` value.
     ///
