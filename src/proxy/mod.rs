@@ -53,7 +53,6 @@ pub fn run(args: BootArgs) -> crate::Result<()> {
     tracing::info!("Version: {}", env!("CARGO_PKG_VERSION"));
     tracing::info!("Concurrent: {}", args.concurrent);
     tracing::info!("Connect timeout: {:?}s", args.connect_timeout);
-    tracing::info!("Fallback: {:?}", args.fallback);
 
     #[cfg(target_family = "unix")]
     {
