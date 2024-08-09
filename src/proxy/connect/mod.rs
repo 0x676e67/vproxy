@@ -562,6 +562,11 @@ impl Connector {
     /// generates a random IPv4 address within the CIDR range.
     fn assign_ipv4_from_extension(&self, cidr: &Ipv4Cidr, extension: &Extension) -> Ipv4Addr {
         if let Some(combined) = self.combined(extension) {
+            // If a CIDR range is provided, use it to assign an IP address
+            if let Some(range) = self.cidr_range {
+                return assign_ipv4_with_range(cidr, range, combined as u32);
+            }
+
             // Calculate the subnet mask and apply it to ensure the base_ip is preserved in
             // the non-variable part
             let subnet_mask = !((1u32 << (32 - cidr.network_length())) - 1);
@@ -582,6 +587,7 @@ impl Connector {
     /// generates a random IPv6 address within the CIDR range.
     fn assign_ipv6_from_extension(&self, cidr: &Ipv6Cidr, extension: &Extension) -> Ipv6Addr {
         if let Some(combined) = self.combined(extension) {
+            // If a range is provided, use it to assign an IP
             if let Some(range) = self.cidr_range {
                 return assign_ipv6_with_range(cidr, range, combined);
             }
@@ -690,27 +696,103 @@ fn assign_rand_ipv6(mut ipv6: u128, prefix_len: u8) -> Ipv6Addr {
     ipv6.into()
 }
 
+/// Generates an IPv4 address within a specified CIDR range, where the address is
+/// influenced by a fixed combined value and a random host part.
+///
+/// # Parameters
+/// - `cidr`: The CIDR notation representing the network range, e.g., "192.168.0.0/24".
+/// - `range`: The length of the address range to be fixed by the combined value (e.g., 28 for a /28 subnet).
+/// - `combined`: A fixed value used to influence the specific address within the range.
+///
+/// # Returns
+/// An `Ipv4Addr` representing the generated IPv4 address.
+///
+/// # Example
+/// ```
+/// let cidr = "192.168.0.0/24".parse::<Ipv4Cidr>().unwrap();
+/// let range = 28;
+/// let combined = 0x5;
+/// let ipv4_address = assign_ipv4_with_range(&cidr, range, combined);
+/// println!("Generated IPv4 Address: {}", ipv4_address);
+/// ```
+fn assign_ipv4_with_range(cidr: &Ipv4Cidr, range: u8, combined: u32) -> Ipv4Addr {
+    let base_ip: u32 = u32::from(cidr.first_address());
+
+    // Shift the combined value to the left by (32 - range) bits to place it in the correct position.
+    let combined_shifted =
+        (combined & ((1u32 << (range - cidr.network_length())) - 1)) << (32 - range);
+
+    // Create a subnet mask that preserves the fixed network part of the IP address.
+    let subnet_mask = !((1u32 << (32 - cidr.network_length())) - 1);
+    let subnet_with_fixed = (base_ip & subnet_mask) | combined_shifted;
+
+    // Generate a mask for the host part and a random host part value.
+    let host_mask = (1u32 << (32 - range)) - 1;
+    let host_part: u32 = random::<u32>() & host_mask;
+
+    // Combine the fixed subnet part and the random host part to form the final IP address.
+    Ipv4Addr::from(subnet_with_fixed | host_part)
+}
+
+/// Generates an IPv6 address within a specified CIDR range, where the address is
+/// influenced by a fixed combined value and a random host part.
+///
+/// # Parameters
+/// - `cidr`: The CIDR notation representing the network range, e.g., "2001:470:e953::/48".
+/// - `range`: The length of the address range to be fixed by the combined value (e.g., 64 for a /64 subnet).
+/// - `combined`: A fixed value used to influence the specific address within the range.
+///
+/// # Returns
+/// An `Ipv6Addr` representing the generated IPv6 address.
+///
+/// # Example
+/// ```
+/// let cidr = "2001:470:e953::/48".parse::<Ipv6Cidr>().unwrap();
+/// let range = 64;
+/// let combined = 0x12345;
+/// let ipv6_address = assign_ipv6_with_range(&cidr, range, combined);
+/// println!("Generated IPv6 Address: {}", ipv6_address);
+/// ```
 fn assign_ipv6_with_range(cidr: &Ipv6Cidr, range: u8, combined: u128) -> Ipv6Addr {
     let base_ip: u128 = cidr.first_address().into();
 
-    // 计算 combined 的适当位移
-    let combined_shifted = (combined & ((1u128 << (range - 48)) - 1)) << (128 - range);
+    // Shift the combined value to the left by (128 - range) bits to place it in the correct position.
+    let combined_shifted =
+        (combined & ((1u128 << (range - cidr.network_length())) - 1)) << (128 - range);
 
-    // 保留基础IP的固定部分（应用CIDR掩码）
+    // Create a subnet mask that preserves the fixed network part of the IP address.
     let subnet_mask = !((1u128 << (128 - cidr.network_length())) - 1);
     let subnet_with_fixed = (base_ip & subnet_mask) | combined_shifted;
 
-    // 随机生成主机部分 (128 - range) 位
+    // Generate a mask for the host part and a random host part value.
     let host_mask = (1u128 << (128 - range)) - 1;
     let host_part: u128 = (random::<u64>() as u128) & host_mask;
 
-    let ip_num = subnet_with_fixed | host_part;
-    Ipv6Addr::from(ip_num)
+    // Combine the fixed subnet part and the random host part to form the final IP address.
+    Ipv6Addr::from(subnet_with_fixed | host_part)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_assign_ipv4_with_fixed_combined() {
+        let cidr = "192.168.0.0/24".parse::<Ipv4Cidr>().unwrap();
+        let range = 28;
+        let mut combined = 0x5;
+
+        for i in 0..5 {
+            combined += i;
+
+            // Generate two IPv4 addresses with the same combined value
+            let ipv4_address1 = assign_ipv4_with_range(&cidr, range, combined);
+            let ipv4_address2 = assign_ipv4_with_range(&cidr, range, combined);
+
+            println!("IPv4 Address 1: {}", ipv4_address1);
+            println!("IPv4 Address 2: {}", ipv4_address2);
+        }
+    }
 
     #[test]
     fn test_assign_ipv6_with_fixed_combined() {
