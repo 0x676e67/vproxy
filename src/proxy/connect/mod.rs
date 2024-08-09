@@ -576,7 +576,7 @@ impl Connector {
             return Ipv4Addr::from(ip_num);
         }
 
-        assign_rand_ipv4(cidr.first_address().into(), cidr.network_length())
+        assign_rand_ipv4(cidr)
     }
 
     /// Assigns an IPv6 address based on the provided CIDR and extension.
@@ -602,7 +602,7 @@ impl Connector {
             return Ipv6Addr::from(ip_num);
         }
 
-        assign_rand_ipv6(cidr.first_address().into(), cidr.network_length())
+        assign_rand_ipv6(cidr)
     }
 
     /// Combines values from an `Extensions` variant into a single `u128` value.
@@ -676,7 +676,9 @@ fn combine(a: u64, b: u64) -> u128 {
 /// The subnet is defined by the initial IPv4 address and the prefix length.
 /// The network part of the address is preserved, and the host part is randomly
 /// generated.
-fn assign_rand_ipv4(mut ipv4: u32, prefix_len: u8) -> Ipv4Addr {
+fn assign_rand_ipv4(cidr: &Ipv4Cidr) -> Ipv4Addr {
+    let mut ipv4 = u32::from(cidr.first_address());
+    let prefix_len = cidr.network_length();
     let rand: u32 = random();
     let net_part = (ipv4 >> (32 - prefix_len)) << (32 - prefix_len);
     let host_part = (rand << prefix_len) >> prefix_len;
@@ -688,7 +690,9 @@ fn assign_rand_ipv4(mut ipv4: u32, prefix_len: u8) -> Ipv4Addr {
 /// The subnet is defined by the initial IPv6 address and the prefix length.
 /// The network part of the address is preserved, and the host part is randomly
 /// generated.
-fn assign_rand_ipv6(mut ipv6: u128, prefix_len: u8) -> Ipv6Addr {
+fn assign_rand_ipv6(cidr: &Ipv6Cidr) -> Ipv6Addr {
+    let mut ipv6 = u128::from(cidr.first_address());
+    let prefix_len = cidr.network_length();
     let rand: u128 = random();
     let net_part = (ipv6 >> (128 - prefix_len)) << (128 - prefix_len);
     let host_part = (rand << prefix_len) >> prefix_len;
@@ -717,13 +721,18 @@ fn assign_rand_ipv6(mut ipv6: u128, prefix_len: u8) -> Ipv6Addr {
 /// ```
 fn assign_ipv4_with_range(cidr: &Ipv4Cidr, range: u8, combined: u32) -> Ipv4Addr {
     let base_ip: u32 = u32::from(cidr.first_address());
+    let prefix_len = cidr.network_length();
+
+    // If the range is less than the prefix length, generate a random IP address.
+    if range < prefix_len {
+        return assign_rand_ipv4(cidr);
+    }
 
     // Shift the combined value to the left by (32 - range) bits to place it in the correct position.
-    let combined_shifted =
-        (combined & ((1u32 << (range - cidr.network_length())) - 1)) << (32 - range);
+    let combined_shifted = (combined & ((1u32 << (range - prefix_len)) - 1)) << (32 - range);
 
     // Create a subnet mask that preserves the fixed network part of the IP address.
-    let subnet_mask = !((1u32 << (32 - cidr.network_length())) - 1);
+    let subnet_mask = !((1u32 << (32 - prefix_len)) - 1);
     let subnet_with_fixed = (base_ip & subnet_mask) | combined_shifted;
 
     // Generate a mask for the host part and a random host part value.
@@ -755,13 +764,18 @@ fn assign_ipv4_with_range(cidr: &Ipv4Cidr, range: u8, combined: u32) -> Ipv4Addr
 /// ```
 fn assign_ipv6_with_range(cidr: &Ipv6Cidr, range: u8, combined: u128) -> Ipv6Addr {
     let base_ip: u128 = cidr.first_address().into();
+    let prefix_len = cidr.network_length();
+
+    // If the range is less than the prefix length, generate a random IP address.
+    if range < prefix_len {
+        return assign_rand_ipv6(cidr);
+    }
 
     // Shift the combined value to the left by (128 - range) bits to place it in the correct position.
-    let combined_shifted =
-        (combined & ((1u128 << (range - cidr.network_length())) - 1)) << (128 - range);
+    let combined_shifted = (combined & ((1u128 << (range - prefix_len)) - 1)) << (128 - range);
 
     // Create a subnet mask that preserves the fixed network part of the IP address.
-    let subnet_mask = !((1u128 << (128 - cidr.network_length())) - 1);
+    let subnet_mask = !((1u128 << (128 - prefix_len)) - 1);
     let subnet_with_fixed = (base_ip & subnet_mask) | combined_shifted;
 
     // Generate a mask for the host part and a random host part value.
