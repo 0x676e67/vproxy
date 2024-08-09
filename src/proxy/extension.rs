@@ -16,6 +16,8 @@ pub enum Extension {
     None,
     /// TTL extension with a 64-bit integer.
     TTL(u64),
+    /// Range extension with a tuple of two 64-bit integers.
+    Range(u64, u64),
     /// Session extension with a tuple of two 64-bit integers.
     Session(u64, u64),
     /// Http to Socks5 extension. e.g. host:port:username:password
@@ -25,9 +27,11 @@ pub enum Extension {
 impl Extension {
     const TAG_TTL: &'static str = "-ttl-";
     const TAG_SESSION: &'static str = "-session-";
+    const TAG_RANGE_SESSION: &'static str = "-range-";
     const TAG_HTTP2SOCKS5: &'static str = "-h2s-";
 
     const HEADER_TTL: &'static str = "ttl";
+    const HEADER_RANGE: &'static str = "range";
     const HEADER_SESSION_ID: &'static str = "session";
     const HEADER_HTTP_TO_SOCKS5: &'static str = "http2socks5";
 
@@ -59,6 +63,13 @@ impl From<(&str, &str)> for Extension {
     fn from((prefix, full): (&str, &str)) -> Self {
         // If it does, remove the prefix from `s`.
         if let Some(tag) = full.strip_prefix(prefix) {
+            // Parse range extension
+            if let Some(extension) =
+                handle_extension(true, tag, Self::TAG_RANGE_SESSION, parse_range_extension)
+            {
+                return extension;
+            }
+
             // Parse session extension
             if let Some(extension) =
                 handle_extension(false, full, Self::TAG_SESSION, parse_session_extension)
@@ -88,7 +99,28 @@ impl From<(&str, &str)> for Extension {
 
 impl From<&HeaderMap> for Extension {
     fn from(headers: &HeaderMap) -> Self {
-        // Get the value of the `session-id` header from the headers.
+        // Get the value of the `range=id` header from the headers.
+        if let (Some(value), ident) = (
+            headers.get(Self::HEADER_RANGE),
+            headers.get(header::PROXY_AUTHORIZATION),
+        ) {
+            // Convert the value to a string.
+            let ident = ident.and_then(|v| v.to_str().ok());
+            // Return it wrapped in the `Session` variant of `Extensions`.
+            match (value.to_str(), ident) {
+                (Ok(s), Some(ident)) => {
+                    let extensions = parse_range_extension(format!("{s}{ident}").as_str());
+                    return extensions;
+                }
+                (Ok(s), None) => {
+                    let extensions = parse_range_extension(s);
+                    return extensions;
+                }
+                _ => {}
+            }
+        }
+
+        // Get the value of the `session=id` header from the headers.
         if let (Some(value), ident) = (
             headers.get(Self::HEADER_SESSION_ID),
             headers.get(header::PROXY_AUTHORIZATION),
@@ -170,6 +202,22 @@ fn handle_extension(
     let s = trim.then(|| s.trim_start_matches(prefix)).unwrap_or(s);
     tracing::debug!("after handle_extension: s={}", s);
     Some(handler(s))
+}
+
+/// Parses a Range extension string.
+/// This function takes a string `s` and attempts to parse it into a Range
+/// extension. The function uses the `murmurhash3_x64_128` function to generate
+/// a 128-bit hash from the string. The hash is then returned as a tuple `(a, b)`
+/// wrapped in the `Extensions::Range` variant.
+/// # Arguments
+/// * `s` - The string to parse.
+/// # Returns
+/// This function returns an `Extensions` enum.
+/// If the string is empty, it returns `Extensions::None`.
+/// If the string is not empty, it returns `Extensions::Range(a, b)`.
+fn parse_range_extension(s: &str) -> Extension {
+    let (a, b) = murmur::murmurhash3_x64_128(s.as_bytes(), s.len() as u64);
+    Extension::Range(a, b)
 }
 
 /// Parses a session extension string.

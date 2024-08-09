@@ -29,6 +29,8 @@ pub struct Connector {
     /// Optional IPv6 CIDR (Classless Inter-Domain Routing), used to optionally
     /// configure an IPv6 address.
     cidr: Option<IpCidr>,
+    /// Optional CIDR range for IP addresses.
+    cidr_range: Option<u8>,
     /// Optional IP address as a fallback option in case of connection failure.
     fallback: Option<IpAddr>,
     /// Connect timeout in milliseconds.
@@ -42,11 +44,13 @@ impl Connector {
     /// fallback IP address as parameters.
     pub(super) fn new(
         cidr: Option<IpCidr>,
+        cidr_range: Option<u8>,
         fallback: Option<IpAddr>,
         connect_timeout: u64,
     ) -> Self {
         Connector {
             cidr,
+            cidr_range,
             fallback,
             connect_timeout: Duration::from_secs(connect_timeout),
             ttl: ttl::TTLCalculator,
@@ -264,37 +268,38 @@ impl Connector {
                 .await?
             }
 
-            Extension::None | Extension::Session(_, _) | Extension::TTL(_) => {
-                match (self.cidr, self.fallback) {
-                    (None, Some(fallback)) => {
-                        timeout(
-                            self.connect_timeout,
-                            self.try_connect_with_addr(target_addr, fallback),
-                        )
-                        .await?
-                    }
-                    (Some(cidr), None) => {
-                        timeout(
-                            self.connect_timeout,
-                            self.try_connect_with_cidr(target_addr, cidr, &extension),
-                        )
-                        .await?
-                    }
-                    (Some(cidr), Some(fallback)) => {
-                        timeout(
-                            self.connect_timeout,
-                            self.try_connect_with_cidr_and_fallback(
-                                target_addr,
-                                cidr,
-                                fallback,
-                                &extension,
-                            ),
-                        )
-                        .await?
-                    }
-                    _ => timeout(self.connect_timeout, TcpStream::connect(target_addr)).await?,
+            Extension::None
+            | Extension::Range(_, _)
+            | Extension::Session(_, _)
+            | Extension::TTL(_) => match (self.cidr, self.fallback) {
+                (None, Some(fallback)) => {
+                    timeout(
+                        self.connect_timeout,
+                        self.try_connect_with_addr(target_addr, fallback),
+                    )
+                    .await?
                 }
-            }
+                (Some(cidr), None) => {
+                    timeout(
+                        self.connect_timeout,
+                        self.try_connect_with_cidr(target_addr, cidr, &extension),
+                    )
+                    .await?
+                }
+                (Some(cidr), Some(fallback)) => {
+                    timeout(
+                        self.connect_timeout,
+                        self.try_connect_with_cidr_and_fallback(
+                            target_addr,
+                            cidr,
+                            fallback,
+                            &extension,
+                        ),
+                    )
+                    .await?
+                }
+                _ => timeout(self.connect_timeout, TcpStream::connect(target_addr)).await?,
+            },
         }
         .and_then(|stream| {
             tracing::info!("connect {} via {}", target_addr, stream.local_addr()?);
@@ -577,11 +582,16 @@ impl Connector {
     /// generates a random IPv6 address within the CIDR range.
     fn assign_ipv6_from_extension(&self, cidr: &Ipv6Cidr, extension: &Extension) -> Ipv6Addr {
         if let Some(combined) = self.combined(extension) {
+            if let Some(range) = self.cidr_range {
+                return assign_ipv6_with_range(cidr, range, combined);
+            }
+
+            let network_length = cidr.network_length();
             // Calculate the subnet mask and apply it to ensure the base_ip is preserved in
             // the non-variable part
-            let subnet_mask = !((1u128 << (128 - cidr.network_length())) - 1);
+            let subnet_mask = !((1u128 << (128 - network_length)) - 1);
             let base_ip_bits = u128::from(cidr.first_address()) & subnet_mask;
-            let capacity = 2u128.pow(128 - cidr.network_length() as u32) - 1;
+            let capacity = 2u128.pow(128 - network_length as u32) - 1;
             let ip_num = base_ip_bits | (combined % capacity);
             return Ipv6Addr::from(ip_num);
         }
@@ -613,8 +623,9 @@ impl Connector {
     /// support combination into a `u128` value.
     fn combined(&self, extension: &Extension) -> Option<u128> {
         match extension {
-            Extension::Session(a, b) => Some(combine(*a, *b)),
             Extension::TTL(ttl) => Some(self.ttl.ttl_boundary(*ttl) as u128),
+            Extension::Range(a, b) => Some(combine(*a, *b)),
+            Extension::Session(a, b) => Some(combine(*a, *b)),
             _ => None,
         }
     }
@@ -677,4 +688,44 @@ fn assign_rand_ipv6(mut ipv6: u128, prefix_len: u8) -> Ipv6Addr {
     let host_part = (rand << prefix_len) >> prefix_len;
     ipv6 = net_part | host_part;
     ipv6.into()
+}
+
+fn assign_ipv6_with_range(cidr: &Ipv6Cidr, range: u8, combined: u128) -> Ipv6Addr {
+    let base_ip: u128 = cidr.first_address().into();
+
+    // 计算 combined 的适当位移
+    let combined_shifted = (combined & ((1u128 << (range - 48)) - 1)) << (128 - range);
+
+    // 保留基础IP的固定部分（应用CIDR掩码）
+    let subnet_mask = !((1u128 << (128 - cidr.network_length())) - 1);
+    let subnet_with_fixed = (base_ip & subnet_mask) | combined_shifted;
+
+    // 随机生成主机部分 (128 - range) 位
+    let host_mask = (1u128 << (128 - range)) - 1;
+    let host_part: u128 = (random::<u64>() as u128) & host_mask;
+
+    let ip_num = subnet_with_fixed | host_part;
+    Ipv6Addr::from(ip_num)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_assign_ipv6_with_fixed_combined() {
+        let cidr = "2001:470:e953::/48".parse().unwrap();
+        let range = 64;
+        let mut combined = 0x12345;
+
+        for i in 0..5 {
+            combined += i;
+            // Generate two IPv6 addresses with the same combined value
+            let ipv6_address1 = assign_ipv6_with_range(&cidr, range, combined);
+            let ipv6_address2 = assign_ipv6_with_range(&cidr, range, combined);
+
+            println!("{}", ipv6_address1);
+            println!("{}", ipv6_address2)
+        }
+    }
 }

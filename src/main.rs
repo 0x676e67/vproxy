@@ -85,9 +85,12 @@ pub struct BootArgs {
     /// IP addresses whitelist, e.g. 47.253.53.46,47.253.81.245
     #[clap(short, long, value_parser, value_delimiter = ',')]
     whitelist: Vec<std::net::IpAddr>,
-    /// Ip-CIDR, e.g. 2001:db8::/32
+    /// IP-CIDR, e.g. 2001:db8::/32
     #[clap(short = 'i', long)]
     cidr: Option<cidr::IpCidr>,
+    /// IP-CIDR-Range, e.g. 64
+    #[clap(short = 'r', long)]
+    cidr_range: Option<u8>,
     /// Fallback address
     #[clap(short, long)]
     fallback: Option<std::net::IpAddr>,
