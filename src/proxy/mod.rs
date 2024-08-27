@@ -84,9 +84,11 @@ pub fn run(args: BootArgs) -> crate::Result<()> {
         .build()?
         .block_on(async {
             #[cfg(target_os = "linux")]
-            if let Some(cidr) = &args.cidr {
+            if let Some(cidr_list) = &args.cidr {
                 route::sysctl_ipv6_no_local_bind();
-                route::sysctl_route_add_cidr(&cidr).await;
+                for cidr in cidr_list {
+                    route::sysctl_route_add_cidr(cidr).await;
+                }
             }
             match args.proxy {
                 Proxy::Http { auth } => http::proxy(ctx(auth)).await,

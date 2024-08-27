@@ -8,7 +8,7 @@ use hyper_util::{
     client::legacy::{connect::HttpConnector, Client},
     rt::TokioExecutor,
 };
-use rand::random;
+use rand::{random, Rng};
 use std::{
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
     time::Duration,
@@ -23,12 +23,11 @@ use tokio::{
 #[derive(Clone)]
 pub struct Connector {
     /// Optional IPv6 CIDR (Classless Inter-Domain Routing), used to optionally
-    /// configure an IPv6 address.
-    cidr: Option<IpCidr>,
+    cidr: Option<Vec<IpCidr>>,
     /// Optional CIDR range for IP addresses.
     cidr_range: Option<u8>,
     /// Optional IP address as a fallback option in case of connection failure.
-    fallback: Option<IpAddr>,
+    fallback: Option<Vec<IpAddr>>,
     /// Connect timeout in milliseconds.
     connect_timeout: Duration,
     /// TTL Calculator
@@ -39,9 +38,9 @@ impl Connector {
     /// Constructs a new `Connector` instance, accepting optional IPv6 CIDR and
     /// fallback IP address as parameters.
     pub(super) fn new(
-        cidr: Option<IpCidr>,
+        cidr: Option<Vec<IpCidr>>,
         cidr_range: Option<u8>,
-        fallback: Option<IpAddr>,
+        fallback: Option<Vec<IpAddr>>,
         connect_timeout: u64,
     ) -> Self {
         Connector {
@@ -50,6 +49,55 @@ impl Connector {
             fallback,
             connect_timeout: Duration::from_secs(connect_timeout),
             ttl: ttl::TTLCalculator,
+        }
+    }
+
+    /// Randomly selects an `IpCidr` from the available CIDR blocks based on the provided `extension`.
+    ///
+    /// # Arguments
+    ///
+    /// * `extension` - An `Extensions` enum that may influence the selection process.
+    ///
+    /// # Returns
+    ///
+    /// Returns `Some(&IpCidr)` if a CIDR block is selected successfully, otherwise `None`.
+    fn random_cidr(&self, extension: &Extension) -> Option<&IpCidr> {
+        let cidr_list = self.cidr.as_ref()?;
+
+        if cidr_list.is_empty() {
+            None
+        } else {
+            let index = self.random_index(cidr_list.len(), extension);
+            cidr_list.get(index)
+        }
+    }
+
+    fn random_fallback(&self, extension: &Extension) -> Option<IpAddr> {
+        let fallback_list = self.fallback.as_ref()?;
+
+        if fallback_list.is_empty() {
+            None
+        } else {
+            let index = self.random_index(fallback_list.len(), extension);
+            fallback_list.get(index).copied()
+        }
+    }
+
+    fn random_index(&self, len: usize, extension: &Extension) -> usize {
+        match extension {
+            Extension::Range(a, b) | Extension::Session(a, b) => {
+                // Re-fetch the CIDR list to avoid borrowing issues.
+                let hash_value = combine(*a, *b);
+                (hash_value % len as u128) as usize
+            }
+            Extension::TTL(a) => {
+                let combined = self.ttl.ttl_boundary(*a) as u128;
+                (combined % len as u128) as usize
+            }
+            _ => {
+                // If there's no session information, select a CIDR block randomly.
+                rand::thread_rng().gen_range(0..len)
+            }
         }
     }
 
@@ -105,7 +153,10 @@ impl Connector {
         let mut connector = HttpConnector::new();
         connector.set_connect_timeout(Some(self.connect_timeout));
 
-        match (self.cidr, self.fallback) {
+        match (
+            self.random_cidr(&extension),
+            self.random_fallback(&extension),
+        ) {
             (Some(IpCidr::V4(cidr)), Some(IpAddr::V6(v6))) => {
                 let v4 = self.assign_ipv4_from_extension(&cidr, &extension);
                 connector.set_local_addresses(v4, v6);
@@ -259,35 +310,37 @@ impl Connector {
             Extension::None
             | Extension::Range(_, _)
             | Extension::Session(_, _)
-            | Extension::TTL(_) => match (self.cidr, self.fallback) {
-                (None, Some(fallback)) => {
-                    timeout(
-                        self.connect_timeout,
-                        self.try_connect_with_addr(target_addr, fallback),
-                    )
-                    .await?
+            | Extension::TTL(_) => {
+                match (self.random_cidr(extension), self.random_fallback(extension)) {
+                    (None, Some(fallback)) => {
+                        timeout(
+                            self.connect_timeout,
+                            self.try_connect_with_addr(target_addr, fallback),
+                        )
+                        .await?
+                    }
+                    (Some(cidr), None) => {
+                        timeout(
+                            self.connect_timeout,
+                            self.try_connect_with_cidr(target_addr, *cidr, extension),
+                        )
+                        .await?
+                    }
+                    (Some(cidr), Some(fallback)) => {
+                        timeout(
+                            self.connect_timeout,
+                            self.try_connect_with_cidr_and_fallback(
+                                target_addr,
+                                *cidr,
+                                fallback,
+                                extension,
+                            ),
+                        )
+                        .await?
+                    }
+                    _ => timeout(self.connect_timeout, TcpStream::connect(target_addr)).await?,
                 }
-                (Some(cidr), None) => {
-                    timeout(
-                        self.connect_timeout,
-                        self.try_connect_with_cidr(target_addr, cidr, &extension),
-                    )
-                    .await?
-                }
-                (Some(cidr), Some(fallback)) => {
-                    timeout(
-                        self.connect_timeout,
-                        self.try_connect_with_cidr_and_fallback(
-                            target_addr,
-                            cidr,
-                            fallback,
-                            &extension,
-                        ),
-                    )
-                    .await?
-                }
-                _ => timeout(self.connect_timeout, TcpStream::connect(target_addr)).await?,
-            },
+            }
         }
         .and_then(|stream| {
             tracing::info!("connect {} via {}", target_addr, stream.local_addr()?);
