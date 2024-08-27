@@ -65,31 +65,32 @@ pub fn run(args: BootArgs) -> crate::Result<()> {
         }
     }
 
-    let ctx = move |auth: AuthMode| ProxyContext {
-        auth,
-        bind: args.bind,
-        concurrent: args.concurrent,
-        whitelist: args.whitelist,
-        connector: Connector::new(
-            args.cidr,
-            args.cidr_range,
-            args.fallback,
-            args.connect_timeout,
-        ),
-    };
-
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .max_blocking_threads(args.concurrent)
         .build()?
         .block_on(async {
             #[cfg(target_os = "linux")]
-            if let Some(cidr_list) = &args.cidr {
+            if let Some(cidr) = &args.cidr {
                 route::sysctl_ipv6_no_local_bind();
-                for cidr in cidr_list {
+                for cidr in cidr.iter() {
                     route::sysctl_route_add_cidr(cidr).await;
                 }
             }
+
+            let ctx = move |auth: AuthMode| ProxyContext {
+                auth,
+                bind: args.bind,
+                concurrent: args.concurrent,
+                whitelist: args.whitelist,
+                connector: Connector::new(
+                    args.cidr,
+                    args.cidr_range,
+                    args.fallback,
+                    args.connect_timeout,
+                ),
+            };
+
             match args.proxy {
                 Proxy::Http { auth } => http::proxy(ctx(auth)).await,
                 Proxy::Socks5 { auth } => socks5::proxy(ctx(auth)).await,
