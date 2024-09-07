@@ -55,7 +55,7 @@ impl Whitelist for Authenticator {
 impl Authenticator {
     pub async fn authenticate(
         &self,
-        headers: HeaderMap,
+        headers: &HeaderMap,
         socket: SocketAddr,
     ) -> Result<Extension, AuthError> {
         match self {

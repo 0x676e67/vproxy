@@ -73,28 +73,36 @@ pub struct BootArgs {
     /// Debug mode
     #[clap(long, env = "VPROXY_DEBUG")]
     debug: bool,
+
     /// Bind address
     #[clap(short, long, default_value = "0.0.0.0:1080")]
     bind: SocketAddr,
+
     /// Connection timeout in seconds
     #[clap(short = 'T', long, default_value = "10")]
     connect_timeout: u64,
+
     /// Concurrent connections
     #[clap(short, long, default_value = "1024")]
     concurrent: usize,
+
     /// Ulimit soft limit
     #[cfg(target_family = "unix")]
     #[clap(short, long)]
     ulimit: bool,
+
     /// IP addresses whitelist, e.g. 47.253.53.46,47.253.81.245
     #[clap(short, long, value_parser, value_delimiter = ',')]
     whitelist: Vec<std::net::IpAddr>,
+
     /// IP-CIDR, e.g. 2001:db8::/32
     #[clap(short = 'i', long)]
     cidr: Option<cidr::IpCidr>,
+
     /// IP-CIDR-Range, e.g. 64
     #[clap(short = 'r', long)]
     cidr_range: Option<u8>,
+
     /// Fallback address
     #[clap(short, long)]
     fallback: Option<std::net::IpAddr>,
@@ -103,11 +111,6 @@ pub struct BootArgs {
     proxy: Proxy,
 }
 
-// To try this example:
-// 1. cargo run --example http_proxy
-// 2. config http_proxy in command line $ export http_proxy=http://127.0.0.1:8100
-//    $ export https_proxy=http://127.0.0.1:8100
-// 3. send requests $ curl -i https://www.some_domain.com/
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let opt = Opt::parse();
 

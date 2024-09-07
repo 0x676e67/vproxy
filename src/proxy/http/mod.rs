@@ -43,12 +43,11 @@ async fn setup_listener(ctx: &ProxyContext) -> std::io::Result<TcpListener> {
 }
 
 async fn handle_connection(proxy: HttpProxy, stream: TcpStream, socket: SocketAddr) {
-    let io = TokioIo::new(stream);
     if let Err(err) = http1::Builder::new()
         .preserve_header_case(true)
         .title_case_headers(true)
         .serve_connection(
-            io,
+            TokioIo::new(stream),
             service_fn(move |req| <HttpProxy as Clone>::clone(&proxy).proxy(socket, req)),
         )
         .with_upgrades()
@@ -83,10 +82,8 @@ impl HttpProxy {
         socket: SocketAddr,
         req: Request<Incoming>,
     ) -> Result<Response<BoxBody<Bytes, hyper::Error>>, Error> {
-        tracing::info!("request: {req:?}, {socket:?}", req = req, socket = socket);
-
         // Check if the client is authorized
-        let extension = match self.0 .0.authenticate(req.headers().clone(), socket).await {
+        let extension = match self.0 .0.authenticate(req.headers(), socket).await {
             Ok(extension) => extension,
             // If the client is not authorized, return an error response
             Err(e) => return Ok(e.try_into()?),
@@ -127,12 +124,11 @@ impl HttpProxy {
                 Ok(resp)
             }
         } else {
-            Ok(self
-                .0
+            self.0
                  .1
-                .new_http_request(req, extension)
-                .await?
-                .map(|b| b.boxed()))
+                .http_request(req, extension)
+                .await
+                .map(|res| res.map(|b| b.boxed()))
         }
     }
 

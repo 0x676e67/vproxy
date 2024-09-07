@@ -31,6 +31,8 @@ pub struct Connector {
     fallback: Option<IpAddr>,
     /// Connect timeout in milliseconds.
     connect_timeout: Duration,
+    /// Default http connector
+    http_connector: HttpConnector,
     /// TTL Calculator
     ttl: ttl::TTLCalculator,
 }
@@ -44,11 +46,15 @@ impl Connector {
         fallback: Option<IpAddr>,
         connect_timeout: u64,
     ) -> Self {
+        let connect_timeout = Duration::from_secs(connect_timeout);
+        let mut http_connector = HttpConnector::new();
+        http_connector.set_connect_timeout(Some(connect_timeout));
         Connector {
             cidr,
             cidr_range,
             fallback,
-            connect_timeout: Duration::from_secs(connect_timeout),
+            connect_timeout,
+            http_connector,
             ttl: ttl::TTLCalculator,
         }
     }
@@ -97,14 +103,14 @@ impl Connector {
     ///   fallback IP address.
     ///
     /// The request is sent with a timeout specified by `self.connect_timeout`.
-    pub async fn new_http_request(
+    pub async fn http_request(
         &self,
         req: Request<Incoming>,
         extension: Extension,
     ) -> Result<Response<Incoming>, Error> {
-        let mut connector = HttpConnector::new();
-        connector.set_connect_timeout(Some(self.connect_timeout));
+        tracing::info!("{req:?}");
 
+        let mut connector = self.http_connector.clone();
         match (self.cidr, self.fallback) {
             (Some(IpCidr::V4(cidr)), Some(IpAddr::V6(v6))) => {
                 let v4 = self.assign_ipv4_from_extension(cidr, &extension);
@@ -122,7 +128,7 @@ impl Connector {
                 let v6 = self.assign_ipv6_from_extension(cidr, &extension);
                 connector.set_local_address(Some(v6.into()));
             }
-            (None, Some(ip)) => connector.set_local_address(Some(ip)),
+            (None, addr) => connector.set_local_address(addr),
             _ => {}
         }
 
