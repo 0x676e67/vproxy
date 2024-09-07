@@ -1,5 +1,6 @@
 mod connect;
 mod extension;
+mod forward;
 mod http;
 mod murmur;
 #[cfg(target_os = "linux")]
@@ -8,6 +9,7 @@ mod socks5;
 
 use self::connect::Connector;
 use crate::{AuthMode, BootArgs, Proxy};
+use forward::ForwardConnector;
 pub use socks5::Error;
 use std::net::{IpAddr, SocketAddr};
 use tracing::Level;
@@ -24,6 +26,19 @@ struct ProxyContext {
     pub whitelist: Vec<IpAddr>,
     /// Connector
     pub connector: Connector,
+}
+
+struct ForwardProxyContext {
+    /// Bind address
+    pub bind: SocketAddr,
+    /// Number of concurrent connections
+    pub concurrent: usize,
+    /// Authentication type
+    pub auth: AuthMode,
+    /// Ip whitelist
+    pub whitelist: Vec<IpAddr>,
+    /// Forward connector
+    pub connector: ForwardConnector,
 }
 
 pub fn run(args: BootArgs) -> crate::Result<()> {
@@ -78,22 +93,37 @@ pub fn run(args: BootArgs) -> crate::Result<()> {
                 }
             }
 
+            let args_clone = args.clone();
+
             let ctx = move |auth: AuthMode| ProxyContext {
                 auth,
-                bind: args.bind,
-                concurrent: args.concurrent,
-                whitelist: args.whitelist,
+                bind: args_clone.bind,
+                concurrent: args_clone.concurrent,
+                whitelist: args_clone.whitelist,
                 connector: Connector::new(
-                    args.cidr,
-                    args.cidr_range,
-                    args.fallback,
-                    args.connect_timeout,
+                    args_clone.cidr,
+                    args_clone.cidr_range,
+                    args_clone.fallback,
+                    args_clone.connect_timeout,
                 ),
+            };
+
+            let forward_ctx = move |auth: AuthMode, proxy_file: std::path::PathBuf| {
+                Ok::<ForwardProxyContext, anyhow::Error>(ForwardProxyContext {
+                    auth,
+                    bind: args.bind,
+                    concurrent: args.concurrent,
+                    whitelist: args.whitelist,
+                    connector: ForwardConnector::new(proxy_file, args.connect_timeout)?,
+                })
             };
 
             match args.proxy {
                 Proxy::Http { auth } => http::proxy(ctx(auth)).await,
                 Proxy::Socks5 { auth } => socks5::proxy(ctx(auth)).await,
+                Proxy::Forward { auth, proxy_file } => {
+                    forward::proxy(forward_ctx(auth, proxy_file)?).await
+                }
             }
         })
 }

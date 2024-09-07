@@ -18,6 +18,9 @@ pub enum Error {
     #[error(transparent)]
     Socks5Error(#[from] crate::proxy::Error),
 
+    #[error(transparent)]
+    Anyhow(#[from] anyhow::Error),
+
     #[cfg(target_family = "unix")]
     #[error(transparent)]
     NixError(#[from] nix::Error),
