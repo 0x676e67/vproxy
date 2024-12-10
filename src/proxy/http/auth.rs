@@ -48,7 +48,8 @@ impl Whitelist for Authenticator {
             Authenticator::None(whitelist) => whitelist,
             Authenticator::Password { whitelist, .. } => whitelist,
         };
-        whitelist.is_empty() || whitelist.contains(&ip)
+
+        !whitelist.is_empty() && whitelist.contains(&ip)
     }
 }
 
