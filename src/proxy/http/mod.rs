@@ -7,21 +7,18 @@ use super::ProxyContext;
 use server::Server;
 use std::path::PathBuf;
 use tls::{RustlsAcceptor, RustlsConfig};
-use tokio::net::TcpListener;
 
 pub async fn proxy(
     ctx: ProxyContext,
     tls_cert: Option<PathBuf>,
     tls_key: Option<PathBuf>,
 ) -> crate::Result<()> {
-    let listener = setup_listener(&ctx).await?;
-
     if let (Some(cert), Some(key)) = (tls_cert, tls_key) {
         tracing::info!("HTTP proxy server listening on {}", ctx.bind);
 
         let config = RustlsConfig::from_pem_chain_file(cert, key)?;
         let acceptor = RustlsAcceptor::new(config);
-        let mut server = Server::new(listener, ctx);
+        let mut server = Server::new(ctx)?;
         server
             .http_builder()
             .http1()
@@ -32,7 +29,7 @@ pub async fn proxy(
     } else {
         tracing::info!("HTTPS proxy server listening on {}", ctx.bind);
 
-        let mut server = Server::new(listener, ctx);
+        let mut server = Server::new(ctx)?;
         server
             .http_builder()
             .http1()
@@ -41,15 +38,4 @@ pub async fn proxy(
 
         server.serve().await
     }
-}
-
-async fn setup_listener(ctx: &ProxyContext) -> std::io::Result<TcpListener> {
-    let socket = if ctx.bind.is_ipv4() {
-        tokio::net::TcpSocket::new_v4()?
-    } else {
-        tokio::net::TcpSocket::new_v6()?
-    };
-    socket.set_reuseaddr(true)?;
-    socket.bind(ctx.bind)?;
-    socket.listen(ctx.concurrent as u32)
 }

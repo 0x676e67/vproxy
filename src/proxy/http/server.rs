@@ -33,17 +33,27 @@ pub struct Server<A = DefaultAcceptor> {
 }
 
 impl Server {
-    /// Create a server from existing `std::net::TcpListener`.
-    pub fn new(listener: TcpListener, ctx: ProxyContext) -> Self {
+    /// Create a server from ProxyContext.
+    pub fn new(ctx: ProxyContext) -> std::io::Result<Self> {
+        let socket = if ctx.bind.is_ipv4() {
+            tokio::net::TcpSocket::new_v4()?
+        } else {
+            tokio::net::TcpSocket::new_v6()?
+        };
+        socket.set_reuseaddr(true)?;
+        socket.bind(ctx.bind)?;
+
+        let listener = socket.listen(ctx.concurrent as u32)?;
         let acceptor = DefaultAcceptor::new();
         let builder = Builder::new(TokioExecutor::new());
         let http_proxy = HttpProxy::from(ctx);
-        Self {
+
+        Ok(Self {
             acceptor,
             builder,
             listener,
             http_proxy,
-        }
+        })
     }
 }
 
