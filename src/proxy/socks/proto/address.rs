@@ -1,4 +1,4 @@
-use crate::proxy::socks5::proto::{AsyncStreamOperation, StreamOperation};
+use crate::proxy::socks::proto::{AsyncStreamOperation, StreamOperation};
 use bytes::BufMut;
 use std::{
     io::Cursor,
@@ -332,7 +332,7 @@ impl From<&Address> for Address {
 }
 
 impl TryFrom<&str> for Address {
-    type Error = crate::proxy::socks5::error::Error;
+    type Error = crate::proxy::socks::error::Error;
 
     fn try_from(addr: &str) -> std::result::Result<Self, Self::Error> {
         if let Ok(addr) = addr.parse::<SocketAddr>() {

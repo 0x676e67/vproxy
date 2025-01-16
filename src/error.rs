@@ -15,9 +15,6 @@ pub enum Error {
     #[error(transparent)]
     SelfUpdateError(#[from] self_update::errors::Error),
 
-    #[error(transparent)]
-    Socks5Error(#[from] crate::proxy::Error),
-
     #[cfg(target_family = "unix")]
     #[error(transparent)]
     NixError(#[from] nix::Error),

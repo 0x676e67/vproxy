@@ -1,10 +1,8 @@
 use self::{associate::UdpAssociate, bind::Bind, connect::Connect};
-use crate::proxy::{
-    socks5::{
-        proto::{self, handshake, Address, AsyncStreamOperation, Command, Method},
-        server::AuthAdaptor,
-    },
-    Error,
+use super::super::error::Error;
+use crate::proxy::socks::{
+    proto::{self, handshake, Address, AsyncStreamOperation, Command, Method},
+    server::AuthAdaptor,
 };
 use std::{net::SocketAddr, time::Duration};
 use tokio::{io::AsyncWriteExt, net::TcpStream};

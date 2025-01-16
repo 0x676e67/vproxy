@@ -23,7 +23,7 @@ pub enum Error {
     InvalidFragmentId(u8),
 
     #[error("Invalid authentication method: {0:?}")]
-    InvalidAuthMethod(crate::proxy::socks5::proto::Method),
+    InvalidAuthMethod(crate::proxy::socks::proto::Method),
 
     #[error("SOCKS version is 4 when 5 is expected")]
     WrongVersion,

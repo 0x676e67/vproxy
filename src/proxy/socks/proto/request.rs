@@ -1,28 +1,24 @@
-use crate::proxy::socks5::proto::{Address, AsyncStreamOperation, Reply, StreamOperation, Version};
+use crate::proxy::socks::proto::{
+    Address, AsyncStreamOperation, Command, StreamOperation, Version,
+};
 use tokio::io::{AsyncRead, AsyncReadExt};
 
-/// Response
+/// SOCKS5 request
 ///
 /// ```plain
 /// +-----+-----+-------+------+----------+----------+
-/// | VER | REP |  RSV  | ATYP | BND.ADDR | BND.PORT |
+/// | VER | CMD |  RSV  | ATYP | DST.ADDR | DST.PORT |
 /// +-----+-----+-------+------+----------+----------+
 /// |  1  |  1  | X'00' |  1   | Variable |    2     |
 /// +-----+-----+-------+------+----------+----------+
 /// ```
 #[derive(Clone, Debug)]
-pub struct Response {
-    pub reply: Reply,
+pub struct Request {
+    pub command: Command,
     pub address: Address,
 }
 
-impl Response {
-    pub fn new(reply: Reply, address: Address) -> Self {
-        Self { reply, address }
-    }
-}
-
-impl StreamOperation for Response {
+impl StreamOperation for Request {
     fn retrieve_from_stream<R: std::io::Read>(stream: &mut R) -> std::io::Result<Self> {
         let mut ver = [0u8; 1];
         stream.read_exact(&mut ver)?;
@@ -36,15 +32,15 @@ impl StreamOperation for Response {
         let mut buf = [0; 2];
         stream.read_exact(&mut buf)?;
 
-        let reply = Reply::try_from(buf[0])?;
+        let command = Command::try_from(buf[0])?;
         let address = Address::retrieve_from_stream(stream)?;
 
-        Ok(Self { reply, address })
+        Ok(Self { command, address })
     }
 
     fn write_to_buf<B: bytes::BufMut>(&self, buf: &mut B) {
         buf.put_u8(Version::V5.into());
-        buf.put_u8(u8::from(self.reply));
+        buf.put_u8(u8::from(self.command));
         buf.put_u8(0x00);
         self.address.write_to_buf(buf);
     }
@@ -54,7 +50,7 @@ impl StreamOperation for Response {
     }
 }
 
-impl AsyncStreamOperation for Response {
+impl AsyncStreamOperation for Request {
     async fn retrieve_from_async_stream<R>(r: &mut R) -> std::io::Result<Self>
     where
         R: AsyncRead + Unpin + Send,
@@ -69,9 +65,9 @@ impl AsyncStreamOperation for Response {
         let mut buf = [0; 2];
         r.read_exact(&mut buf).await?;
 
-        let reply = Reply::try_from(buf[0])?;
+        let command = Command::try_from(buf[0])?;
         let address = Address::retrieve_from_async_stream(r).await?;
 
-        Ok(Self { reply, address })
+        Ok(Self { command, address })
     }
 }

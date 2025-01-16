@@ -1,4 +1,4 @@
-use crate::proxy::socks5::proto::{AsyncStreamOperation, StreamOperation};
+use crate::proxy::socks::proto::{AsyncStreamOperation, StreamOperation};
 use tokio::io::{AsyncRead, AsyncReadExt};
 
 #[repr(u8)]

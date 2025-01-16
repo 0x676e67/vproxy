@@ -3,7 +3,7 @@ use auth::Authenticator;
 use super::accept::Accept;
 use super::error::Error;
 use crate::proxy::http::accept::DefaultAcceptor;
-use crate::proxy::{connect::Connector, extension::Extension, ProxyContext};
+use crate::proxy::{connect::Connector, extension::Extension, Context};
 use bytes::Bytes;
 use http::StatusCode;
 use http_body_util::{combinators::BoxBody, BodyExt, Empty, Full};
@@ -34,7 +34,7 @@ pub struct Server<A = DefaultAcceptor> {
 
 impl Server {
     /// Create a server from ProxyContext.
-    pub fn new(ctx: ProxyContext) -> std::io::Result<Self> {
+    pub fn new(ctx: Context) -> std::io::Result<Self> {
         let socket = if ctx.bind.is_ipv4() {
             tokio::net::TcpSocket::new_v4()?
         } else {
@@ -139,8 +139,8 @@ struct InnerHandler {
     connector: Connector,
 }
 
-impl From<ProxyContext> for Handler {
-    fn from(ctx: ProxyContext) -> Self {
+impl From<Context> for Handler {
+    fn from(ctx: Context) -> Self {
         let auth = match (ctx.auth.username, ctx.auth.password) {
             (Some(username), Some(password)) => Authenticator::Password { username, password },
 

@@ -1,4 +1,4 @@
-use crate::proxy::socks5::proto::{
+use crate::proxy::socks::proto::{
     Address, AsyncStreamOperation, Reply, Response, StreamOperation, UdpHeader,
 };
 use bytes::{Bytes, BytesMut};

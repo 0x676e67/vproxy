@@ -1,6 +1,6 @@
 use crate::proxy::{
     extension::Extension,
-    socks5::proto::{handshake::password, AsyncStreamOperation, Method, UsernamePassword},
+    socks::proto::{handshake::password, AsyncStreamOperation, Method, UsernamePassword},
 };
 use async_trait::async_trait;
 use password::{Request, Response, Status::*};

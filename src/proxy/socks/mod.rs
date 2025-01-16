@@ -10,16 +10,16 @@ use self::{
         ClientConnection, IncomingConnection, Server, UdpAssociate,
     },
 };
-use super::{extension::Extension, ProxyContext};
+use super::{extension::Extension, Context};
 use crate::proxy::connect::Connector;
-pub use error::Error;
+use error::Error;
 use std::{
     net::{SocketAddr, ToSocketAddrs},
     sync::Arc,
 };
 use tokio::{net::UdpSocket, sync::Mutex};
 
-pub async fn proxy(ctx: ProxyContext) -> crate::Result<()> {
+pub async fn proxy(ctx: Context) -> crate::Result<()> {
     tracing::info!("Socks5 server listening on {}", ctx.bind);
 
     match (&ctx.auth.username, &ctx.auth.password) {
@@ -44,13 +44,10 @@ pub async fn proxy(ctx: ProxyContext) -> crate::Result<()> {
 
 const MAX_UDP_RELAY_PACKET_SIZE: usize = 1500;
 
-/// The library's `Result` type alias.
-pub type Result<T, E = Error> = std::result::Result<T, E>;
-
 async fn event_loop(
     server: Server<std::io::Result<(bool, Extension)>>,
     connector: Connector,
-) -> Result<()> {
+) -> std::io::Result<()> {
     let connector = Arc::new(connector);
     while let Ok((conn, _)) = server.accept().await {
         let connector = connector.clone();
@@ -66,7 +63,7 @@ async fn event_loop(
 async fn handle(
     conn: IncomingConnection<std::io::Result<(bool, Extension)>>,
     connector: Arc<Connector>,
-) -> Result<()> {
+) -> std::io::Result<()> {
     let (conn, res) = conn.authenticate().await?;
     let (res, extension) = res?;
 
@@ -118,7 +115,9 @@ async fn handle(
     Ok(())
 }
 
-async fn handle_s5_upd_associate(associate: UdpAssociate<associate::NeedReply>) -> Result<()> {
+async fn handle_s5_upd_associate(
+    associate: UdpAssociate<associate::NeedReply>,
+) -> std::io::Result<()> {
     // listen on a random port
     let listen_ip = associate.local_addr()?.ip();
     let udp_listener = UdpSocket::bind(SocketAddr::from((listen_ip, 0))).await;
@@ -189,7 +188,7 @@ async fn handle_s5_upd_associate(associate: UdpAssociate<associate::NeedReply>) 
 
             reply_listener.shutdown().await?;
 
-            res
+            res.map_err(Into::into)
         }
     }
 }

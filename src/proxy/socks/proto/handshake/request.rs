@@ -1,4 +1,4 @@
-use crate::proxy::socks5::proto::{AsyncStreamOperation, Method, StreamOperation, Version};
+use crate::proxy::socks::proto::{AsyncStreamOperation, Method, StreamOperation, Version};
 use tokio::io::{AsyncRead, AsyncReadExt};
 
 /// SOCKS5 handshake request

@@ -1,4 +1,4 @@
-use crate::proxy::socks5::proto::{Address, AsyncStreamOperation, Reply, Response};
+use crate::proxy::socks::proto::{Address, AsyncStreamOperation, Reply, Response};
 use std::{
     marker::PhantomData,
     net::SocketAddr,
