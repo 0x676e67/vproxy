@@ -63,13 +63,9 @@ struct HttpProxy(Arc<(Authenticator, Connector)>);
 impl From<ProxyContext> for HttpProxy {
     fn from(ctx: ProxyContext) -> Self {
         let auth = match (ctx.auth.username, ctx.auth.password) {
-            (Some(username), Some(password)) => Authenticator::Password {
-                username,
-                password,
-                whitelist: ctx.whitelist,
-            },
+            (Some(username), Some(password)) => Authenticator::Password { username, password },
 
-            _ => Authenticator::None(ctx.whitelist),
+            _ => Authenticator::None,
         };
 
         HttpProxy(Arc::new((auth, ctx.connector)))
@@ -82,8 +78,10 @@ impl HttpProxy {
         socket: SocketAddr,
         req: Request<Incoming>,
     ) -> Result<Response<BoxBody<Bytes, hyper::Error>>, Error> {
+        tracing::debug!("Received request socket: {:?}, req: {:?}", socket, req);
+
         // Check if the client is authorized
-        let extension = match self.0 .0.authenticate(req.headers(), socket).await {
+        let extension = match self.0 .0.authenticate(req.headers()).await {
             Ok(extension) => extension,
             // If the client is not authorized, return an error response
             Err(e) => return Ok(e.try_into()?),

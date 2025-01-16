@@ -24,11 +24,7 @@ pub async fn proxy(ctx: ProxyContext) -> crate::Result<()> {
 
     match (&ctx.auth.username, &ctx.auth.password) {
         (Some(username), Some(password)) => {
-            let auth = Arc::new(auth::Password::new(
-                username,
-                password,
-                ctx.whitelist.clone(),
-            )) as Arc<_>;
+            let auth = Arc::new(auth::Password::new(username, password)) as Arc<_>;
             let server =
                 Server::bind_with_concurrency(ctx.bind, ctx.concurrent as u32, auth).await?;
 
@@ -36,7 +32,7 @@ pub async fn proxy(ctx: ProxyContext) -> crate::Result<()> {
         }
 
         _ => {
-            let auth = Arc::new(auth::NoAuth::new(ctx.whitelist.clone())) as Arc<_>;
+            let auth = Arc::new(auth::NoAuth) as Arc<_>;
             let server =
                 Server::bind_with_concurrency(ctx.bind, ctx.concurrent as u32, auth).await?;
             event_loop(server, ctx.connector).await?;

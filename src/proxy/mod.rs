@@ -9,7 +9,7 @@ mod socks5;
 use self::connect::Connector;
 use crate::{AuthMode, BootArgs, Proxy};
 pub use socks5::Error;
-use std::net::{IpAddr, SocketAddr};
+use std::net::SocketAddr;
 use tracing::Level;
 use tracing_subscriber::{EnvFilter, FmtSubscriber};
 
@@ -20,8 +20,6 @@ struct ProxyContext {
     pub concurrent: usize,
     /// Authentication type
     pub auth: AuthMode,
-    /// Ip whitelist
-    pub whitelist: Vec<IpAddr>,
     /// Connector
     pub connector: Connector,
 }
@@ -69,7 +67,6 @@ pub fn run(args: BootArgs) -> crate::Result<()> {
         auth,
         bind: args.bind,
         concurrent: args.concurrent,
-        whitelist: args.whitelist,
         connector: Connector::new(
             args.cidr,
             args.cidr_range,

@@ -1,13 +1,6 @@
 use super::murmur;
 use http::{header, HeaderMap};
-use std::net::IpAddr;
 use tokio::task::JoinError;
-
-/// Trait for checking if an IP address is in the whitelist.
-pub trait Whitelist {
-    /// Checks if the given IP address is in the whitelist.
-    fn pass(&self, ip: IpAddr) -> bool;
-}
 
 /// Enum representing different types of extensions.
 #[derive(Clone)]

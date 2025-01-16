@@ -86,14 +86,10 @@ pub struct BootArgs {
     #[clap(short, long, default_value = "1024")]
     concurrent: usize,
 
-    /// Ulimit soft limit
+    /// Unix `ulimit` soft limit
     #[cfg(target_family = "unix")]
     #[clap(short, long)]
     ulimit: bool,
-
-    /// IP addresses whitelist, e.g. 47.253.53.46,47.253.81.245
-    #[clap(short, long, value_parser, value_delimiter = ',')]
-    whitelist: Vec<std::net::IpAddr>,
 
     /// IP-CIDR, e.g. 2001:db8::/32
     #[clap(short = 'i', long)]

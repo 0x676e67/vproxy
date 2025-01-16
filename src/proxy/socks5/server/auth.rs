@@ -1,12 +1,11 @@
 use crate::proxy::{
-    extension::{Extension, Whitelist},
+    extension::Extension,
     socks5::proto::{handshake::password, AsyncStreamOperation, Method, UsernamePassword},
 };
 use async_trait::async_trait;
 use password::{Request, Response, Status::*};
 use std::{
     io::{Error, ErrorKind},
-    net::IpAddr,
     sync::Arc,
 };
 use tokio::net::TcpStream;
@@ -22,20 +21,7 @@ pub trait Auth {
 
 /// No authentication as the socks5 handshake method.
 #[derive(Debug, Default)]
-pub struct NoAuth(Vec<IpAddr>);
-
-impl NoAuth {
-    /// Creates a new `NoAuth` instance with the given IP whitelist.
-    pub fn new(whitelist: Vec<IpAddr>) -> Self {
-        Self(whitelist)
-    }
-}
-
-impl Whitelist for NoAuth {
-    fn pass(&self, ip: IpAddr) -> bool {
-        self.0.is_empty() || self.0.contains(&ip)
-    }
-}
+pub struct NoAuth;
 
 #[async_trait]
 impl Auth for NoAuth {
@@ -45,15 +31,7 @@ impl Auth for NoAuth {
         Method::NoAuth
     }
 
-    async fn execute(&self, stream: &mut TcpStream) -> Self::Output {
-        let socket = stream.peer_addr()?;
-        let is_equal = self.pass(socket.ip());
-        if !is_equal {
-            return Err(Error::new(
-                ErrorKind::Other,
-                format!("Address {} is not in the whitelist", socket.ip()),
-            ));
-        }
+    async fn execute(&self, _stream: &mut TcpStream) -> Self::Output {
         Ok((true, Extension::None))
     }
 }
@@ -61,22 +39,14 @@ impl Auth for NoAuth {
 /// Username and password as the socks5 handshake method.
 pub struct Password {
     user_pass: UsernamePassword,
-    whitelist: Vec<IpAddr>,
-}
-
-impl Whitelist for Password {
-    fn pass(&self, ip: IpAddr) -> bool {
-        !self.whitelist.is_empty() && self.whitelist.contains(&ip)
-    }
 }
 
 impl Password {
     /// Creates a new `Password` instance with the given username, password, and
     /// IP whitelist.
-    pub fn new(username: &str, password: &str, whitelist: Vec<IpAddr>) -> Self {
+    pub fn new(username: &str, password: &str) -> Self {
         Self {
             user_pass: UsernamePassword::new(username, password),
-            whitelist,
         }
     }
 }
@@ -91,13 +61,10 @@ impl Auth for Password {
 
     async fn execute(&self, stream: &mut TcpStream) -> Self::Output {
         let req = Request::retrieve_from_async_stream(stream).await?;
-        let socket = stream.peer_addr()?;
 
         // Check if the username and password are correct
-        let is_equal = ({
-            req.user_pass.username.starts_with(&self.user_pass.username)
-                && req.user_pass.password.eq(&self.user_pass.password)
-        }) || self.pass(socket.ip());
+        let is_equal = req.user_pass.username.starts_with(&self.user_pass.username)
+            && req.user_pass.password.eq(&self.user_pass.password);
 
         let resp = Response::new(if is_equal { Succeeded } else { Failed });
         resp.write_to_async_stream(stream).await?;

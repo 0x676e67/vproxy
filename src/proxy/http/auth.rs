@@ -1,10 +1,9 @@
-use crate::proxy::extension::{Extension, Whitelist};
+use crate::proxy::extension::Extension;
 use crate::proxy::http::empty;
 use base64::Engine;
 use bytes::Bytes;
 use http::{header, HeaderMap, Response, StatusCode};
 use http_body_util::combinators::BoxBody;
-use std::net::{IpAddr, SocketAddr};
 
 #[derive(thiserror::Error, Debug)]
 pub enum AuthError {
@@ -33,46 +32,17 @@ impl TryInto<Response<BoxBody<Bytes, hyper::Error>>> for AuthError {
 #[derive(Clone)]
 pub enum Authenticator {
     /// No authentication with an IP whitelist.
-    None(Vec<IpAddr>),
+    None,
     /// Password authentication with a username, password, and IP whitelist.
-    Password {
-        username: String,
-        password: String,
-        whitelist: Vec<IpAddr>,
-    },
-}
-
-impl Whitelist for Authenticator {
-    fn pass(&self, ip: IpAddr) -> bool {
-        let whitelist = match self {
-            Authenticator::None(whitelist) => whitelist,
-            Authenticator::Password { whitelist, .. } => whitelist,
-        };
-
-        !whitelist.is_empty() && whitelist.contains(&ip)
-    }
+    Password { username: String, password: String },
 }
 
 impl Authenticator {
-    pub async fn authenticate(
-        &self,
-        headers: &HeaderMap,
-        socket: SocketAddr,
-    ) -> Result<Extension, AuthError> {
+    pub async fn authenticate(&self, headers: &HeaderMap) -> Result<Extension, AuthError> {
         match self {
-            Authenticator::None(..) => {
-                // If whitelist is empty, allow all
-                let is_equal = self.pass(socket.ip());
-                if !is_equal {
-                    return Err(AuthError::Forbidden);
-                }
-
-                let extensions = Extension::try_from_headers(&headers)
-                    .await
-                    .map_err(|_| AuthError::Forbidden)?;
-
-                Ok(extensions)
-            }
+            Authenticator::None => Extension::try_from_headers(&headers)
+                .await
+                .map_err(|_| AuthError::Forbidden),
             Authenticator::Password {
                 username, password, ..
             } => {
@@ -88,8 +58,7 @@ impl Authenticator {
 
                 // Check if the username and password are correct
                 let is_equal =
-                    ({ auth_username.starts_with(&*username) && auth_password.eq(&*password) })
-                        || self.pass(socket.ip());
+                    auth_username.starts_with(&*username) && auth_password.eq(&*password);
 
                 // Check credentials
                 if is_equal {
