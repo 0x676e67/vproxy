@@ -38,8 +38,8 @@ hyper-util = { version = "0.1.10", features = ["full"] }
 http-body-util = "0.1"
 
 ## rustls
-rustls-pki-types = { version = "1.7" }
-rustls-pemfile = { version = "2.1" }
+rustls-pki-types = { version = "1.10.0" }
+rustls-pemfile = { version = "2.2.0" }
 tokio-rustls = { version = "0.26.0", default-features = false, features = ["tls12"]}
 
 # for socks5
