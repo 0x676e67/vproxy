@@ -108,8 +108,6 @@ impl Connector {
         req: Request<Incoming>,
         extension: Extension,
     ) -> Result<Response<Incoming>, Error> {
-        tracing::info!("{req:?}");
-
         let mut connector = self.http_connector.clone();
         match (self.cidr, self.fallback) {
             (Some(IpCidr::V4(cidr)), Some(IpAddr::V6(v6))) => {

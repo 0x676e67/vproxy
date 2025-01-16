@@ -1,34 +1,44 @@
-mod auth;
+pub(super) mod accept;
 pub mod error;
+pub(super) mod server;
+mod tls;
 
-use self::{auth::Authenticator, error::Error};
-use super::{connect::Connector, extension::Extension, ProxyContext};
-use bytes::Bytes;
-use http::StatusCode;
-use http_body_util::{combinators::BoxBody, BodyExt, Empty, Full};
-use hyper::{
-    body::Incoming, server::conn::http1, service::service_fn, upgrade::Upgraded, Method, Request,
-    Response,
-};
-use hyper_util::rt::TokioIo;
-use std::{
-    net::{SocketAddr, ToSocketAddrs},
-    sync::Arc,
-};
-use tokio::net::{TcpListener, TcpStream};
+use super::ProxyContext;
+use server::Server;
+use std::path::PathBuf;
+use tls::{RustlsAcceptor, RustlsConfig};
+use tokio::net::TcpListener;
 
-pub async fn proxy(ctx: ProxyContext) -> crate::Result<()> {
+pub async fn proxy(
+    ctx: ProxyContext,
+    tls_cert: Option<PathBuf>,
+    tls_key: Option<PathBuf>,
+) -> crate::Result<()> {
     tracing::info!("Http server listening on {}", ctx.bind);
 
     let listener = setup_listener(&ctx).await?;
-    let proxy = HttpProxy::from(ctx);
 
-    while let Ok((stream, socket)) = listener.accept().await {
-        let http_proxy = proxy.clone();
-        tokio::spawn(handle_connection(http_proxy, stream, socket));
+    if let (Some(cert), Some(key)) = (tls_cert, tls_key) {
+        let config = RustlsConfig::from_pem_chain_file(cert, key)?;
+        let acceptor = RustlsAcceptor::new(config);
+        let mut server = Server::new(listener, ctx);
+        server
+            .http_builder()
+            .http1()
+            .title_case_headers(true)
+            .preserve_header_case(true);
+
+        server.acceptor(acceptor).serve().await
+    } else {
+        let mut server = Server::new(listener, ctx);
+        server
+            .http_builder()
+            .http1()
+            .title_case_headers(true)
+            .preserve_header_case(true);
+
+        server.serve().await
     }
-
-    Ok(())
 }
 
 async fn setup_listener(ctx: &ProxyContext) -> std::io::Result<TcpListener> {
@@ -40,133 +50,4 @@ async fn setup_listener(ctx: &ProxyContext) -> std::io::Result<TcpListener> {
     socket.set_reuseaddr(true)?;
     socket.bind(ctx.bind)?;
     socket.listen(ctx.concurrent as u32)
-}
-
-async fn handle_connection(proxy: HttpProxy, stream: TcpStream, socket: SocketAddr) {
-    if let Err(err) = http1::Builder::new()
-        .preserve_header_case(true)
-        .title_case_headers(true)
-        .serve_connection(
-            TokioIo::new(stream),
-            service_fn(move |req| <HttpProxy as Clone>::clone(&proxy).proxy(socket, req)),
-        )
-        .with_upgrades()
-        .await
-    {
-        tracing::error!("Failed to serve connection: {:?}", err);
-    }
-}
-
-#[derive(Clone)]
-struct HttpProxy(Arc<(Authenticator, Connector)>);
-
-impl From<ProxyContext> for HttpProxy {
-    fn from(ctx: ProxyContext) -> Self {
-        let auth = match (ctx.auth.username, ctx.auth.password) {
-            (Some(username), Some(password)) => Authenticator::Password { username, password },
-
-            _ => Authenticator::None,
-        };
-
-        HttpProxy(Arc::new((auth, ctx.connector)))
-    }
-}
-
-impl HttpProxy {
-    async fn proxy(
-        self,
-        socket: SocketAddr,
-        req: Request<Incoming>,
-    ) -> Result<Response<BoxBody<Bytes, hyper::Error>>, Error> {
-        tracing::debug!("Received request socket: {:?}, req: {:?}", socket, req);
-
-        // Check if the client is authorized
-        let extension = match self.0 .0.authenticate(req.headers()).await {
-            Ok(extension) => extension,
-            // If the client is not authorized, return an error response
-            Err(e) => return Ok(e.try_into()?),
-        };
-
-        if Method::CONNECT == req.method() {
-            // Received an HTTP request like:
-            // ```
-            // CONNECT www.domain.com:443 HTTP/1.1
-            // Host: www.domain.com:443
-            // Proxy-Connection: Keep-Alive
-            // ```
-            //
-            // When HTTP method is CONNECT we should return an empty body,
-            // then we can eventually upgrade the connection and talk a new protocol.
-            //
-            // Note: only after client received an empty body with STATUS_OK can the
-            // connection be upgraded, so we can't return a response inside
-            // `on_upgrade` future.
-            if let Some(addr) = host_addr(req.uri()) {
-                tokio::task::spawn(async move {
-                    match hyper::upgrade::on(req).await {
-                        Ok(upgraded) => {
-                            if let Err(e) = self.tunnel(upgraded, addr, extension).await {
-                                tracing::warn!("server io error: {}", e);
-                            };
-                        }
-                        Err(e) => tracing::warn!("upgrade error: {}", e),
-                    }
-                });
-
-                Ok(Response::new(empty()))
-            } else {
-                tracing::warn!("CONNECT host is not socket addr: {:?}", req.uri());
-                let mut resp = Response::new(full("CONNECT must be to a socket address"));
-                *resp.status_mut() = StatusCode::BAD_REQUEST;
-
-                Ok(resp)
-            }
-        } else {
-            self.0
-                 .1
-                .http_request(req, extension)
-                .await
-                .map(|res| res.map(|b| b.boxed()))
-        }
-    }
-
-    // Create a TCP connection to host:port, build a tunnel between the connection
-    // and the upgraded connection
-    async fn tunnel(
-        &self,
-        upgraded: Upgraded,
-        addr_str: String,
-        extension: Extension,
-    ) -> std::io::Result<()> {
-        let mut server = {
-            let addrs = addr_str.to_socket_addrs()?;
-            self.0 .1.try_connect_with_addrs(addrs, extension).await?
-        };
-
-        let (from_client, from_server) =
-            tokio::io::copy_bidirectional(&mut TokioIo::new(upgraded), &mut server).await?;
-        tracing::debug!(
-            "client wrote {} bytes and received {} bytes",
-            from_client,
-            from_server
-        );
-
-        Ok(())
-    }
-}
-
-fn host_addr(uri: &http::Uri) -> Option<String> {
-    uri.authority().map(|auth| auth.to_string())
-}
-
-fn empty() -> BoxBody<Bytes, hyper::Error> {
-    Empty::<Bytes>::new()
-        .map_err(|never| match never {})
-        .boxed()
-}
-
-fn full<T: Into<Bytes>>(chunk: T) -> BoxBody<Bytes, hyper::Error> {
-    Full::new(chunk.into())
-        .map_err(|never| match never {})
-        .boxed()
 }

@@ -86,7 +86,11 @@ pub fn run(args: BootArgs) -> crate::Result<()> {
                 route::sysctl_route_add_cidr(&cidr).await;
             }
             match args.proxy {
-                Proxy::Http { auth } => http::proxy(ctx(auth)).await,
+                Proxy::Http {
+                    auth,
+                    tls_cert,
+                    tls_key,
+                } => http::proxy(ctx(auth), tls_cert, tls_key).await,
                 Proxy::Socks5 { auth } => socks5::proxy(ctx(auth)).await,
             }
         })

@@ -9,8 +9,11 @@ pub enum Error {
     #[error(transparent)]
     HyperLegacyError(#[from] hyper_util::client::legacy::Error),
 
-    #[error(transparent)]
-    AuthError(#[from] super::auth::AuthError),
+    #[error("Invalid credentials")]
+    ProxyAuthenticationRequired,
+
+    #[error("Forbidden")]
+    Forbidden,
 
     #[error(transparent)]
     Timeout(#[from] tokio::time::error::Elapsed),

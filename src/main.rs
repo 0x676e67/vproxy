@@ -6,7 +6,7 @@ mod proxy;
 mod update;
 
 use clap::{Args, Parser, Subcommand};
-use std::net::SocketAddr;
+use std::{net::SocketAddr, path::PathBuf};
 
 type Result<T, E = error::Error> = std::result::Result<T, E>;
 
@@ -45,20 +45,28 @@ pub enum Commands {
 #[derive(Args, Clone)]
 pub struct AuthMode {
     /// Authentication username
-    #[clap(short, long)]
+    #[clap(short, long, requires = "password")]
     pub username: Option<String>,
     /// Authentication password
-    #[clap(short, long)]
+    #[clap(short, long, requires = "username")]
     pub password: Option<String>,
 }
 
 #[derive(Subcommand, Clone)]
 pub enum Proxy {
-    /// Http server
+    /// Http/Https server
     Http {
         /// Authentication type
         #[clap(flatten)]
         auth: AuthMode,
+
+        /// TLS certificate file
+        #[clap(long, requires = "tls_key")]
+        tls_cert: Option<PathBuf>,
+
+        /// TLS private key file
+        #[clap(long, requires = "tls_cert")]
+        tls_key: Option<PathBuf>,
     },
     /// Socks5 server
     Socks5 {

@@ -19,3 +19,8 @@ Cargo.lock
 /target
 /bin
 .idea
+*.crt
+*.key
+*.pem
+*.der
+*.csr
