@@ -53,7 +53,7 @@ jemallocator = { package = "tikv-jemallocator", version = "0.6", optional = true
 mimalloc = { version = "0.1.39", default-features = false, optional = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
-sysctl = "0.5.5"
+sysctl = "0.6.0"
 rtnetlink = "0.14"
 netlink-packet-route = "0.19"
 futures = "0.3.30"
