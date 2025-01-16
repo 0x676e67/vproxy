@@ -69,6 +69,16 @@ impl RustlsConfig {
         self.inner.clone()
     }
 
+    /// Create config from PEM formatted data.
+    ///
+    /// Certificate and private key must be in PEM format.
+    pub fn from_pem(cert: Vec<u8>, key: Vec<u8>) -> io::Result<Self> {
+        let server_config = config_from_pem(cert, key)?;
+        let inner = Arc::new(server_config);
+
+        Ok(Self { inner })
+    }
+
     /// This helper will establish a TLS server based on strong cipher suites
     /// from a PEM-formatted certificate chain and key.
     pub fn from_pem_chain_file(chain: impl AsRef<Path>, key: impl AsRef<Path>) -> io::Result<Self> {
@@ -83,6 +93,42 @@ impl fmt::Debug for RustlsConfig {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("RustlsConfig").finish()
     }
+}
+
+fn config_from_der(cert: Vec<Vec<u8>>, key: Vec<u8>) -> io::Result<ServerConfig> {
+    let cert = cert.into_iter().map(CertificateDer::from).collect();
+    let key = PrivateKeyDer::try_from(key).map_err(io_other)?;
+
+    let mut config = ServerConfig::builder()
+        .with_no_client_auth()
+        .with_single_cert(cert, key)
+        .map_err(io_other)?;
+
+    config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
+
+    Ok(config)
+}
+
+fn config_from_pem(cert: Vec<u8>, key: Vec<u8>) -> io::Result<ServerConfig> {
+    let cert = rustls_pemfile::certs(&mut cert.as_ref())
+        .map(|it| it.map(|it| it.to_vec()))
+        .collect::<Result<Vec<_>, _>>()?;
+    // Check the entire PEM file for the key in case it is not first section
+    let mut key_vec: Vec<Vec<u8>> = rustls_pemfile::read_all(&mut key.as_ref())
+        .filter_map(|i| match i.ok()? {
+            Item::Sec1Key(key) => Some(key.secret_sec1_der().to_vec()),
+            Item::Pkcs1Key(key) => Some(key.secret_pkcs1_der().to_vec()),
+            Item::Pkcs8Key(key) => Some(key.secret_pkcs8_der().to_vec()),
+            _ => None,
+        })
+        .collect();
+
+    // Make sure file contains only one key
+    if key_vec.len() != 1 {
+        return Err(io_other("private key format not supported"));
+    }
+
+    config_from_der(cert, key_vec.pop().unwrap())
 }
 
 fn config_from_pem_chain_file(

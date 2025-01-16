@@ -54,12 +54,18 @@ pub struct AuthMode {
 
 #[derive(Subcommand, Clone)]
 pub enum Proxy {
-    /// Http/Https server
+    /// Http server
     Http {
         /// Authentication type
         #[clap(flatten)]
         auth: AuthMode,
+    },
 
+    /// Https server
+    Https {
+        /// Authentication type
+        #[clap(flatten)]
+        auth: AuthMode,
         /// TLS certificate file
         #[clap(long, requires = "tls_key")]
         tls_cert: Option<PathBuf>,
@@ -68,6 +74,7 @@ pub enum Proxy {
         #[clap(long, requires = "tls_cert")]
         tls_key: Option<PathBuf>,
     },
+
     /// Socks5 server
     Socks5 {
         /// Authentication type

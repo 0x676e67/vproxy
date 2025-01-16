@@ -21,4 +21,7 @@ pub enum Error {
     #[cfg(target_family = "unix")]
     #[error(transparent)]
     NixError(#[from] nix::Error),
+
+    #[error(transparent)]
+    RcgenError(#[from] rcgen::Error),
 }
