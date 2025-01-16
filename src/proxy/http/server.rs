@@ -29,7 +29,7 @@ pub struct Server<A = DefaultAcceptor> {
     acceptor: A,
     builder: Builder<TokioExecutor>,
     listener: TcpListener,
-    http_proxy: HttpProxy,
+    http_proxy: Handler,
 }
 
 impl Server {
@@ -46,7 +46,7 @@ impl Server {
         let listener = socket.listen(ctx.concurrent as u32)?;
         let acceptor = DefaultAcceptor::new();
         let builder = Builder::new(TokioExecutor::new());
-        let http_proxy = HttpProxy::from(ctx);
+        let http_proxy = Handler::from(ctx);
 
         Ok(Self {
             acceptor,
@@ -100,8 +100,8 @@ where
                     if let Err(err) = builder
                         .serve_connection_with_upgrades(
                             TokioIo::new(stream),
-                            service_fn(move |req| {
-                                <HttpProxy as Clone>::clone(&proxy).proxy(socket_addr, req)
+                            service_fn(|req| {
+                                <Handler as Clone>::clone(&proxy).proxy(socket_addr, req)
                             }),
                         )
                         .await
@@ -130,9 +130,16 @@ pub(super) fn io_other<E: Into<BoxError>>(error: E) -> io::Error {
 }
 
 #[derive(Clone)]
-struct HttpProxy(Arc<(Authenticator, Connector)>);
+struct Handler {
+    inner: Arc<InnerHandler>,
+}
 
-impl From<ProxyContext> for HttpProxy {
+struct InnerHandler {
+    authenticator: Authenticator,
+    connector: Connector,
+}
+
+impl From<ProxyContext> for Handler {
     fn from(ctx: ProxyContext) -> Self {
         let auth = match (ctx.auth.username, ctx.auth.password) {
             (Some(username), Some(password)) => Authenticator::Password { username, password },
@@ -140,11 +147,16 @@ impl From<ProxyContext> for HttpProxy {
             _ => Authenticator::None,
         };
 
-        HttpProxy(Arc::new((auth, ctx.connector)))
+        Handler {
+            inner: Arc::new(InnerHandler {
+                authenticator: auth,
+                connector: ctx.connector,
+            }),
+        }
     }
 }
 
-impl HttpProxy {
+impl Handler {
     async fn proxy(
         self,
         socket: SocketAddr,
@@ -153,7 +165,7 @@ impl HttpProxy {
         tracing::debug!("Received request socket: {:?}, req: {:?}", socket, req);
 
         // Check if the client is authorized
-        let extension = match self.0 .0.authenticate(req.headers()).await {
+        let extension = match self.inner.authenticator.authenticate(req.headers()).await {
             Ok(extension) => extension,
             // If the client is not authorized, return an error response
             Err(e) => return Ok(e.try_into()?),
@@ -194,8 +206,8 @@ impl HttpProxy {
                 Ok(resp)
             }
         } else {
-            self.0
-                 .1
+            self.inner
+                .connector
                 .http_request(req, extension)
                 .await
                 .map(|res| res.map(|b| b.boxed()))
@@ -212,7 +224,10 @@ impl HttpProxy {
     ) -> std::io::Result<()> {
         let mut server = {
             let addrs = addr_str.to_socket_addrs()?;
-            self.0 .1.try_connect_with_addrs(addrs, extension).await?
+            self.inner
+                .connector
+                .try_connect_with_addrs(addrs, extension)
+                .await?
         };
 
         match tokio::io::copy_bidirectional(&mut TokioIo::new(upgraded), &mut server).await {
