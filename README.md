@@ -22,7 +22,7 @@ A high-performance `HTTP`/`HTTPS`/`SOCKS5` Proxy written in Rust
 
 ```shell
 $ vproxy -h
-An easy and powerful Rust HTTP/Socks5 Proxy
+A high-performance HTTP/HTTPS/SOCKS5 proxy server
 
 Usage: vproxy
        vproxy <COMMAND>
@@ -56,7 +56,7 @@ Options:
   -b, --bind <BIND>                        Bind address [default: 0.0.0.0:1080]
   -T, --connect-timeout <CONNECT_TIMEOUT>  Connection timeout in seconds [default: 10]
   -c, --concurrent <CONCURRENT>            Concurrent connections [default: 1024]
-  -u, --ulimit                             Linux/Unix `ulimit` soft limit
+  -u, --ulimit                             Unix `ulimit` soft limit
   -i, --cidr <CIDR>                        IP-CIDR, e.g. 2001:db8::/32
   -r, --cidr-range <CIDR_RANGE>            IP-CIDR-Range, e.g. 64
   -f, --fallback <FALLBACK>                Fallback address
