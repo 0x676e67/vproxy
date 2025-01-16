@@ -13,7 +13,7 @@ pub enum Error {
     AddressParseError(#[from] std::net::AddrParseError),
 
     #[error(transparent)]
-    SelfUpdateError(#[from] self_github_update::errors::Error),
+    SelfUpdateError(#[from] self_update::errors::Error),
 
     #[error(transparent)]
     Socks5Error(#[from] crate::proxy::Error),

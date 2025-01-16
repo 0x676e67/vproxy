@@ -1,12 +1,12 @@
-use self_github_update::cargo_crate_version;
+use self_update::cargo_crate_version;
+use self_update::update::UpdateStatus;
 
 pub(super) fn update() -> Result<(), Box<dyn std::error::Error>> {
-    use self_github_update::update::UpdateStatus;
-    let status = self_github_update::backends::github::Update::configure()
+    let status = self_update::backends::github::Update::configure()
         .repo_owner("0x676e67")
         .repo_name("vproxy")
         .bin_name("vproxy")
-        .target(self_github_update::get_target())
+        .target(self_update::get_target())
         .show_output(true)
         .show_download_progress(true)
         .no_confirm(true)
