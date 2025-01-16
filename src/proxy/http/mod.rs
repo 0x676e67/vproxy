@@ -14,11 +14,11 @@ pub async fn proxy(
     tls_cert: Option<PathBuf>,
     tls_key: Option<PathBuf>,
 ) -> crate::Result<()> {
-    tracing::info!("Http server listening on {}", ctx.bind);
-
     let listener = setup_listener(&ctx).await?;
 
     if let (Some(cert), Some(key)) = (tls_cert, tls_key) {
+        tracing::info!("HTTP proxy server listening on {}", ctx.bind);
+
         let config = RustlsConfig::from_pem_chain_file(cert, key)?;
         let acceptor = RustlsAcceptor::new(config);
         let mut server = Server::new(listener, ctx);
@@ -30,6 +30,8 @@ pub async fn proxy(
 
         server.acceptor(acceptor).serve().await
     } else {
+        tracing::info!("HTTPS proxy server listening on {}", ctx.bind);
+
         let mut server = Server::new(listener, ctx);
         server
             .http_builder()
