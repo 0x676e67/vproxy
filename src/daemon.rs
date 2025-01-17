@@ -1,4 +1,4 @@
-use crate::{serve, BootArgs};
+use crate::{serve, BootArgs, BIN_NAME};
 use daemonize::Daemonize;
 use std::{
     fs::{File, Permissions},
@@ -6,9 +6,9 @@ use std::{
     path::Path,
 };
 
-const PID_PATH: &str = "/var/run/vproxy.pid";
-const DEFAULT_STDOUT_PATH: &str = "/var/run/vproxy.out";
-const DEFAULT_STDERR_PATH: &str = "/var/run/vproxy.err";
+const PID_PATH: &str = concat!("var/run/", env!("CARGO_PKG_NAME"), ".pid");
+const DEFAULT_STDOUT_PATH: &str = concat!("var/run/", env!("CARGO_PKG_NAME"), ".out");
+const DEFAULT_STDERR_PATH: &str = concat!("var/run/", env!("CARGO_PKG_NAME"), ".err");
 
 /// Get the pid of the daemon
 fn get_pid() -> Option<String> {
@@ -30,7 +30,7 @@ pub fn check_root() {
 /// Start the daemon
 pub fn start(args: BootArgs) -> crate::Result<()> {
     if let Some(pid) = get_pid() {
-        println!("vproxy is already running with pid: {}", pid);
+        println!("{} is already running with pid: {}", BIN_NAME, pid);
         return Ok(());
     }
 
@@ -46,7 +46,7 @@ pub fn start(args: BootArgs) -> crate::Result<()> {
     stdout.set_permissions(Permissions::from_mode(0o755))?;
 
     let mut daemonize = Daemonize::new()
-        .pid_file(PID_PATH) // Every method except `new` and `start`
+        .pid_file(&*PID_PATH) // Every method except `new` and `start`
         .chown_pid_file(true) // is optional, see `Daemonize` documentation
         .umask(0o777) // Set umask, `0o027` by default.
         .stdout(stdout) // Redirect stdout to `/tmp/daemon.out`.
@@ -117,15 +117,15 @@ pub fn status() -> crate::Result<()> {
                 }
             }
         }
-        None => println!("vproxy is not running"),
+        None => println!("{} is not running", BIN_NAME),
     }
     Ok(())
 }
 
 /// Show the log of the daemon
 pub fn log() -> crate::Result<()> {
-    fn read_and_print_file(file_path: &Path, placeholder: &str) -> crate::Result<()> {
-        if !file_path.exists() {
+    fn read_and_print_file(file_path: &'static str, placeholder: &str) -> crate::Result<()> {
+        if !Path::new(file_path).exists() {
             return Ok(());
         }
 
@@ -156,11 +156,9 @@ pub fn log() -> crate::Result<()> {
         Ok(())
     }
 
-    let stdout_path = Path::new(DEFAULT_STDOUT_PATH);
-    read_and_print_file(stdout_path, "STDOUT>")?;
+    read_and_print_file(DEFAULT_STDOUT_PATH, "STDOUT>")?;
 
-    let stderr_path = Path::new(DEFAULT_STDERR_PATH);
-    read_and_print_file(stderr_path, "STDERR>")?;
+    read_and_print_file(DEFAULT_STDERR_PATH, "STDERR>")?;
 
     Ok(())
 }
