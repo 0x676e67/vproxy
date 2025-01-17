@@ -1,4 +1,3 @@
-#[allow(clippy::enum_variant_names)]
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
     #[error(transparent)]
@@ -25,4 +24,7 @@ pub enum Error {
 
     #[error(transparent)]
     Log(#[from] tracing::subscriber::SetGlobalDefaultError),
+
+    #[error(transparent)]
+    LogParse(#[from] tracing_subscriber::filter::ParseError),
 }

@@ -16,7 +16,7 @@ pub fn get_self_signed_cert() -> crate::Result<(Vec<u8>, Vec<u8>)> {
     if cert_path.exists() && key_path.exists() {
         let cert = std::fs::read_to_string(cert_path)?;
         let key = std::fs::read(key_path)?;
-        tracing::info!("Using existing self-signed certificate: \n{}", cert);
+        tracing::trace!("Using existing self-signed certificate: \n{}", cert);
 
         return Ok((cert.into_bytes(), key));
     }
@@ -49,7 +49,7 @@ fn generate_self_signed() -> crate::Result<(Vec<u8>, Vec<u8>)> {
     let cert = params.self_signed(&key_pair)?;
 
     let cert = cert.pem();
-    tracing::info!("Generating self-signed certificate:\n{}", cert);
+    tracing::trace!("Generating self-signed certificate:\n{}", cert);
 
     Ok((cert.into_bytes(), key_pair.serialize_pem().into_bytes()))
 }

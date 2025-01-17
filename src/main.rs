@@ -22,21 +22,27 @@ struct Opt {
 pub enum Commands {
     /// Run server
     Run(BootArgs),
+
     /// Start server daemon
     #[cfg(target_family = "unix")]
     Start(BootArgs),
+
     /// Restart server daemon
     #[cfg(target_family = "unix")]
     Restart(BootArgs),
+
     /// Stop server daemon
     #[cfg(target_family = "unix")]
     Stop,
+
     /// Show the server daemon process
     #[cfg(target_family = "unix")]
     PS,
+
     /// Show the server daemon log
     #[cfg(target_family = "unix")]
     Log,
+
     /// Update the application
     Update,
 }
@@ -47,6 +53,7 @@ pub struct AuthMode {
     /// Authentication username
     #[clap(short, long, requires = "password")]
     pub username: Option<String>,
+
     /// Authentication password
     #[clap(short, long, requires = "username")]
     pub password: Option<String>,
@@ -66,6 +73,7 @@ pub enum Proxy {
         /// Authentication type
         #[clap(flatten)]
         auth: AuthMode,
+
         /// TLS certificate file
         #[clap(long, requires = "tls_key")]
         tls_cert: Option<PathBuf>,
@@ -85,9 +93,9 @@ pub enum Proxy {
 
 #[derive(Args, Clone)]
 pub struct BootArgs {
-    /// Debug mode
-    #[clap(long, env = "VPROXY_DEBUG")]
-    debug: bool,
+    /// Log level e.g. trace, debug, info, warn, error
+    #[clap(long, env = "VPROXY_LOG", default_value = "info")]
+    log: tracing::Level,
 
     /// Bind address
     #[clap(short, long, default_value = "0.0.0.0:1080")]

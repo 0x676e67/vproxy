@@ -9,7 +9,6 @@ mod socks;
 use crate::{AuthMode, BootArgs, Proxy, Result};
 use connect::Connector;
 use std::net::SocketAddr;
-use tracing::Level;
 use tracing_subscriber::{EnvFilter, FmtSubscriber};
 
 struct Context {
@@ -26,22 +25,14 @@ struct Context {
 pub fn run(args: BootArgs) -> Result<()> {
     // Initialize the logger with a filter that ignores WARN level logs for netlink_proto
     let filter = EnvFilter::from_default_env()
-        .add_directive(
-            if args.debug {
-                Level::DEBUG
-            } else {
-                Level::INFO
-            }
-            .into(),
-        )
-        .add_directive(
-            "netlink_proto=error"
-                .parse()
-                .expect("failed to parse directive"),
-        );
+        .add_directive(args.log.into())
+        .add_directive("netlink_proto=error".parse()?);
 
     tracing::subscriber::set_global_default(
-        FmtSubscriber::builder().with_env_filter(filter).finish(),
+        FmtSubscriber::builder()
+            .with_max_level(args.log)
+            .with_env_filter(filter)
+            .finish(),
     )?;
 
     tracing::info!("OS: {}", std::env::consts::OS);
