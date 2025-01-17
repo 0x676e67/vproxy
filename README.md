@@ -53,14 +53,22 @@ Commands:
   help    Print this message or the help of the given subcommand(s)
 
 Options:
-      --debug                              Debug mode [env: VPROXY_DEBUG=]
-  -b, --bind <BIND>                        Bind address [default: 0.0.0.0:1080]
-  -T, --connect-timeout <CONNECT_TIMEOUT>  Connection timeout in seconds [default: 10]
-  -c, --concurrent <CONCURRENT>            Concurrent connections [default: 1024]
-  -i, --cidr <CIDR>                        IP-CIDR, e.g. 2001:db8::/32
-  -r, --cidr-range <CIDR_RANGE>            IP-CIDR-Range, e.g. 64
-  -f, --fallback <FALLBACK>                Fallback address
-  -h, --help                               Print help
+      --log <LOG>
+          Log level e.g. trace, debug, info, warn, error [env: VPROXY_LOG=] [default: info]
+  -b, --bind <BIND>
+          Bind address [default: 0.0.0.0:1080]
+  -T, --connect-timeout <CONNECT_TIMEOUT>
+          Connection timeout in seconds [default: 10]
+  -c, --concurrent <CONCURRENT>
+          Concurrent connections [default: 1024]
+  -i, --cidr <CIDR>
+          IP-CIDR, e.g. 2001:db8::/32
+  -r, --cidr-range <CIDR_RANGE>
+          IP-CIDR-Range, e.g. 64
+  -f, --fallback <FALLBACK>
+          Fallback address
+  -h, --help
+          Print help
 ```
 
 ## Installation
