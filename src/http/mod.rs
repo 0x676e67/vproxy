@@ -37,7 +37,7 @@ pub async fn https_proxy(
         }
     }?;
 
-    let acceptor = RustlsAcceptor::new(config);
+    let acceptor = RustlsAcceptor::new(config, ctx.connect_timeout);
     let mut server = Server::new(ctx)?;
     server
         .http_builder()

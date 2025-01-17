@@ -22,10 +22,9 @@ pub struct RustlsAcceptor<A = DefaultAcceptor> {
 
 impl RustlsAcceptor {
     /// Create a new rustls acceptor.
-    pub fn new(config: RustlsConfig) -> Self {
+    pub fn new(config: RustlsConfig, timeout: u64) -> Self {
         let inner = DefaultAcceptor::new();
-
-        let handshake_timeout = Duration::from_secs(10);
+        let handshake_timeout = Duration::from_secs(timeout);
 
         Self {
             inner,

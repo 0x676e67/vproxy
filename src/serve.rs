@@ -6,10 +6,16 @@ use tracing_subscriber::{EnvFilter, FmtSubscriber};
 pub struct Context {
     /// Bind address
     pub bind: SocketAddr,
+
     /// Number of concurrent connections
     pub concurrent: usize,
+
+    /// Connect timeout
+    pub connect_timeout: u64,
+
     /// Authentication type
     pub auth: AuthMode,
+
     /// Connector
     pub connector: Connector,
 }
@@ -37,6 +43,7 @@ pub fn run(args: BootArgs) -> Result<()> {
         auth,
         bind: args.bind,
         concurrent: args.concurrent,
+        connect_timeout: args.connect_timeout,
         connector: Connector::new(
             args.cidr,
             args.cidr_range,
