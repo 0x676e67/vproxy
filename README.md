@@ -48,6 +48,7 @@ Usage: vproxy run [OPTIONS] <COMMAND>
 
 Commands:
   http    Http server
+  https   Https server
   socks5  Socks5 server
   help    Print this message or the help of the given subcommand(s)
 
@@ -56,7 +57,6 @@ Options:
   -b, --bind <BIND>                        Bind address [default: 0.0.0.0:1080]
   -T, --connect-timeout <CONNECT_TIMEOUT>  Connection timeout in seconds [default: 10]
   -c, --concurrent <CONCURRENT>            Concurrent connections [default: 1024]
-  -u, --ulimit                             Unix `ulimit` soft limit
   -i, --cidr <CIDR>                        IP-CIDR, e.g. 2001:db8::/32
   -r, --cidr-range <CIDR_RANGE>            IP-CIDR-Range, e.g. 64
   -f, --fallback <FALLBACK>                Fallback address

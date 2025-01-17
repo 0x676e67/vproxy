@@ -91,6 +91,12 @@ jobs:
           toolchain: stable
           override: true
 
+      - name: Style check
+        run: cargo fmt --all -- --check
+
+      - name: Clippy check
+        run: cargo clippy --all-targets
+
       - name: Build
         run: cargo build
 

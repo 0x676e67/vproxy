@@ -29,13 +29,13 @@ pub enum Error {
     WrongVersion,
 
     #[error("AddrParseError: {0}")]
-    AddrParseError(#[from] std::net::AddrParseError),
+    AddrParse(#[from] std::net::AddrParseError),
 
     #[error("ParseIntError: {0}")]
-    ParseIntError(#[from] std::num::ParseIntError),
+    ParseInt(#[from] std::num::ParseIntError),
 
     #[error("Utf8Error: {0}")]
-    Utf8Error(#[from] std::str::Utf8Error),
+    Utf8(#[from] std::str::Utf8Error),
 
     #[error("{0}")]
     String(String),

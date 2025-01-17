@@ -128,7 +128,7 @@ async fn handle_s5_upd_associate(
                 .reply(Reply::GeneralFailure, Address::unspecified())
                 .await?;
             conn.shutdown().await?;
-            Err(err.into())
+            Err(err)
         }
         Ok((listen_udp, listen_addr)) => {
             tracing::info!("[UDP] {listen_addr} listen on");

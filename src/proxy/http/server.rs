@@ -303,15 +303,14 @@ pub(super) mod auth {
     impl Authenticator {
         pub async fn authenticate(&self, headers: &HeaderMap) -> Result<Extension, Error> {
             match self {
-                Authenticator::None => Extension::try_from_headers(&headers)
+                Authenticator::None => Extension::try_from_headers(headers)
                     .await
                     .map_err(|_| Error::Forbidden),
                 Authenticator::Password {
                     username, password, ..
                 } => {
                     // Extract basic auth
-                    let auth_str =
-                        option_ext(&headers).ok_or(Error::ProxyAuthenticationRequired)?;
+                    let auth_str = option_ext(headers).ok_or(Error::ProxyAuthenticationRequired)?;
                     // Find last ':' index
                     let last_colon_index = auth_str
                         .rfind(':')
@@ -321,7 +320,7 @@ pub(super) mod auth {
 
                     // Check if the username and password are correct
                     let is_equal =
-                        auth_username.starts_with(&*username) && auth_password.eq(&*password);
+                        auth_username.starts_with(username) && auth_password.eq(password);
 
                     // Check credentials
                     if is_equal {

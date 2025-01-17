@@ -99,7 +99,7 @@ pub fn murmurhash3_x64_128(bytes: &[u8], seed: u64) -> (u64, u64) {
         k1 ^= (bytes[(block_count * read_size) as usize + 1] as u64) << 8;
     }
     if len & 15 >= 1 {
-        k1 ^= bytes[(block_count * read_size) as usize + 0] as u64;
+        k1 ^= bytes[(block_count * read_size) as usize] as u64;
         k1 = k1.wrapping_mul(c1);
         k1 = k1.rotate_left(31);
         k1 = k1.wrapping_mul(c2);

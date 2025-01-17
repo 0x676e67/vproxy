@@ -3,9 +3,11 @@ use http::{header, HeaderMap};
 use tokio::task::JoinError;
 
 /// Enum representing different types of extensions.
-#[derive(Clone)]
+#[allow(clippy::upper_case_acronyms)]
+#[derive(Clone, Default)]
 pub enum Extension {
     /// No extension.
+    #[default]
     None,
     /// TTL extension with a 64-bit integer.
     TTL(u64),
@@ -37,12 +39,6 @@ impl Extension {
             tokio::task::spawn_blocking(move || Extension::from((prefix.as_str(), full.as_str())))
                 .await?;
         Ok(extension)
-    }
-}
-
-impl Default for Extension {
-    fn default() -> Self {
-        Extension::None
     }
 }
 
