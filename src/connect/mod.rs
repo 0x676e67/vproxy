@@ -261,8 +261,8 @@ impl Connector {
     ) -> std::io::Result<TcpStream> {
         match extension {
             Extension::None
-            | Extension::Range(_, _)
-            | Extension::Session(_, _)
+            | Extension::Range(_)
+            | Extension::Session(_)
             | Extension::TTL(_) => match (self.cidr, self.fallback) {
                 (None, Some(fallback)) => {
                     timeout(
@@ -504,7 +504,7 @@ impl Connector {
     fn assign_ipv4_from_extension(&self, cidr: Ipv4Cidr, extension: &Extension) -> Ipv4Addr {
         if let Some(combined) = self.combined(extension) {
             match extension {
-                Extension::TTL(_) | Extension::Session(_, _) => {
+                Extension::TTL(_) | Extension::Session( _) => {
                     // Calculate the subnet mask and apply it to ensure the base_ip is preserved in
                     // the non-variable part
                     let subnet_mask = !((1u32 << (32 - cidr.network_length())) - 1);
@@ -513,7 +513,7 @@ impl Connector {
                     let ip_num = base_ip_bits | ((combined as u32) % capacity);
                     return Ipv4Addr::from(ip_num);
                 }
-                Extension::Range(_, _) => {
+                Extension::Range(_) => {
                     // If a CIDR range is provided, use it to assign an IP address
                     if let Some(range) = self.cidr_range {
                         return assign_ipv4_with_range(cidr, range, combined as u32);
@@ -535,20 +535,20 @@ impl Connector {
     fn assign_ipv6_from_extension(&self, cidr: Ipv6Cidr, extension: &Extension) -> Ipv6Addr {
         if let Some(combined) = self.combined(extension) {
             match extension {
-                Extension::TTL(_) | Extension::Session(_, _) => {
+                Extension::TTL(_) | Extension::Session(_) => {
                     let network_length = cidr.network_length();
                     // Calculate the subnet mask and apply it to ensure the base_ip is preserved in
                     // the non-variable part
                     let subnet_mask = !((1u128 << (128 - network_length)) - 1);
                     let base_ip_bits = u128::from(cidr.first_address()) & subnet_mask;
                     let capacity = 2u128.pow(128 - network_length as u32) - 1;
-                    let ip_num = base_ip_bits | (combined % capacity);
+                    let ip_num = base_ip_bits | (combined as u128 % capacity);
                     return Ipv6Addr::from(ip_num);
                 }
-                Extension::Range(_, _) => {
+                Extension::Range(_) => {
                     // If a range is provided, use it to assign an IP
                     if let Some(range) = self.cidr_range {
-                        return assign_ipv6_with_range(cidr, range, combined);
+                        return assign_ipv6_with_range(cidr, range, combined as u128);
                     }
                 }
                 _ => {}
@@ -558,17 +558,17 @@ impl Connector {
         assign_rand_ipv6(cidr)
     }
 
-    /// Combines values from an `Extensions` variant into a single `u128` value.
+    /// Combines values from an `Extensions` variant into a single `u64` value.
     ///
     /// This method processes an `Extensions` reference and attempts to combine its
-    /// contained values into a single `u128` value. The method of combination depends
+    /// contained values into a single `u64` value. The method of combination depends
     /// on the specific variant of `Extensions`:
     ///
-    /// - `Extensions::Session(a, b)`: Combines `a` and `b` into a single `u128` value
+    /// - `Extensions::Session(a, b)`: Combines `a` and `b` into a single `u64` value
     ///   using the `combine` function.
     /// - `Extensions::TTL(ttl)`: Uses the `ttl_boundary` method of the `TTLCalculator`
     ///   instance contained within `self` to calculate a boundary based on `ttl`, and
-    ///   converts the result to `u128`.
+    ///   converts the result to `u64`.
     /// - For other variants of `Extensions`, it returns `None`.
     ///
     /// # Arguments
@@ -577,14 +577,13 @@ impl Connector {
     ///
     /// # Returns
     ///
-    /// Returns an `Option<u128>` which is `Some(combined_value)` if the operation
+    /// Returns an `Option<u64>` which is `Some(combined_value)` if the operation
     /// is applicable and successful, or `None` if the `extension` variant does not
-    /// support combination into a `u128` value.
-    fn combined(&self, extension: &Extension) -> Option<u128> {
+    fn combined(&self, extension: &Extension) -> Option<u64> {
         match extension {
-            Extension::TTL(ttl) => Some(self.ttl.ttl_boundary(*ttl) as u128),
-            Extension::Range(a, b) => Some(combine(*a, *b)),
-            Extension::Session(a, b) => Some(combine(*a, *b)),
+            Extension::TTL(ttl) => Some(self.ttl.ttl_boundary(*ttl)),
+            Extension::Range(value) => Some(*value),
+            Extension::Session(value) => Some(*value),
             _ => None,
         }
     }
@@ -618,11 +617,6 @@ fn error(last_err: Option<std::io::Error>) -> std::io::Error {
             "Failed to connect to any resolved address",
         ),
     }
-}
-
-/// Combines two 64-bit integers into a single 128-bit integer.
-fn combine(a: u64, b: u64) -> u128 {
-    ((a as u128) << 64) | (b as u128)
 }
 
 /// Generates a random IPv4 address within the specified subnet.

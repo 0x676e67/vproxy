@@ -5,7 +5,6 @@ mod daemon;
 mod error;
 mod extension;
 mod http;
-mod murmur;
 mod serve;
 mod socks;
 mod update;

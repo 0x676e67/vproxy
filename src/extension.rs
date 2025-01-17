@@ -1,4 +1,3 @@
-use super::murmur;
 use http::{header, HeaderMap};
 use tokio::task::JoinError;
 
@@ -11,10 +10,10 @@ pub enum Extension {
     None,
     /// TTL extension with a 64-bit integer.
     TTL(u64),
-    /// Range extension with a tuple of two 64-bit integers.
-    Range(u64, u64),
-    /// Session extension with a tuple of two 64-bit integers.
-    Session(u64, u64),
+    /// Range extension with a 64-bit integers.
+    Range(u64),
+    /// Session extension with a 64-bit integers.
+    Session(u64),
 }
 
 impl Extension {
@@ -184,8 +183,8 @@ fn handle_extension(
 /// If the string is empty, it returns `Extensions::None`.
 /// If the string is not empty, it returns `Extensions::Range(a, b)`.
 fn parse_range_extension(s: &str) -> Extension {
-    let (a, b) = murmur::murmurhash3_x64_128(s.as_bytes(), s.len() as u64);
-    Extension::Range(a, b)
+    let hash = fxhash::hash64(s.as_bytes());
+    Extension::Range(hash)
 }
 
 /// Parses a session extension string.
@@ -209,8 +208,8 @@ fn parse_range_extension(s: &str) -> Extension {
 /// will return a `Extensions::Session` variant containing a tuple `(a, b)`.
 /// Otherwise, it will return `Extensions::None`.
 fn parse_session_extension(s: &str) -> Extension {
-    let (a, b) = murmur::murmurhash3_x64_128(s.as_bytes(), s.len() as u64);
-    Extension::Session(a, b)
+    let hash = fxhash::hash64(s.as_bytes());
+    Extension::Session(hash)
 }
 
 /// Parses a TTL (Time To Live) extension string.

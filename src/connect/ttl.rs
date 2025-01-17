@@ -1,4 +1,3 @@
-use crate::murmur::murmurhash3_x64_128;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Clone)]
@@ -13,8 +12,7 @@ impl TTLCalculator {
             .unwrap_or(rand::random());
 
         let time = self.calculate_ttl_boundary(timestamp, ttl);
-        let (a, b) = murmurhash3_x64_128(&time.to_be_bytes(), 31);
-        a ^ b
+        fxhash::hash64(&time.to_be_bytes())
     }
 
     fn calculate_ttl_boundary(&self, timestamp: u64, ttl: u64) -> u64 {
