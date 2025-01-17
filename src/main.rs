@@ -101,11 +101,6 @@ pub struct BootArgs {
     #[clap(short, long, default_value = "1024")]
     concurrent: usize,
 
-    /// Unix `ulimit` soft limit
-    #[cfg(target_family = "unix")]
-    #[clap(short, long)]
-    ulimit: bool,
-
     /// IP-CIDR, e.g. 2001:db8::/32
     #[clap(short = 'i', long)]
     cidr: Option<cidr::IpCidr>,

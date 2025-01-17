@@ -21,4 +21,7 @@ pub enum Error {
 
     #[error(transparent)]
     RcgenError(#[from] rcgen::Error),
+
+    #[error(transparent)]
+    LogError(#[from] tracing::subscriber::SetGlobalDefaultError),
 }
