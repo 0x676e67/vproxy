@@ -2,6 +2,8 @@ pub mod alloc;
 mod connect;
 #[cfg(target_family = "unix")]
 mod daemon;
+#[cfg(target_os = "linux")]
+mod route;
 mod error;
 mod extension;
 mod http;
