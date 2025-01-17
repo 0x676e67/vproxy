@@ -1,10 +1,10 @@
 use self::{associate::UdpAssociate, bind::Bind, connect::Connect};
-use super::super::error::Error;
+use super::{super::error::Error, auth::Auth};
 use crate::proxy::socks::{
     proto::{self, handshake, Address, AsyncStreamOperation, Command, Method},
     server::AuthAdaptor,
 };
-use std::{net::SocketAddr, time::Duration};
+use std::{net::SocketAddr, sync::Arc, time::Duration};
 use tokio::{io::AsyncWriteExt, net::TcpStream};
 
 pub mod associate;
@@ -15,14 +15,14 @@ pub mod connect;
 /// to call [`handshake()`](#method.handshake) to perform the socks5 handshake.
 /// It will be converted to a proper socks5 connection after the handshake
 /// succeeds.
-pub struct IncomingConnection<O> {
+pub struct IncomingConnection {
     stream: TcpStream,
-    auth: AuthAdaptor<O>,
+    auth: Arc<AuthAdaptor>,
 }
 
-impl<O: 'static> IncomingConnection<O> {
+impl IncomingConnection {
     #[inline]
-    pub(crate) fn new(stream: TcpStream, auth: AuthAdaptor<O>) -> Self {
+    pub(crate) fn new(stream: TcpStream, auth: Arc<AuthAdaptor>) -> Self {
         IncomingConnection { stream, auth }
     }
 
@@ -99,7 +99,9 @@ impl<O: 'static> IncomingConnection<O> {
     /// Perform a SOCKS5 authentication handshake using the given
     /// Note that this method will not implicitly close the connection even if
     /// the handshake failed.
-    pub async fn authenticate(mut self) -> std::io::Result<(AuthenticatedStream, O)> {
+    pub async fn authenticate(
+        mut self,
+    ) -> std::io::Result<(AuthenticatedStream, <AuthAdaptor as Auth>::Output)> {
         let request = handshake::Request::retrieve_from_async_stream(&mut self.stream).await?;
         if let Some(method) = self.evaluate_request(&request) {
             let response = handshake::Response::new(method);
@@ -124,7 +126,7 @@ impl<O: 'static> IncomingConnection<O> {
     }
 }
 
-impl<O> std::fmt::Debug for IncomingConnection<O> {
+impl std::fmt::Debug for IncomingConnection {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("IncomingConnection")
             .field("stream", &self.stream)
@@ -132,9 +134,9 @@ impl<O> std::fmt::Debug for IncomingConnection<O> {
     }
 }
 
-impl<O> From<IncomingConnection<O>> for TcpStream {
+impl From<IncomingConnection> for TcpStream {
     #[inline]
-    fn from(conn: IncomingConnection<O>) -> Self {
+    fn from(conn: IncomingConnection) -> Self {
         conn.stream
     }
 }

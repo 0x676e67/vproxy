@@ -5,14 +5,14 @@ pub mod server;
 use self::{
     proto::{Address, Reply, UdpHeader},
     server::{
-        auth,
         connection::associate::{self, AssociatedUdpSocket},
         ClientConnection, IncomingConnection, Server, UdpAssociate,
     },
 };
-use super::{extension::Extension, Context};
+use super::Context;
 use crate::proxy::connect::Connector;
 use error::Error;
+use server::AuthAdaptor;
 use std::{
     net::{SocketAddr, ToSocketAddrs},
     sync::Arc,
@@ -24,7 +24,7 @@ pub async fn proxy(ctx: Context) -> crate::Result<()> {
 
     match (&ctx.auth.username, &ctx.auth.password) {
         (Some(username), Some(password)) => {
-            let auth = Arc::new(auth::Password::new(username, password)) as Arc<_>;
+            let auth = AuthAdaptor::new_password(username, password);
             let server =
                 Server::bind_with_concurrency(ctx.bind, ctx.concurrent as u32, auth).await?;
 
@@ -32,9 +32,12 @@ pub async fn proxy(ctx: Context) -> crate::Result<()> {
         }
 
         _ => {
-            let auth = Arc::new(auth::NoAuth) as Arc<_>;
-            let server =
-                Server::bind_with_concurrency(ctx.bind, ctx.concurrent as u32, auth).await?;
+            let server = Server::bind_with_concurrency(
+                ctx.bind,
+                ctx.concurrent as u32,
+                AuthAdaptor::new_no_auth(),
+            )
+            .await?;
             event_loop(server, ctx.connector).await?;
         }
     }
@@ -44,10 +47,7 @@ pub async fn proxy(ctx: Context) -> crate::Result<()> {
 
 const MAX_UDP_RELAY_PACKET_SIZE: usize = 1500;
 
-async fn event_loop(
-    server: Server<std::io::Result<(bool, Extension)>>,
-    connector: Connector,
-) -> std::io::Result<()> {
+async fn event_loop(server: Server, connector: Connector) -> std::io::Result<()> {
     let connector = Arc::new(connector);
     while let Ok((conn, _)) = server.accept().await {
         let connector = connector.clone();
@@ -60,10 +60,7 @@ async fn event_loop(
     Ok(())
 }
 
-async fn handle(
-    conn: IncomingConnection<std::io::Result<(bool, Extension)>>,
-    connector: Arc<Connector>,
-) -> std::io::Result<()> {
+async fn handle(conn: IncomingConnection, connector: Arc<Connector>) -> std::io::Result<()> {
     let (conn, res) = conn.authenticate().await?;
     let (res, extension) = res?;
 

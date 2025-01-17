@@ -2,28 +2,55 @@ use crate::proxy::{
     extension::Extension,
     socks::proto::{handshake::password, AsyncStreamOperation, Method, UsernamePassword},
 };
-use async_trait::async_trait;
 use password::{Request, Response, Status::*};
 use std::{
+    future::Future,
     io::{Error, ErrorKind},
-    sync::Arc,
 };
 use tokio::net::TcpStream;
 
-pub type AuthAdaptor<A> = Arc<dyn Auth<Output = A> + Send + Sync>;
-
-#[async_trait]
-pub trait Auth {
+pub trait Auth: Send {
     type Output;
     fn method(&self) -> Method;
-    async fn execute(&self, stream: &mut TcpStream) -> Self::Output;
+    fn execute(&self, stream: &mut TcpStream) -> impl Future<Output = Self::Output> + Send;
+}
+
+pub enum AuthAdaptor {
+    NoAuth(NoAuth),
+    Password(PasswordAuth),
+}
+
+impl AuthAdaptor {
+    pub fn new_no_auth() -> Self {
+        Self::NoAuth(NoAuth)
+    }
+
+    pub fn new_password(username: &str, password: &str) -> Self {
+        Self::Password(PasswordAuth::new(username, password))
+    }
+}
+
+impl Auth for AuthAdaptor {
+    type Output = std::io::Result<(bool, Extension)>;
+
+    fn method(&self) -> Method {
+        match self {
+            Self::NoAuth(auth) => auth.method(),
+            Self::Password(auth) => auth.method(),
+        }
+    }
+
+    async fn execute(&self, stream: &mut TcpStream) -> Self::Output {
+        match self {
+            Self::NoAuth(auth) => auth.execute(stream).await,
+            Self::Password(auth) => auth.execute(stream).await,
+        }
+    }
 }
 
 /// No authentication as the socks5 handshake method.
-#[derive(Debug, Default)]
 pub struct NoAuth;
 
-#[async_trait]
 impl Auth for NoAuth {
     type Output = std::io::Result<(bool, Extension)>;
 
@@ -37,11 +64,11 @@ impl Auth for NoAuth {
 }
 
 /// Username and password as the socks5 handshake method.
-pub struct Password {
+pub struct PasswordAuth {
     user_pass: UsernamePassword,
 }
 
-impl Password {
+impl PasswordAuth {
     /// Creates a new `Password` instance with the given username, password, and
     /// IP whitelist.
     pub fn new(username: &str, password: &str) -> Self {
@@ -51,8 +78,7 @@ impl Password {
     }
 }
 
-#[async_trait]
-impl Auth for Password {
+impl Auth for PasswordAuth {
     type Output = std::io::Result<(bool, Extension)>;
 
     fn method(&self) -> Method {
