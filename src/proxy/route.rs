@@ -148,14 +148,14 @@ pub fn sysctl_ipv6_no_local_bind() {
     const CTLNAME: &str = "net.ipv6.ip_nonlocal_bind";
 
     let ctl = <sysctl::Ctl as Sysctl>::new(CTLNAME)
-        .expect(&format!("could not get sysctl '{}'", CTLNAME));
+        .unwrap_or_else(|_| panic!("could not get sysctl '{}'", CTLNAME));
     let _ = ctl.name().expect("could not get sysctl name");
 
     let old_value = ctl.value_string().expect("could not get sysctl value");
 
     let target_value = match old_value.as_ref() {
         "0" => "1",
-        "1" | _ => &old_value,
+        _ => &old_value,
     };
 
     ctl.set_value_string(target_value).unwrap_or_else(|e| {

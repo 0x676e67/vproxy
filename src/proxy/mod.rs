@@ -70,7 +70,7 @@ pub fn run(args: BootArgs) -> Result<()> {
             #[cfg(target_os = "linux")]
             if let Some(cidr) = &args.cidr {
                 route::sysctl_ipv6_no_local_bind();
-                route::sysctl_route_add_cidr(&cidr).await;
+                route::sysctl_route_add_cidr(cidr).await;
             }
             match args.proxy {
                 Proxy::Http { auth } => http::http_proxy(ctx(auth)).await,
