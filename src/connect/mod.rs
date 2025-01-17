@@ -260,40 +260,39 @@ impl Connector {
         extension: &Extension,
     ) -> std::io::Result<TcpStream> {
         match extension {
-            Extension::None
-            | Extension::Range(_)
-            | Extension::Session(_)
-            | Extension::TTL(_) => match (self.cidr, self.fallback) {
-                (None, Some(fallback)) => {
-                    timeout(
-                        self.connect_timeout,
-                        self.try_connect_with_addr(target_addr, fallback),
-                    )
-                    .await?
+            Extension::None | Extension::Range(_) | Extension::Session(_) | Extension::TTL(_) => {
+                match (self.cidr, self.fallback) {
+                    (None, Some(fallback)) => {
+                        timeout(
+                            self.connect_timeout,
+                            self.try_connect_with_addr(target_addr, fallback),
+                        )
+                        .await?
+                    }
+                    (Some(cidr), None) => {
+                        timeout(
+                            self.connect_timeout,
+                            self.try_connect_with_cidr(target_addr, cidr, extension),
+                        )
+                        .await?
+                    }
+                    (Some(cidr), Some(fallback)) => {
+                        timeout(
+                            self.connect_timeout,
+                            self.try_connect_with_cidr_and_fallback(
+                                target_addr,
+                                cidr,
+                                fallback,
+                                extension,
+                            ),
+                        )
+                        .await?
+                    }
+                    (None, None) => {
+                        timeout(self.connect_timeout, TcpStream::connect(target_addr)).await?
+                    }
                 }
-                (Some(cidr), None) => {
-                    timeout(
-                        self.connect_timeout,
-                        self.try_connect_with_cidr(target_addr, cidr, extension),
-                    )
-                    .await?
-                }
-                (Some(cidr), Some(fallback)) => {
-                    timeout(
-                        self.connect_timeout,
-                        self.try_connect_with_cidr_and_fallback(
-                            target_addr,
-                            cidr,
-                            fallback,
-                            extension,
-                        ),
-                    )
-                    .await?
-                }
-                (None, None) => {
-                    timeout(self.connect_timeout, TcpStream::connect(target_addr)).await?
-                }
-            },
+            }
         }
         .and_then(|stream| {
             tracing::info!("connect {} via {}", target_addr, stream.local_addr()?);
@@ -504,7 +503,7 @@ impl Connector {
     fn assign_ipv4_from_extension(&self, cidr: Ipv4Cidr, extension: &Extension) -> Ipv4Addr {
         if let Some(combined) = self.combined(extension) {
             match extension {
-                Extension::TTL(_) | Extension::Session( _) => {
+                Extension::TTL(_) | Extension::Session(_) => {
                     // Calculate the subnet mask and apply it to ensure the base_ip is preserved in
                     // the non-variable part
                     let subnet_mask = !((1u32 << (32 - cidr.network_length())) - 1);
@@ -770,5 +769,17 @@ mod tests {
             println!("{}", ipv6_address1);
             println!("{}", ipv6_address2)
         }
+    }
+
+    #[test]
+    fn test_assign_ipv4_from_extension() {
+        let cidr = "2001:470:e953::/48".parse().unwrap();
+        let extension = Extension::Session(0x12345);
+        let connector = Connector::new(Some(IpCidr::V6(cidr)), None, None, 1000);
+        let ipv6_address = connector.assign_ipv6_from_extension(cidr, &extension);
+        assert_eq!(
+            ipv6_address,
+            std::net::Ipv6Addr::from([0x2001, 0x470, 0xe953, 0, 0, 0, 1, 0x2345])
+        );
     }
 }
