@@ -160,7 +160,7 @@ impl Handler {
         req: Request<Incoming>,
     ) -> Result<Response<BoxBody<Bytes, hyper::Error>>, Error> {
         // Check if the client is authorized
-        let extension = match self.inner.authenticator.authenticate(req.headers()).await {
+        let extension = match self.authenticator.authenticate(req.headers()).await {
             Ok(extension) => extension,
             // If the client is not authorized, return an error response
             Err(e) => return Ok(e.try_into()?),
@@ -201,8 +201,7 @@ impl Handler {
                 Ok(resp)
             }
         } else {
-            self.inner
-                .connector
+            self.connector
                 .http_connector()
                 .send_request(req, extension)
                 .await
@@ -220,8 +219,7 @@ impl Handler {
     ) -> std::io::Result<()> {
         let mut server = {
             let addrs = addr_str.to_socket_addrs()?;
-            self.inner
-                .connector
+            self.connector
                 .tcp_connector()
                 .connect_with_addrs(addrs, extension)
                 .await?
