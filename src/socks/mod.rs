@@ -82,10 +82,16 @@ async fn handle(conn: IncomingConnection, connector: Arc<Connector>) -> std::io:
             let target = match addr {
                 Address::DomainAddress(domain, port) => {
                     connector
+                        .tcp_connector()
                         .try_connect_with_domain((domain, port), extension)
                         .await
                 }
-                Address::SocketAddress(addr) => connector.try_connect(addr, &extension).await,
+                Address::SocketAddress(addr) => {
+                    connector
+                        .tcp_connector()
+                        .try_connect(addr, &extension)
+                        .await
+                }
             };
 
             if let Ok(mut target) = target {

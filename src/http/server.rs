@@ -209,7 +209,8 @@ impl Handler {
         } else {
             self.inner
                 .connector
-                .http_request(req, extension)
+                .http_connector()
+                .send_request(req, extension)
                 .await
                 .map(|res| res.map(|b| b.boxed()))
         }
@@ -227,6 +228,7 @@ impl Handler {
             let addrs = addr_str.to_socket_addrs()?;
             self.inner
                 .connector
+                .tcp_connector()
                 .try_connect_with_addrs(addrs, extension)
                 .await?
         };

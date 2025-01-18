@@ -3,7 +3,7 @@ use cidr::{IpCidr, Ipv4Cidr, Ipv6Cidr};
 use http::{Request, Response};
 use hyper::body::Incoming;
 use hyper_util::{
-    client::legacy::{connect::HttpConnector, Client},
+    client::legacy::{connect, Client},
     rt::{TokioExecutor, TokioTimer},
 };
 use rand::random;
@@ -31,9 +31,7 @@ pub struct Connector {
     /// Connect timeout in milliseconds.
     connect_timeout: Duration,
     /// Default http connector
-    http_connector: HttpConnector,
-    /// TTL Calculator
-    ttl: TTLCalculator,
+    http_connector: connect::HttpConnector,
 }
 
 impl Connector {
@@ -46,7 +44,7 @@ impl Connector {
         connect_timeout: u64,
     ) -> Self {
         let connect_timeout = Duration::from_secs(connect_timeout);
-        let mut http_connector = HttpConnector::new();
+        let mut http_connector = connect::HttpConnector::new();
         http_connector.set_connect_timeout(Some(connect_timeout));
         Connector {
             cidr,
@@ -54,92 +52,89 @@ impl Connector {
             fallback,
             connect_timeout,
             http_connector,
-            ttl: TTLCalculator,
         }
     }
 
-    /// Asynchronously creates and sends a new HTTP request with custom local
-    /// addresses.
+    /// Returns a new instance of `HttpConnector` configured with the same settings
+    /// as the current `Connector`.
     ///
-    /// This method constructs an `HttpConnector` and sets its local addresses
-    /// based on the provided CIDR and fallback IP configuration. It then
-    /// sends the request using a hyper `Client` and returns the response or
-    /// a `ProxyError` if the request fails.
-    ///
-    /// # Arguments
-    ///
-    /// * `req` - The incoming HTTP request to be forwarded.
-    /// * `extension` - Additional data used for setting local addresses based
-    ///   on CIDR.
+    /// This method clones the internal `HttpConnector` and copies the CIDR, CIDR range,
+    /// and fallback IP address settings from the current `Connector` instance.
     ///
     /// # Returns
     ///
-    /// A `Result` containing the HTTP response on success, or a `ProxyError` on
-    /// failure.
+    /// A new `HttpConnector` instance with the same configuration as the current `Connector`.
     ///
-    /// # Examples
+    /// # Example
     ///
-    /// ```rust
-    /// let response = proxy.new_http_request(request, extensions).await?;
     /// ```
-    ///
-    /// # Details
-    ///
-    /// The method checks the provided CIDR and fallback IP configuration and
-    /// sets the local addresses of the connector accordingly:
-    ///
-    /// * If both CIDR (IPv4) and fallback (IPv6) are provided, it assigns a
-    ///   local IPv4 address from the CIDR and sets both IPv4 and IPv6
-    ///   addresses.
-    /// * If only CIDR (IPv4) is provided, it assigns a local IPv4 address from
-    ///   the CIDR and sets it.
-    /// * If both CIDR (IPv6) and fallback (IPv4) are provided, it assigns a
-    ///   local IPv6 address from the CIDR and sets both IPv4 and IPv6
-    ///   addresses.
-    /// * If only CIDR (IPv6) is provided, it assigns a local IPv6 address from
-    ///   the CIDR and sets it.
-    /// * If no CIDR is provided but a fallback IP is present, it sets the
-    ///   fallback IP address.
-    ///
-    /// The request is sent with a timeout specified by `self.connect_timeout`.
-    pub async fn http_request(
-        &self,
-        req: Request<Incoming>,
-        extension: Extension,
-    ) -> Result<Response<Incoming>, Error> {
-        let mut connector = self.http_connector.clone();
-        match (self.cidr, self.fallback) {
-            (Some(IpCidr::V4(cidr)), Some(IpAddr::V6(v6))) => {
-                let v4 = self.assign_ipv4_from_extension(cidr, &extension);
-                connector.set_local_addresses(v4, v6);
-            }
-            (Some(IpCidr::V4(cidr)), None) => {
-                let v4 = self.assign_ipv4_from_extension(cidr, &extension);
-                connector.set_local_address(Some(v4.into()));
-            }
-            (Some(IpCidr::V6(cidr)), Some(IpAddr::V4(v4))) => {
-                let v6 = self.assign_ipv6_from_extension(cidr, &extension);
-                connector.set_local_addresses(v4, v6);
-            }
-            (Some(IpCidr::V6(cidr)), None) => {
-                let v6 = self.assign_ipv6_from_extension(cidr, &extension);
-                connector.set_local_address(Some(v6.into()));
-            }
-            (None, addr) => connector.set_local_address(addr),
-            _ => {}
+    /// let connector = Connector::new(Some(cidr), Some(cidr_range), Some(fallback), connect_timeout);
+    /// let http_connector = connector.http_connector();
+    /// ```
+    pub fn http_connector(&self) -> HttpConnector {
+        HttpConnector {
+            inner: self.http_connector.clone(),
+            cidr: self.cidr,
+            cidr_range: self.cidr_range,
+            fallback: self.fallback,
         }
-
-        let resp = Client::builder(TokioExecutor::new())
-            .timer(TokioTimer::new())
-            .http1_title_case_headers(true)
-            .http1_preserve_header_case(true)
-            .build(connector)
-            .request(req)
-            .await?;
-
-        Ok(resp)
     }
 
+    /// Returns a new instance of `TcpConnector` configured with the same settings
+    /// as the current `Connector`.
+    ///
+    /// This method copies the CIDR, CIDR range, fallback IP address, and connect timeout
+    /// settings from the current `Connector` instance.
+    ///
+    /// # Returns
+    ///
+    /// A new `TcpConnector` instance with the same configuration as the current `Connector`.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// let connector = Connector::new(Some(cidr), Some(cidr_range), Some(fallback), connect_timeout);
+    /// let tcp_connector = connector.tcp_connector();
+    /// ```
+    pub fn tcp_connector(&self) -> TcpConnector {
+        TcpConnector {
+            cidr: self.cidr,
+            cidr_range: self.cidr_range,
+            fallback: self.fallback,
+            connect_timeout: self.connect_timeout,
+        }
+    }
+}
+
+/// A `TcpConnector` is responsible for establishing TCP connections with
+/// the specified configuration settings.
+///
+/// The `TcpConnector` struct holds configuration settings such as CIDR,
+/// CIDR range, fallback IP address, and connection timeout. These settings
+/// are used to configure and establish TCP connections.
+///
+/// # Fields
+///
+/// * `cidr` - An optional CIDR range to assign the IP address from.
+/// * `cidr_range` - An optional CIDR range value.
+/// * `fallback` - An optional fallback IP address to use if the primary
+///   address assignment fails.
+/// * `connect_timeout` - The timeout duration for establishing a connection.
+///
+/// # Example
+///
+/// ```
+/// let connector = Connector::new(Some(cidr), Some(cidr_range), Some(fallback), connect_timeout);
+/// let tcp_connector = connector.tcp_connector();
+/// ```
+pub struct TcpConnector {
+    cidr: Option<IpCidr>,
+    cidr_range: Option<u8>,
+    fallback: Option<IpAddr>,
+    connect_timeout: Duration,
+}
+
+impl TcpConnector {
     /// Attempts to establish a TCP connection to each of the target addresses
     /// in the provided iterator using the provided extensions.
     ///
@@ -481,110 +476,104 @@ impl Connector {
         match cidr {
             IpCidr::V4(cidr) => {
                 let socket = TcpSocket::new_v4()?;
-                let bind = IpAddr::V4(self.assign_ipv4_from_extension(cidr, extension));
+                let bind = IpAddr::V4(assign_ipv4_from_extension(cidr, self.cidr_range, extension));
                 socket.bind(SocketAddr::new(bind, 0))?;
                 Ok(socket)
             }
             IpCidr::V6(cidr) => {
                 let socket = TcpSocket::new_v6()?;
-                let bind = IpAddr::V6(self.assign_ipv6_from_extension(cidr, extension));
+                let bind = IpAddr::V6(assign_ipv6_from_extension(cidr, self.cidr_range, extension));
                 socket.bind(SocketAddr::new(bind, 0))?;
                 Ok(socket)
             }
         }
     }
+}
 
-    /// Assigns an IPv4 address based on the provided CIDR and extension.
-    /// If the extension is a Session with an ID, the function generates a
-    /// deterministic IPv4 address within the CIDR range using a murmurhash of the
-    /// ID. The network part of the address is preserved, and the host part is
-    /// generated from the hash. If the extension is not a Session, the function
-    /// generates a random IPv4 address within the CIDR range.
-    fn assign_ipv4_from_extension(&self, cidr: Ipv4Cidr, extension: &Extension) -> Ipv4Addr {
-        if let Some(combined) = self.combined(extension) {
-            match extension {
-                Extension::TTL(_) | Extension::Session(_) => {
-                    // Calculate the subnet mask and apply it to ensure the base_ip is preserved in
-                    // the non-variable part
-                    let subnet_mask = !((1u32 << (32 - cidr.network_length())) - 1);
-                    let base_ip_bits = u32::from(cidr.first_address()) & subnet_mask;
-                    let capacity = 2u32.pow(32 - cidr.network_length() as u32) - 1;
-                    let ip_num = base_ip_bits | ((combined as u32) % capacity);
-                    return Ipv4Addr::from(ip_num);
-                }
-                Extension::Range(_) => {
-                    // If a CIDR range is provided, use it to assign an IP address
-                    if let Some(range) = self.cidr_range {
-                        return assign_ipv4_with_range(cidr, range, combined as u32);
-                    }
-                }
-                _ => {}
-            }
-        }
+/// A `HttpConnector` is responsible for establishing HTTP connections with
+/// the specified configuration settings.
+///
+/// The `HttpConnector` struct holds configuration settings such as CIDR,
+/// CIDR range, fallback IP address, and connection timeout. These settings
+/// are used to configure and establish HTTP connections.
+///
+/// # Fields
+///
+/// * `inner` - The internal `connect::HttpConnector` used for establishing connections.
+/// * `cidr` - An optional CIDR range to assign the IP address from.
+/// * `cidr_range` - An optional CIDR range value.
+/// * `fallback` - An optional fallback IP address to use if the primary
+///   address assignment fails.
+///
+/// # Example
+///
+/// ```
+/// let connector = Connector::new(Some(cidr), Some(cidr_range), Some(fallback), connect_timeout);
+/// let http_connector = connector.http_connector();
+/// ```
+pub struct HttpConnector {
+    inner: connect::HttpConnector,
+    cidr: Option<IpCidr>,
+    cidr_range: Option<u8>,
+    fallback: Option<IpAddr>,
+}
 
-        assign_rand_ipv4(cidr)
-    }
-
-    /// Assigns an IPv6 address based on the provided CIDR and extension.
-    /// If the extension is a Session with an ID, the function generates a
-    /// deterministic IPv6 address within the CIDR range using a murmurhash of the
-    /// ID. The network part of the address is preserved, and the host part is
-    /// generated from the hash. If the extension is not a Session, the function
-    /// generates a random IPv6 address within the CIDR range.
-    fn assign_ipv6_from_extension(&self, cidr: Ipv6Cidr, extension: &Extension) -> Ipv6Addr {
-        if let Some(combined) = self.combined(extension) {
-            match extension {
-                Extension::TTL(_) | Extension::Session(_) => {
-                    let network_length = cidr.network_length();
-                    // Calculate the subnet mask and apply it to ensure the base_ip is preserved in
-                    // the non-variable part
-                    let subnet_mask = !((1u128 << (128 - network_length)) - 1);
-                    let base_ip_bits = u128::from(cidr.first_address()) & subnet_mask;
-                    let capacity = 2u128.pow(128 - network_length as u32) - 1;
-                    let ip_num = base_ip_bits | (combined as u128 % capacity);
-                    return Ipv6Addr::from(ip_num);
-                }
-                Extension::Range(_) => {
-                    // If a range is provided, use it to assign an IP
-                    if let Some(range) = self.cidr_range {
-                        return assign_ipv6_with_range(cidr, range, combined as u128);
-                    }
-                }
-                _ => {}
-            }
-        }
-
-        assign_rand_ipv6(cidr)
-    }
-
-    /// Combines values from an `Extensions` variant into a single `u64` value.
+impl HttpConnector {
+    /// Sends an HTTP request using the configured `HttpConnector`.
     ///
-    /// This method processes an `Extensions` reference and attempts to combine its
-    /// contained values into a single `u64` value. The method of combination depends
-    /// on the specific variant of `Extensions`:
-    ///
-    /// - `Extensions::Session(a, b)`: Combines `a` and `b` into a single `u64` value
-    ///   using the `combine` function.
-    /// - `Extensions::TTL(ttl)`: Uses the `ttl_boundary` method of the `TTLCalculator`
-    ///   instance contained within `self` to calculate a boundary based on `ttl`, and
-    ///   converts the result to `u64`.
-    /// - For other variants of `Extensions`, it returns `None`.
+    /// This method sets the local addresses based on the provided CIDR and fallback IP address,
+    /// and then sends the HTTP request.
     ///
     /// # Arguments
     ///
-    /// * `extension` - A reference to the `Extensions` enum to be processed.
+    /// * `req` - The HTTP request to be sent.
+    /// * `extension` - The extension used to determine the local addresses.
     ///
     /// # Returns
     ///
-    /// Returns an `Option<u64>` which is `Some(combined_value)` if the operation
-    /// is applicable and successful, or `None` if the `extension` variant does not
-    fn combined(&self, extension: &Extension) -> Option<u64> {
-        match extension {
-            Extension::TTL(ttl) => Some(self.ttl.ttl_boundary(*ttl)),
-            Extension::Range(value) => Some(*value),
-            Extension::Session(value) => Some(*value),
-            _ => None,
+    /// A `Result` containing the HTTP response if the request was successful, or an `Error` if it failed.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// let connector = HttpConnector::new(Some(cidr), Some(cidr_range), Some(fallback));
+    /// let response = connector.send_request(request, extension).await?;
+    /// ```
+    pub async fn send_request(
+        self,
+        req: Request<Incoming>,
+        extension: Extension,
+    ) -> Result<Response<Incoming>, Error> {
+        let mut connector = self.inner;
+        match (self.cidr, self.fallback) {
+            (Some(IpCidr::V4(cidr)), Some(IpAddr::V6(v6))) => {
+                let v4 = assign_ipv4_from_extension(cidr, self.cidr_range, &extension);
+                connector.set_local_addresses(v4, v6);
+            }
+            (Some(IpCidr::V4(cidr)), None) => {
+                let v4 = assign_ipv4_from_extension(cidr, self.cidr_range, &extension);
+                connector.set_local_address(Some(v4.into()));
+            }
+            (Some(IpCidr::V6(cidr)), Some(IpAddr::V4(v4))) => {
+                let v6 = assign_ipv6_from_extension(cidr, self.cidr_range, &extension);
+                connector.set_local_addresses(v4, v6);
+            }
+            (Some(IpCidr::V6(cidr)), None) => {
+                let v6 = assign_ipv6_from_extension(cidr, self.cidr_range, &extension);
+                connector.set_local_address(Some(v6.into()));
+            }
+            (None, addr) => connector.set_local_address(addr),
+            _ => {}
         }
+
+        Client::builder(TokioExecutor::new())
+            .timer(TokioTimer::new())
+            .http1_title_case_headers(true)
+            .http1_preserve_header_case(true)
+            .build(connector)
+            .request(req)
+            .await
+            .map_err(Into::into)
     }
 }
 
@@ -616,6 +605,77 @@ fn error(last_err: Option<std::io::Error>) -> std::io::Error {
             "Failed to connect to any resolved address",
         ),
     }
+}
+
+/// Assigns an IPv4 address based on the provided CIDR and extension.
+/// If the extension is a Session with an ID, the function generates a
+/// deterministic IPv4 address within the CIDR range using a murmurhash of the
+/// ID. The network part of the address is preserved, and the host part is
+/// generated from the hash. If the extension is not a Session, the function
+/// generates a random IPv4 address within the CIDR range.
+fn assign_ipv4_from_extension(
+    cidr: Ipv4Cidr,
+    cidr_range: Option<u8>,
+    extension: &Extension,
+) -> Ipv4Addr {
+    if let Some(combined) = combined(extension) {
+        match extension {
+            Extension::TTL(_) | Extension::Session(_) => {
+                // Calculate the subnet mask and apply it to ensure the base_ip is preserved in
+                // the non-variable part
+                let subnet_mask = !((1u32 << (32 - cidr.network_length())) - 1);
+                let base_ip_bits = u32::from(cidr.first_address()) & subnet_mask;
+                let capacity = 2u32.pow(32 - cidr.network_length() as u32) - 1;
+                let ip_num = base_ip_bits | ((combined as u32) % capacity);
+                return Ipv4Addr::from(ip_num);
+            }
+            Extension::Range(_) => {
+                // If a CIDR range is provided, use it to assign an IP address
+                if let Some(range) = cidr_range {
+                    return assign_ipv4_with_range(cidr, range, combined as u32);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    assign_rand_ipv4(cidr)
+}
+
+/// Assigns an IPv6 address based on the provided CIDR and extension.
+/// If the extension is a Session with an ID, the function generates a
+/// deterministic IPv6 address within the CIDR range using a murmurhash of the
+/// ID. The network part of the address is preserved, and the host part is
+/// generated from the hash. If the extension is not a Session, the function
+/// generates a random IPv6 address within the CIDR range.
+fn assign_ipv6_from_extension(
+    cidr: Ipv6Cidr,
+    cidr_range: Option<u8>,
+    extension: &Extension,
+) -> Ipv6Addr {
+    if let Some(combined) = combined(extension) {
+        match extension {
+            Extension::TTL(_) | Extension::Session(_) => {
+                let network_length = cidr.network_length();
+                // Calculate the subnet mask and apply it to ensure the base_ip is preserved in
+                // the non-variable part
+                let subnet_mask = !((1u128 << (128 - network_length)) - 1);
+                let base_ip_bits = u128::from(cidr.first_address()) & subnet_mask;
+                let capacity = 2u128.pow(128 - network_length as u32) - 1;
+                let ip_num = base_ip_bits | (combined as u128 % capacity);
+                return Ipv6Addr::from(ip_num);
+            }
+            Extension::Range(_) => {
+                // If a range is provided, use it to assign an IP
+                if let Some(range) = cidr_range {
+                    return assign_ipv6_with_range(cidr, range, combined as u128);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    assign_rand_ipv6(cidr)
 }
 
 /// Generates a random IPv4 address within the specified subnet.
@@ -732,23 +792,42 @@ fn assign_ipv6_with_range(cidr: Ipv6Cidr, range: u8, combined: u128) -> Ipv6Addr
     Ipv6Addr::from(subnet_with_fixed | host_part)
 }
 
-#[derive(Clone)]
-pub struct TTLCalculator;
+/// Combines values from an `Extensions` variant into a single `u64` value.
+///
+/// This method processes an `Extensions` reference and attempts to combine its
+/// contained values into a single `u64` value. The method of combination depends
+/// on the specific variant of `Extensions`:
+///
+/// - `Extensions::Session(a, b)`: Combines `a` and `b` into a single `u64` value
+///   using the `combine` function.
+/// - `Extensions::TTL(ttl)`: Uses the `ttl_boundary` method of the `TTLCalculator`
+///   instance contained within `self` to calculate a boundary based on `ttl`, and
+///   converts the result to `u64`.
+/// - For other variants of `Extensions`, it returns `None`.
+///
+/// # Arguments
+///
+/// * `extension` - A reference to the `Extensions` enum to be processed.
+///
+/// # Returns
+///
+/// Returns an `Option<u64>` which is `Some(combined_value)` if the operation
+/// is applicable and successful, or `None` if the `extension` variant does not
+fn combined(extension: &Extension) -> Option<u64> {
+    match extension {
+        Extension::TTL(ttl) => {
+            let start = SystemTime::now();
+            let timestamp = start
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(rand::random());
 
-impl TTLCalculator {
-    pub fn ttl_boundary(&self, ttl: u64) -> u64 {
-        let start = SystemTime::now();
-        let timestamp = start
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(rand::random());
-
-        let time = self.calculate_ttl_boundary(timestamp, ttl);
-        fxhash::hash64(&time.to_be_bytes())
-    }
-
-    fn calculate_ttl_boundary(&self, timestamp: u64, ttl: u64) -> u64 {
-        timestamp - (timestamp % ttl)
+            let time = timestamp - (timestamp % *ttl);
+            Some(fxhash::hash64(&time.to_be_bytes()))
+        }
+        Extension::Range(value) => Some(*value),
+        Extension::Session(value) => Some(*value),
+        _ => None,
     }
 }
 
@@ -795,22 +874,10 @@ mod tests {
     fn test_assign_ipv4_from_extension() {
         let cidr = "2001:470:e953::/48".parse().unwrap();
         let extension = Extension::Session(0x12345);
-        let connector = Connector::new(Some(IpCidr::V6(cidr)), None, None, 1000);
-        let ipv6_address = connector.assign_ipv6_from_extension(cidr, &extension);
+        let ipv6_address = assign_ipv6_from_extension(cidr, None, &extension);
         assert_eq!(
             ipv6_address,
             std::net::Ipv6Addr::from([0x2001, 0x470, 0xe953, 0, 0, 0, 1, 0x2345])
         );
-    }
-
-    #[test]
-    fn test_get_current_stable_value_with_different_ttl() {
-        let calculator = TTLCalculator;
-
-        for _ in 0..10 {
-            std::thread::sleep(std::time::Duration::from_secs(1));
-            let result = calculator.ttl_boundary(2);
-            println!("Result: {}", result);
-        }
     }
 }
