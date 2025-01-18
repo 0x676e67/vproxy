@@ -10,7 +10,7 @@ use std::path::PathBuf;
 use tls::{RustlsAcceptor, RustlsConfig};
 
 pub async fn http_proxy(ctx: Context) -> crate::Result<()> {
-    tracing::info!("HTTP proxy server listening on {}", ctx.bind);
+    tracing::info!("Http proxy server listening on {}", ctx.bind);
 
     let mut server = Server::new(ctx)?;
     server
@@ -27,7 +27,7 @@ pub async fn https_proxy(
     tls_cert: Option<PathBuf>,
     tls_key: Option<PathBuf>,
 ) -> crate::Result<()> {
-    tracing::info!("HTTPS proxy server listening on {}", ctx.bind);
+    tracing::info!("Https proxy server listening on {}", ctx.bind);
 
     let config = match (tls_cert, tls_key) {
         (Some(cert), Some(key)) => RustlsConfig::from_pem_chain_file(cert, key),
