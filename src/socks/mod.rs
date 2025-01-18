@@ -32,11 +32,14 @@ use tracing::{instrument, Level};
 pub async fn proxy(ctx: Context) -> crate::Result<()> {
     tracing::info!("Socks5 server listening on {}", ctx.bind);
 
-    match (&ctx.auth.username, &ctx.auth.password) {
+    match (ctx.auth.username, ctx.auth.password) {
         (Some(username), Some(password)) => {
-            let auth = AuthAdaptor::new_password(username, password);
-            let server =
-                Server::bind_with_concurrency(ctx.bind, ctx.concurrent as u32, auth).await?;
+            let server = Server::bind_with_concurrency(
+                ctx.bind,
+                ctx.concurrent as u32,
+                AuthAdaptor::new_password(username, password),
+            )
+            .await?;
 
             event_loop(server, ctx.connector).await?;
         }
@@ -48,6 +51,7 @@ pub async fn proxy(ctx: Context) -> crate::Result<()> {
                 AuthAdaptor::new_no_auth(),
             )
             .await?;
+
             event_loop(server, ctx.connector).await?;
         }
     }
@@ -56,11 +60,10 @@ pub async fn proxy(ctx: Context) -> crate::Result<()> {
 }
 
 async fn event_loop(server: Server, connector: Connector) -> std::io::Result<()> {
-    let connector = Arc::new(connector);
-    while let Ok((conn, _)) = server.accept().await {
+    while let Ok((conn, socket_addr)) = server.accept().await {
         let connector = connector.clone();
         tokio::spawn(async move {
-            if let Err(err) = handle(conn, connector).await {
+            if let Err(err) = handle(conn, socket_addr, connector).await {
                 tracing::trace!("[SOCKS5] error: {}", err);
             }
         });
@@ -68,12 +71,16 @@ async fn event_loop(server: Server, connector: Connector) -> std::io::Result<()>
     Ok(())
 }
 
-async fn handle(conn: IncomingConnection, connector: Arc<Connector>) -> std::io::Result<()> {
+async fn handle(
+    conn: IncomingConnection,
+    socket_addr: SocketAddr,
+    connector: Connector,
+) -> std::io::Result<()> {
     let (conn, res) = conn.authenticate().await?;
     let (res, extension) = res?;
 
     if !res {
-        tracing::info!("authentication failed");
+        tracing::info!("[SOCKS5] authentication failed: {}", socket_addr);
         return Ok(());
     }
 
@@ -91,8 +98,9 @@ async fn handle(conn: IncomingConnection, connector: Arc<Connector>) -> std::io:
 }
 
 #[instrument(skip(connector, connect), level = Level::DEBUG)]
+#[inline]
 async fn hanlde_connect_proxy(
-    connector: Arc<Connector>,
+    connector: Connector,
     connect: Connect<connect::NeedReply>,
     addr: Address,
     extension: Extension,
@@ -141,8 +149,9 @@ async fn hanlde_connect_proxy(
 }
 
 #[instrument(skip(connector, associate), level = Level::DEBUG)]
+#[inline]
 async fn handle_udp_proxy(
-    connector: Arc<Connector>,
+    connector: Connector,
     associate: UdpAssociate<associate::NeedReply>,
     _: Address,
     extension: Extension,
@@ -283,16 +292,16 @@ async fn handle_udp_proxy(
 ///
 /// A `Result` indicating success or failure.
 #[instrument(skip(connector, bind, _addr), level = Level::DEBUG)]
+#[inline]
 async fn hanlde_bind_proxy(
-    connector: Arc<Connector>,
+    connector: Connector,
     bind: Bind<bind::NeedFirstReply>,
     _addr: Address,
     extension: Extension,
 ) -> std::io::Result<()> {
-    let listen_ip = bind.local_addr()?.ip();
     let listen_ip = connector
         .tcp_connector()
-        .bind_socket_addr(listen_ip, extension);
+        .bind_socket_addr(|| bind.local_addr().map(|socket| socket.ip()), extension)?;
     let listener = TcpListener::bind(listen_ip).await?;
 
     let conn = bind

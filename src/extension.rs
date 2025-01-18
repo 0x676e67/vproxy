@@ -14,6 +14,7 @@ impl Extension {
     const EXTENSION_SESSION: &'static str = "-session-";
     const EXTENSION_RANGE_SESSION: &'static str = "-range-";
 
+    #[inline]
     pub async fn try_from<O>(prefix: &str, full: O) -> crate::Result<Extension>
     where
         O: Into<String>,
@@ -28,6 +29,7 @@ impl Extension {
 
 /// This function takes a tuple of two strings as input: a prefix (the username)
 /// and a string `full` (the username-session-id).
+#[inline]
 fn parser(prefix: String, full: String) -> Extension {
     // If it does, remove the prefix from `s`.
     if let Some(extracted_tag) = full.strip_prefix(&prefix) {
@@ -58,6 +60,7 @@ fn parser(prefix: String, full: String) -> Extension {
             return extension;
         }
     }
+
     // If the string `s` does not start with the prefix, or if the remaining string
     // after removing the prefix and "-" is empty, return the `None` variant
     // of `Extensions`.
@@ -87,6 +90,7 @@ fn parser(prefix: String, full: String) -> Extension {
 /// This function returns an `Option<Extensions>`. If the string starts with the
 /// prefix, it returns `Some(Extensions)`. Otherwise, it returns `None`.
 #[tracing::instrument(level = "trace", skip(handler))]
+#[inline]
 fn parse_extension(
     trim: bool,
     s: &str,
@@ -113,6 +117,7 @@ fn parse_extension(
 /// This function returns an `Extensions` enum.
 /// If the string is empty, it returns `Extensions::None`.
 /// If the string is not empty, it returns `Extensions::Range(a, b)`.
+#[inline(always)]
 fn parse_range_extension(s: &str) -> Extension {
     let hash = fxhash::hash64(s.as_bytes());
     Extension::Range(hash)
@@ -138,6 +143,7 @@ fn parse_range_extension(s: &str) -> Extension {
 /// This function returns an `Extensions` enum. If the string is not empty, it
 /// will return a `Extensions::Session` variant containing a tuple `(a, b)`.
 /// Otherwise, it will return `Extensions::None`.
+#[inline(always)]
 fn parse_session_extension(s: &str) -> Extension {
     let hash = fxhash::hash64(s.as_bytes());
     Extension::Session(hash)
@@ -159,6 +165,7 @@ fn parse_session_extension(s: &str) -> Extension {
 /// Returns an `Extensions` enum variant. If parsing is successful, returns
 /// `Extensions::Session` with the TTL value and `1`. Otherwise, returns
 /// `Extensions::None`.
+#[inline(always)]
 fn parse_ttl_extension(s: &str) -> Extension {
     if let Ok(ttl) = s.parse::<u64>() {
         return Extension::TTL(ttl);

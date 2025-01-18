@@ -25,7 +25,10 @@ impl AuthAdaptor {
         Self::NoAuth(NoAuth)
     }
 
-    pub fn new_password(username: &str, password: &str) -> Self {
+    pub fn new_password<S>(username: S, password: S) -> Self
+    where
+        S: Into<String>,
+    {
         Self::Password(PasswordAuth::new(username, password))
     }
 }
@@ -65,15 +68,18 @@ impl Auth for NoAuth {
 
 /// Username and password as the socks5 handshake method.
 pub struct PasswordAuth {
-    user_pass: UsernamePassword,
+    inner: UsernamePassword,
 }
 
 impl PasswordAuth {
     /// Creates a new `Password` instance with the given username, password, and
     /// IP whitelist.
-    pub fn new(username: &str, password: &str) -> Self {
+    pub fn new<S>(username: S, password: S) -> Self
+    where
+        S: Into<String>,
+    {
         Self {
-            user_pass: UsernamePassword::new(username, password),
+            inner: UsernamePassword::new(username, password),
         }
     }
 }
@@ -89,13 +95,13 @@ impl Auth for PasswordAuth {
         let req = Request::retrieve_from_async_stream(stream).await?;
 
         // Check if the username and password are correct
-        let is_equal = req.user_pass.username.starts_with(&self.user_pass.username)
-            && req.user_pass.password.eq(&self.user_pass.password);
+        let is_equal = req.user_pass.username.starts_with(&self.inner.username)
+            && req.user_pass.password.eq(&self.inner.password);
 
         let resp = Response::new(if is_equal { Succeeded } else { Failed });
         resp.write_to_async_stream(stream).await?;
         if is_equal {
-            let extension = Extension::try_from(&self.user_pass.username, req.user_pass.username)
+            let extension = Extension::try_from(&self.inner.username, req.user_pass.username)
                 .await
                 .map_err(|_| Error::new(ErrorKind::Other, "failed to parse extension"))?;
 

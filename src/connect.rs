@@ -24,12 +24,16 @@ pub struct Connector {
     /// Optional IPv6 CIDR (Classless Inter-Domain Routing), used to optionally
     /// configure an IPv6 address.
     cidr: Option<IpCidr>,
+
     /// Optional CIDR range for IP addresses.
     cidr_range: Option<u8>,
+
     /// Optional IP address as a fallback option in case of connection failure.
     fallback: Option<IpAddr>,
+
     /// Connect timeout in milliseconds.
     connect_timeout: Duration,
+
     /// Default http connector
     http: connect::HttpConnector,
 }
@@ -164,9 +168,15 @@ impl TcpConnector<'_> {
     /// let tcp_connector = TcpConnector { inner: &connector };
     /// let socket_addr = tcp_connector.bind_socket_addr(default_ip, extension);
     /// ```
-    pub fn bind_socket_addr(&self, default: IpAddr, extension: Extension) -> SocketAddr {
+    pub fn bind_socket_addr<F>(
+        &self,
+        default: F,
+        extension: Extension,
+    ) -> std::io::Result<SocketAddr>
+    where
+        F: FnOnce() -> std::io::Result<IpAddr>,
+    {
         match (self.inner.cidr, self.inner.fallback) {
-            (None, Some(fallback)) => SocketAddr::new(fallback, 0),
             (Some(cidr), _) => match cidr {
                 IpCidr::V4(cidr) => {
                     let ip = IpAddr::V4(assign_ipv4_from_extension(
@@ -174,7 +184,7 @@ impl TcpConnector<'_> {
                         self.inner.cidr_range,
                         &extension,
                     ));
-                    SocketAddr::new(ip, 0)
+                    Ok(SocketAddr::new(ip, 0))
                 }
                 IpCidr::V6(cidr) => {
                     let ip = IpAddr::V6(assign_ipv6_from_extension(
@@ -182,10 +192,11 @@ impl TcpConnector<'_> {
                         self.inner.cidr_range,
                         &extension,
                     ));
-                    SocketAddr::new(ip, 0)
+                    Ok(SocketAddr::new(ip, 0))
                 }
             },
-            _ => SocketAddr::new(default, 0),
+            (None, Some(fallback)) => Ok(SocketAddr::new(fallback, 0)),
+            _ => default().map(|ip| SocketAddr::new(ip, 0)),
         }
     }
 
@@ -256,6 +267,7 @@ impl TcpConnector<'_> {
     /// This function returns a `std::io::Result<TcpStream>`. If a connection is
     /// successfully established, it returns `Ok(stream)`. If there is an
     /// error at any step, it returns the error in the `Result`.
+    #[inline]
     pub async fn connect_with_domain(
         &self,
         host: (String, u16),
@@ -365,6 +377,7 @@ impl TcpConnector<'_> {
     /// This function returns a `std::io::Result<TcpStream>`. If a connection is
     /// successfully established, it returns `Ok(stream)`. If there is an error at
     /// any step, it returns the error in the `Result`.
+    #[inline]
     async fn connect_with_cidr(
         &self,
         target_addr: SocketAddr,
@@ -397,6 +410,7 @@ impl TcpConnector<'_> {
     /// This function returns a `std::io::Result<TcpStream>`. If a connection is
     /// successfully established, it returns `Ok(stream)`. If there is an error at
     /// any step, it returns the error in the `Result`.
+    #[inline]
     async fn connect_with_addr(
         &self,
         target_addr: SocketAddr,
@@ -574,6 +588,7 @@ impl UdpConnector<'_> {
     /// This function returns a `std::io::Result<UdpSocket>`. If the socket is
     /// successfully created and bound, it returns `Ok(socket)`. If there is an
     /// error creating or binding the socket, it returns the error in the `Result`.
+    #[inline]
     async fn create_socket_with_addr(&self, ip: IpAddr) -> std::io::Result<UdpSocket> {
         UdpSocket::bind(SocketAddr::new(ip, 0)).await
     }
