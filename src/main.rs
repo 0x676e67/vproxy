@@ -102,7 +102,7 @@ pub enum Proxy {
 #[derive(Args, Clone)]
 pub struct BootArgs {
     /// Log level e.g. trace, debug, info, warn, error
-    #[clap(long, env = "VPROXY_", default_value = "info")]
+    #[clap(long, env = "VPROXY_LOG", default_value = "info")]
     log: tracing::Level,
 
     /// Bind address
