@@ -18,13 +18,10 @@ use server::{
     },
     AuthAdaptor,
 };
-use std::{
-    net::{SocketAddr, ToSocketAddrs},
-    sync::Arc,
-};
+use std::{net::SocketAddr, sync::Arc};
 use tokio::{
     io::AsyncWriteExt,
-    net::{TcpListener, UdpSocket},
+    net::{lookup_host, TcpListener, UdpSocket},
     sync::RwLock,
 };
 use tracing::{instrument, Level};
@@ -112,7 +109,12 @@ async fn hanlde_connect_proxy(
                 .connect_with_domain((domain, port), extension)
                 .await
         }
-        Address::SocketAddress(addr) => connector.tcp_connector().connect(addr, &extension).await,
+        Address::SocketAddress(socket_addr) => {
+            connector
+                .tcp_connector()
+                .connect(socket_addr, &extension)
+                .await
+        }
     };
 
     match target_stream {
@@ -170,7 +172,7 @@ async fn handle_udp_proxy(
                 .await?;
 
             let buf_size = MAX_UDP_RELAY_PACKET_SIZE - UdpHeader::max_serialized_len();
-            let listen_udp = Arc::new(AssociatedUdpSocket::from((udp_socket, buf_size)));
+            let listen_udp = AssociatedUdpSocket::from((udp_socket, buf_size));
 
             let incoming_addr = Arc::new(RwLock::new(SocketAddr::from(([0, 0, 0, 0], 0))));
             let dispatch_socket = connector.udp_connector().bind_socket(extension).await?;
@@ -186,10 +188,24 @@ async fn handle_udp_proxy(
                             return Err("[UDP] packet fragment is not supported".into());
                         }
                         *incoming_addr.write().await = src_addr;
-
                         tracing::trace!("[UDP] {src_addr} -> {dst_addr} incoming packet size {}", pkt.len());
-                        let dst_addr = dst_addr.to_socket_addrs()?.next().ok_or("Invalid address")?;
-                        dispatch_socket.send_to(&pkt, dst_addr).await?;
+
+                        match dst_addr {
+                            Address::SocketAddress(dst_addr) => {
+                                tracing::trace!("[UDP] {src_addr} -> {dst_addr} dispatch packet");
+                                dispatch_socket.send_to(&pkt, dst_addr).await?;
+                            }
+                            Address::DomainAddress(domain, port) => {
+                                for dst_addr in lookup_host((domain, port)).await? {
+                                    tracing::trace!("[UDP] {src_addr} -> {dst_addr} dispatch packet");
+                                    let res = dispatch_socket.send_to(&pkt, dst_addr).await;
+                                    if res.is_ok() {
+                                        break;
+                                    }
+                                }
+                            }
+                        };
+
                         Ok::<_, Error>(())
                     } => {
                         if res.is_err() {
