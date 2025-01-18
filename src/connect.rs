@@ -13,7 +13,7 @@ use std::{
     time::Duration,
 };
 use tokio::{
-    net::{lookup_host, TcpSocket, TcpStream},
+    net::{lookup_host, TcpSocket, TcpStream, UdpSocket},
     time::timeout,
 };
 
@@ -96,6 +96,22 @@ impl Connector {
     pub fn tcp_connector(&self) -> TcpConnector {
         TcpConnector { inner: self }
     }
+
+    /// Returns a new instance of `UdpConnector` configured with the same settings
+    /// as the current `Connector`.
+    /// This method copies the CIDR, CIDR range, fallback IP address, and connect timeout
+    /// settings from the current `Connector` instance.
+    /// # Returns
+    /// A new `UdpConnector` instance with the same configuration as the current `Connector`.
+    /// # Example
+    /// ```
+    /// let connector = Connector::new(Some(cidr), Some(cidr_range), Some(fallback), connect_timeout);
+    /// let udp_connector = connector.udp_connector();
+    /// ```
+    #[inline(always)]
+    pub fn udp_connector(&self) -> UdpConnector {
+        UdpConnector { inner: self }
+    }
 }
 
 /// A `TcpConnector` is responsible for establishing TCP connections with
@@ -148,7 +164,7 @@ impl TcpConnector<'_> {
     /// This function returns a `std::io::Result<TcpStream>`. If a connection is
     /// successfully established, it returns `Ok(stream)`. If there is an
     /// error at any step, it returns the error in the `Result`.
-    pub async fn try_connect_with_addrs(
+    pub async fn connect_with_addrs(
         &self,
         addrs: impl IntoIterator<Item = SocketAddr>,
         extension: Extension,
@@ -156,7 +172,7 @@ impl TcpConnector<'_> {
         let mut last_err = None;
 
         for target_addr in addrs {
-            match self.try_connect(target_addr, &extension).await {
+            match self.connect(target_addr, &extension).await {
                 Ok(stream) => return Ok(stream),
                 Err(e) => last_err = Some(e),
             };
@@ -191,13 +207,13 @@ impl TcpConnector<'_> {
     /// This function returns a `std::io::Result<TcpStream>`. If a connection is
     /// successfully established, it returns `Ok(stream)`. If there is an
     /// error at any step, it returns the error in the `Result`.
-    pub async fn try_connect_with_domain(
+    pub async fn connect_with_domain(
         &self,
         host: (String, u16),
         extension: Extension,
     ) -> std::io::Result<TcpStream> {
         let addrs = lookup_host(host).await?;
-        self.try_connect_with_addrs(addrs, extension).await
+        self.connect_with_addrs(addrs, extension).await
     }
 
     /// Attempts to establish a TCP connection to the target address using the
@@ -238,44 +254,35 @@ impl TcpConnector<'_> {
     /// This function returns a `std::io::Result<TcpStream>`. If a connection is
     /// successfully established, it returns `Ok(stream)`. If there is an
     /// error at any step, it returns the error in the `Result`.
-    pub async fn try_connect(
+    pub async fn connect(
         &self,
         target_addr: SocketAddr,
         extension: &Extension,
     ) -> std::io::Result<TcpStream> {
-        match extension {
-            Extension::None | Extension::Range(_) | Extension::Session(_) | Extension::TTL(_) => {
-                match (self.inner.cidr, self.inner.fallback) {
-                    (None, Some(fallback)) => {
-                        timeout(
-                            self.inner.connect_timeout,
-                            self.try_connect_with_addr(target_addr, fallback),
-                        )
-                        .await?
-                    }
-                    (Some(cidr), None) => {
-                        timeout(
-                            self.inner.connect_timeout,
-                            self.try_connect_with_cidr(target_addr, cidr, extension),
-                        )
-                        .await?
-                    }
-                    (Some(cidr), Some(fallback)) => {
-                        timeout(
-                            self.inner.connect_timeout,
-                            self.try_connect_with_cidr_and_fallback(
-                                target_addr,
-                                cidr,
-                                fallback,
-                                extension,
-                            ),
-                        )
-                        .await?
-                    }
-                    (None, None) => {
-                        timeout(self.inner.connect_timeout, TcpStream::connect(target_addr)).await?
-                    }
-                }
+        match (self.inner.cidr, self.inner.fallback) {
+            (None, Some(fallback)) => {
+                timeout(
+                    self.inner.connect_timeout,
+                    self.connect_with_addr(target_addr, fallback),
+                )
+                .await?
+            }
+            (Some(cidr), None) => {
+                timeout(
+                    self.inner.connect_timeout,
+                    self.connect_with_cidr(target_addr, cidr, extension),
+                )
+                .await?
+            }
+            (Some(cidr), Some(fallback)) => {
+                timeout(
+                    self.inner.connect_timeout,
+                    self.connect_with_cidr_and_fallback(target_addr, cidr, fallback, extension),
+                )
+                .await?
+            }
+            (None, None) => {
+                timeout(self.inner.connect_timeout, TcpStream::connect(target_addr)).await?
             }
         }
         .and_then(|stream| {
@@ -309,7 +316,7 @@ impl TcpConnector<'_> {
     /// This function returns a `std::io::Result<TcpStream>`. If a connection is
     /// successfully established, it returns `Ok(stream)`. If there is an error at
     /// any step, it returns the error in the `Result`.
-    async fn try_connect_with_cidr(
+    async fn connect_with_cidr(
         &self,
         target_addr: SocketAddr,
         cidr: IpCidr,
@@ -341,7 +348,7 @@ impl TcpConnector<'_> {
     /// This function returns a `std::io::Result<TcpStream>`. If a connection is
     /// successfully established, it returns `Ok(stream)`. If there is an error at
     /// any step, it returns the error in the `Result`.
-    async fn try_connect_with_addr(
+    async fn connect_with_addr(
         &self,
         target_addr: SocketAddr,
         fallback: IpAddr,
@@ -380,21 +387,18 @@ impl TcpConnector<'_> {
     /// This function returns a `std::io::Result<TcpStream>`. If a connection is
     /// successfully established, it returns `Ok(stream)`. If there is an error at
     /// any step, it returns the error in the `Result`.
-    async fn try_connect_with_cidr_and_fallback(
+    async fn connect_with_cidr_and_fallback(
         &self,
         target_addr: SocketAddr,
         cidr: IpCidr,
         fallback: IpAddr,
         extension: &Extension,
     ) -> std::io::Result<TcpStream> {
-        match self
-            .try_connect_with_cidr(target_addr, cidr, extension)
-            .await
-        {
+        match self.connect_with_cidr(target_addr, cidr, extension).await {
             Ok(first) => Ok(first),
             Err(err) => {
                 tracing::debug!("try connect with ipv6 failed: {}", err);
-                self.try_connect_with_addr(target_addr, fallback).await
+                self.connect_with_addr(target_addr, fallback).await
             }
         }
     }
@@ -482,6 +486,127 @@ impl TcpConnector<'_> {
                 ));
                 socket.bind(SocketAddr::new(bind, 0))?;
                 Ok(socket)
+            }
+        }
+    }
+}
+
+pub struct UdpConnector<'a> {
+    inner: &'a Connector,
+}
+
+impl UdpConnector<'_> {
+    pub async fn bind_socket(&self, extension: Extension) -> std::io::Result<UdpSocket> {
+        match (self.inner.cidr, self.inner.fallback) {
+            (None, Some(fallback)) => self.create_socket_with_addr(fallback).await,
+            (Some(cidr), None) => self.create_socket_with_cidr(cidr, &extension).await,
+            (Some(cidr), Some(fallback)) => {
+                self.create_socket_with_cidr_and_fallback(cidr, fallback, &extension)
+                    .await
+            }
+            (None, None) => UdpSocket::bind(SocketAddr::from(([0, 0, 0, 0], 0))).await,
+        }
+    }
+
+    /// Creates a UDP socket and binds it to the provided IP address.
+    ///
+    /// This function takes an `IpAddr` reference as an argument and creates a new
+    /// UDP socket based on the IP version. If the IP address is IPv4, it creates a
+    /// new IPv4 socket. If the IP address is IPv6, it creates a new IPv6 socket.
+    /// After creating the socket, it binds the socket to the provided IP address on
+    /// port 0.
+    ///
+    /// # Arguments
+    ///
+    /// * `ip` - A reference to the IP address to bind the socket to.
+    ///
+    /// # Returns
+    ///
+    /// This function returns a `std::io::Result<UdpSocket>`. If the socket is
+    /// successfully created and bound, it returns `Ok(socket)`. If there is an
+    /// error creating or binding the socket, it returns the error in the `Result`.
+    async fn create_socket_with_addr(&self, ip: IpAddr) -> std::io::Result<UdpSocket> {
+        UdpSocket::bind(SocketAddr::new(ip, 0)).await
+    }
+
+    /// Creates a UDP socket and binds it to an IP address within the provided CIDR
+    /// range.
+    ///
+    /// This function takes an `IpCidr` and an `Extensions` reference as arguments.
+    /// It creates a new UDP socket based on the IP version of the CIDR. If the CIDR
+    /// is IPv4, it creates a new IPv4 socket and assigns an IPv4 address from the
+    /// CIDR range using the `assign_ipv4_from_extension` function. If the CIDR is
+    /// IPv6, it creates a new IPv6 socket and assigns an IPv6 address from the CIDR
+    /// range using the `assign_ipv6_from_extension` function. After creating the
+    /// socket and assigning the IP address, it binds the socket to the assigned IP
+    /// address on port 0.
+    ///
+    /// # Arguments
+    ///
+    /// * `cidr` - The CIDR range to assign the IP address from.
+    /// * `extension` - A reference to the extensions to use when assigning the IP
+    ///   address.
+    ///
+    /// # Returns
+    ///
+    /// This function returns a `std::io::Result<UdpSocket>`. If the socket is
+    /// successfully created, assigned an IP address, and bound, it returns
+    /// `Ok(socket)`. If there is an error at any step, it returns the error in the
+    /// `Result`.
+    async fn create_socket_with_cidr(
+        &self,
+        cidr: IpCidr,
+        extension: &Extension,
+    ) -> std::io::Result<UdpSocket> {
+        match cidr {
+            IpCidr::V4(cidr) => {
+                let bind = IpAddr::V4(assign_ipv4_from_extension(
+                    cidr,
+                    self.inner.cidr_range,
+                    extension,
+                ));
+                UdpSocket::bind(SocketAddr::new(bind, 0)).await
+            }
+            IpCidr::V6(cidr) => {
+                let bind = IpAddr::V6(assign_ipv6_from_extension(
+                    cidr,
+                    self.inner.cidr_range,
+                    extension,
+                ));
+                UdpSocket::bind(SocketAddr::new(bind, 0)).await
+            }
+        }
+    }
+
+    /// Creates a UDP socket and binds it to an IP address within the provided CIDR
+    /// range. If the binding fails, it falls back to using the provided fallback IP
+    /// address.
+    /// This function takes an `IpCidr` for the CIDR range, an `IpAddr` for the fallback
+    /// IP address, and an `Extensions` reference for assigning the IP address. It first
+    /// creates a socket and assigns an IP address from the CIDR range using the
+    /// `create_socket_with_cidr` function. It then attempts to bind the socket to the
+    /// assigned IP address. If the binding is successful, it returns the bound `UdpSocket`.
+    /// If the binding fails, it logs the error and then attempts to bind the socket to the
+    /// fallback IP address using the `create_socket_with_addr` function.
+    /// # Arguments
+    /// * `cidr` - The CIDR range to assign the IP address from.
+    /// * `fallback` - The fallback IP address to use if the binding fails.
+    /// * `extension` - A reference to the extensions to use when assigning the IP address.
+    /// # Returns
+    /// This function returns a `std::io::Result<UdpSocket>`. If the socket is successfully
+    /// created, assigned an IP address, and bound, it returns `Ok(socket)`. If there is an
+    /// error at any step, it returns the error in the `Result`.
+    async fn create_socket_with_cidr_and_fallback(
+        &self,
+        cidr: IpCidr,
+        fallback: IpAddr,
+        extension: &Extension,
+    ) -> std::io::Result<UdpSocket> {
+        match self.create_socket_with_cidr(cidr, extension).await {
+            Ok(first) => Ok(first),
+            Err(err) => {
+                tracing::debug!("try connect with ipv6 failed: {}", err);
+                self.create_socket_with_addr(fallback).await
             }
         }
     }

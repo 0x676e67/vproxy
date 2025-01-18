@@ -9,14 +9,18 @@ use self::{
         ClientConnection, IncomingConnection, Server, UdpAssociate,
     },
 };
-use crate::{connect::Connector, serve::Context};
+use crate::{connect::Connector, extension::Extension, serve::Context};
 use error::Error;
-use server::AuthAdaptor;
+use server::{
+    connection::connect::{self, Connect},
+    AuthAdaptor,
+};
 use std::{
     net::{SocketAddr, ToSocketAddrs},
     sync::Arc,
 };
-use tokio::{net::UdpSocket, sync::Mutex};
+use tokio::{net::UdpSocket, sync::RwLock};
+use tracing::{instrument, Level};
 
 pub async fn proxy(ctx: Context) -> crate::Result<()> {
     tracing::info!("Socks5 server listening on {}", ctx.bind);
@@ -44,8 +48,6 @@ pub async fn proxy(ctx: Context) -> crate::Result<()> {
     Ok(())
 }
 
-const MAX_UDP_RELAY_PACKET_SIZE: usize = 1500;
-
 async fn event_loop(server: Server, connector: Connector) -> std::io::Result<()> {
     let connector = Arc::new(connector);
     while let Ok((conn, _)) = server.accept().await {
@@ -69,83 +71,94 @@ async fn handle(conn: IncomingConnection, connector: Arc<Connector>) -> std::io:
     }
 
     match conn.wait_request().await? {
-        ClientConnection::UdpAssociate(associate, _) => {
-            handle_s5_upd_associate(associate).await?;
+        ClientConnection::Connect(connect, addr) => {
+            hanlde_tcp_proxy(connector, connect, addr, extension).await
+        }
+        ClientConnection::UdpAssociate(associate, addr) => {
+            handle_udp_proxy(connector, associate, addr, extension).await
         }
         ClientConnection::Bind(bind, _) => {
             let mut conn = bind
                 .reply(Reply::CommandNotSupported, Address::unspecified())
                 .await?;
-            conn.shutdown().await?;
-        }
-        ClientConnection::Connect(connect, addr) => {
-            let target = match addr {
-                Address::DomainAddress(domain, port) => {
-                    connector
-                        .tcp_connector()
-                        .try_connect_with_domain((domain, port), extension)
-                        .await
-                }
-                Address::SocketAddress(addr) => {
-                    connector
-                        .tcp_connector()
-                        .try_connect(addr, &extension)
-                        .await
-                }
-            };
-
-            if let Ok(mut target) = target {
-                let mut conn = connect
-                    .reply(Reply::Succeeded, Address::unspecified())
-                    .await?;
-                let (from_client, from_server) =
-                    tokio::io::copy_bidirectional(&mut target, &mut conn).await?;
-                tracing::debug!(
-                    "client wrote {} bytes and received {} bytes",
-                    from_client,
-                    from_server
-                );
-            } else {
-                let mut conn = connect
-                    .reply(Reply::HostUnreachable, Address::unspecified())
-                    .await?;
-                conn.shutdown().await?;
-            }
+            conn.shutdown().await
         }
     }
-
-    Ok(())
 }
 
-async fn handle_s5_upd_associate(
-    associate: UdpAssociate<associate::NeedReply>,
+#[instrument(skip(connector, connect), level = Level::DEBUG)]
+async fn hanlde_tcp_proxy(
+    connector: Arc<Connector>,
+    connect: Connect<connect::NeedReply>,
+    addr: Address,
+    extension: Extension,
 ) -> std::io::Result<()> {
-    // listen on a random port
-    let listen_ip = associate.local_addr()?.ip();
-    let udp_listener = UdpSocket::bind(SocketAddr::from((listen_ip, 0))).await;
+    let target_stream = match addr {
+        Address::DomainAddress(domain, port) => {
+            connector
+                .tcp_connector()
+                .connect_with_domain((domain, port), extension)
+                .await
+        }
+        Address::SocketAddress(addr) => connector.tcp_connector().connect(addr, &extension).await,
+    };
 
-    match udp_listener.and_then(|socket| socket.local_addr().map(|addr| (socket, addr))) {
+    match target_stream {
+        Ok(mut target_stream) => {
+            let mut conn = connect
+                .reply(Reply::Succeeded, Address::unspecified())
+                .await?;
+
+            match tokio::io::copy_bidirectional(&mut target_stream, &mut conn).await {
+                Ok((from_client, from_server)) => {
+                    tracing::trace!(
+                        "[TCP] client wrote {} bytes and received {} bytes",
+                        from_client,
+                        from_server
+                    );
+                }
+                Err(err) => {
+                    tracing::trace!("[TCP] tunnel error: {}", err);
+                }
+            };
+            Ok(())
+        }
         Err(err) => {
-            let mut conn = associate
-                .reply(Reply::GeneralFailure, Address::unspecified())
+            let mut conn = connect
+                .reply(Reply::HostUnreachable, Address::unspecified())
                 .await?;
             conn.shutdown().await?;
             Err(err)
         }
-        Ok((listen_udp, listen_addr)) => {
+    }
+}
+
+#[instrument(skip(connector, associate), level = Level::DEBUG)]
+async fn handle_udp_proxy(
+    connector: Arc<Connector>,
+    associate: UdpAssociate<associate::NeedReply>,
+    addr: Address,
+    extension: Extension,
+) -> std::io::Result<()> {
+    const MAX_UDP_RELAY_PACKET_SIZE: usize = 1500;
+
+    // listen on a random port
+    let listen_ip = associate.local_addr()?.ip();
+    let udp_socket = UdpSocket::bind(SocketAddr::from((listen_ip, 0))).await;
+
+    match udp_socket.and_then(|socket| socket.local_addr().map(|addr| (socket, addr))) {
+        Ok((udp_socket, listen_addr)) => {
             tracing::info!("[UDP] {listen_addr} listen on");
 
-            let s5_listen_addr = Address::from(listen_addr);
-            let mut reply_listener = associate.reply(Reply::Succeeded, s5_listen_addr).await?;
+            let mut reply_listener = associate
+                .reply(Reply::Succeeded, Address::from(listen_addr))
+                .await?;
 
             let buf_size = MAX_UDP_RELAY_PACKET_SIZE - UdpHeader::max_serialized_len();
-            let listen_udp = Arc::new(AssociatedUdpSocket::from((listen_udp, buf_size)));
+            let listen_udp = Arc::new(AssociatedUdpSocket::from((udp_socket, buf_size)));
 
-            let zero_addr = SocketAddr::from(([0, 0, 0, 0], 0));
-
-            let incoming_addr = Arc::new(Mutex::new(zero_addr));
-
-            let dispatch_socket = UdpSocket::bind(zero_addr).await?;
+            let incoming_addr = Arc::new(RwLock::new(SocketAddr::from(([0, 0, 0, 0], 0))));
+            let dispatch_socket = connector.udp_connector().bind_socket(extension).await?;
 
             let res = loop {
                 tokio::select! {
@@ -157,8 +170,7 @@ async fn handle_s5_upd_associate(
                         if frag != 0 {
                             return Err("[UDP] packet fragment is not supported".into());
                         }
-
-                        *incoming_addr.lock().await = src_addr;
+                        *incoming_addr.write().await = src_addr;
 
                         tracing::trace!("[UDP] {src_addr} -> {dst_addr} incoming packet size {}", pkt.len());
                         let dst_addr = dst_addr.to_socket_addrs()?.next().ok_or("Invalid address")?;
@@ -172,8 +184,9 @@ async fn handle_s5_upd_associate(
                     res = async {
                         let mut buf = vec![0u8; MAX_UDP_RELAY_PACKET_SIZE];
                         let (len, remote_addr) = dispatch_socket.recv_from(&mut buf).await?;
-                        let incoming_addr = *incoming_addr.lock().await;
+                        let incoming_addr = *incoming_addr.read().await;
                         tracing::trace!("[UDP] {incoming_addr} <- {remote_addr} feedback to incoming");
+
                         listen_udp.send_to(&buf[..len], 0, remote_addr.into(), incoming_addr).await?;
                         Ok::<_, Error>(())
                     } => {
@@ -191,6 +204,13 @@ async fn handle_s5_upd_associate(
             reply_listener.shutdown().await?;
 
             res.map_err(Into::into)
+        }
+        Err(err) => {
+            let mut conn = associate
+                .reply(Reply::GeneralFailure, Address::unspecified())
+                .await?;
+            conn.shutdown().await?;
+            Err(err)
         }
     }
 }

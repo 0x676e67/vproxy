@@ -1,4 +1,5 @@
 use auth::Authenticator;
+use tracing::{instrument, Level};
 
 use super::accept::Accept;
 use super::error::Error;
@@ -158,13 +159,12 @@ impl From<Context> for Handler {
 }
 
 impl Handler {
+    #[instrument(skip(self), level = Level::DEBUG)]
     async fn proxy(
         self,
         socket: SocketAddr,
         req: Request<Incoming>,
     ) -> Result<Response<BoxBody<Bytes, hyper::Error>>, Error> {
-        tracing::debug!("Received request socket: {:?}, req: {:?}", socket, req);
-
         // Check if the client is authorized
         let extension = match self.inner.authenticator.authenticate(req.headers()).await {
             Ok(extension) => extension,
@@ -229,7 +229,7 @@ impl Handler {
             self.inner
                 .connector
                 .tcp_connector()
-                .try_connect_with_addrs(addrs, extension)
+                .connect_with_addrs(addrs, extension)
                 .await?
         };
 
