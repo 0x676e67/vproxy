@@ -133,27 +133,21 @@ pub(super) fn io_other<E: Into<BoxError>>(error: E) -> io::Error {
 
 #[derive(Clone)]
 struct Handler {
-    inner: Arc<InnerHandler>,
-}
-
-struct InnerHandler {
-    authenticator: Authenticator,
+    authenticator: Arc<Authenticator>,
     connector: Connector,
 }
 
 impl From<Context> for Handler {
     fn from(ctx: Context) -> Self {
-        let auth = match (ctx.auth.username, ctx.auth.password) {
+        let authenticator = match (ctx.auth.username, ctx.auth.password) {
             (Some(username), Some(password)) => Authenticator::Password { username, password },
 
             _ => Authenticator::None,
         };
 
         Handler {
-            inner: Arc::new(InnerHandler {
-                authenticator: auth,
-                connector: ctx.connector,
-            }),
+            authenticator: Arc::new(authenticator),
+            connector: ctx.connector,
         }
     }
 }
@@ -268,7 +262,7 @@ fn full<T: Into<Bytes>>(chunk: T) -> BoxBody<Bytes, hyper::Error> {
         .boxed()
 }
 
-pub(super) mod auth {
+mod auth {
     use super::{empty, Error};
     use crate::extension::Extension;
     use base64::Engine;
