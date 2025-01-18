@@ -7,10 +7,7 @@ use hyper_util::{
     rt::{TokioExecutor, TokioTimer},
 };
 use rand::random;
-use std::{
-    net::ToSocketAddrs,
-    time::{SystemTime, UNIX_EPOCH},
-};
+use std::time::{SystemTime, UNIX_EPOCH};
 use std::{
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
     time::Duration,
@@ -238,7 +235,7 @@ impl TcpConnector<'_> {
         extension: Extension,
     ) -> std::io::Result<TcpStream> {
         let mut last_err = None;
-        let addrs = authority.as_str().to_socket_addrs()?;
+        let addrs = lookup_host(authority.as_str()).await?;
         for target_addr in addrs {
             match self.connect(target_addr, &extension).await {
                 Ok(stream) => return Ok(stream),
