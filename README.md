@@ -7,7 +7,7 @@
 
 > 🚀 Help me work seamlessly with open source sharing by [sponsoring me on GitHub](https://github.com/0x676e67/0x676e67/blob/main/SPONSOR.md)
 
-A high-performance `HTTP`/`HTTPS`/`SOCKS5` Proxy written in Rust
+A high-performance `HTTP`/`HTTPS`/`SOCKS5` proxy server
 
 ## Features
 

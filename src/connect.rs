@@ -4,7 +4,7 @@ use http::{Request, Response};
 use hyper::body::Incoming;
 use hyper_util::{
     client::legacy::{connect::HttpConnector, Client},
-    rt::TokioExecutor,
+    rt::{TokioExecutor, TokioTimer},
 };
 use rand::random;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -130,6 +130,7 @@ impl Connector {
         }
 
         let resp = Client::builder(TokioExecutor::new())
+            .timer(TokioTimer::new())
             .http1_title_case_headers(true)
             .http1_preserve_header_case(true)
             .build(connector)
