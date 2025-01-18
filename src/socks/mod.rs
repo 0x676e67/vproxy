@@ -1,6 +1,6 @@
-pub mod error;
-pub mod proto;
-pub mod server;
+mod error;
+mod proto;
+mod server;
 
 use self::{
     proto::{Address, Reply, UdpHeader},
