@@ -140,6 +140,55 @@ pub struct TcpConnector<'a> {
 }
 
 impl TcpConnector<'_> {
+    /// Binds a socket to an IP address based on the provided CIDR, fallback IP, and extensions.
+    ///
+    /// This method determines the appropriate IP address to bind the socket to based on the
+    /// configuration of the `Connector`. It first checks if a CIDR range is provided. If so,
+    /// it assigns an IP address from the CIDR range using the provided extensions. If no CIDR
+    /// range is provided but a fallback IP address is available, it uses the fallback IP address.
+    /// If neither is available, it uses the default IP address provided as an argument.
+    ///
+    /// # Arguments
+    ///
+    /// * `default` - The default IP address to use if no CIDR or fallback IP is available.
+    /// * `extension` - The extensions used to determine the IP address from the CIDR range.
+    ///
+    /// # Returns
+    ///
+    /// A `SocketAddr` representing the bound address.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// let connector = Connector::new(Some(cidr), Some(cidr_range), Some(fallback), connect_timeout);
+    /// let tcp_connector = TcpConnector { inner: &connector };
+    /// let socket_addr = tcp_connector.bind_socket_addr(default_ip, extension);
+    /// ```
+    pub fn bind_socket_addr(&self, default: IpAddr, extension: Extension) -> SocketAddr {
+        match (self.inner.cidr, self.inner.fallback) {
+            (None, Some(fallback)) => SocketAddr::new(fallback, 0),
+            (Some(cidr), _) => match cidr {
+                IpCidr::V4(cidr) => {
+                    let ip = IpAddr::V4(assign_ipv4_from_extension(
+                        cidr,
+                        self.inner.cidr_range,
+                        &extension,
+                    ));
+                    SocketAddr::new(ip, 0)
+                }
+                IpCidr::V6(cidr) => {
+                    let ip = IpAddr::V6(assign_ipv6_from_extension(
+                        cidr,
+                        self.inner.cidr_range,
+                        &extension,
+                    ));
+                    SocketAddr::new(ip, 0)
+                }
+            },
+            _ => SocketAddr::new(default, 0),
+        }
+    }
+
     /// Attempts to establish a TCP connection to each of the target addresses
     /// in the provided iterator using the provided extensions.
     ///

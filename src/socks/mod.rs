@@ -12,14 +12,21 @@ use self::{
 use crate::{connect::Connector, extension::Extension, serve::Context};
 use error::Error;
 use server::{
-    connection::connect::{self, Connect},
+    connection::{
+        bind::{self, Bind},
+        connect::{self, Connect},
+    },
     AuthAdaptor,
 };
 use std::{
     net::{SocketAddr, ToSocketAddrs},
     sync::Arc,
 };
-use tokio::{net::UdpSocket, sync::RwLock};
+use tokio::{
+    io::AsyncWriteExt,
+    net::{TcpListener, UdpSocket},
+    sync::RwLock,
+};
 use tracing::{instrument, Level};
 
 pub async fn proxy(ctx: Context) -> crate::Result<()> {
@@ -54,7 +61,7 @@ async fn event_loop(server: Server, connector: Connector) -> std::io::Result<()>
         let connector = connector.clone();
         tokio::spawn(async move {
             if let Err(err) = handle(conn, connector).await {
-                tracing::info!("{err}");
+                tracing::trace!("[SOCKS5] error: {}", err);
             }
         });
     }
@@ -72,22 +79,19 @@ async fn handle(conn: IncomingConnection, connector: Arc<Connector>) -> std::io:
 
     match conn.wait_request().await? {
         ClientConnection::Connect(connect, addr) => {
-            hanlde_tcp_proxy(connector, connect, addr, extension).await
+            hanlde_connect_proxy(connector, connect, addr, extension).await
         }
         ClientConnection::UdpAssociate(associate, addr) => {
             handle_udp_proxy(connector, associate, addr, extension).await
         }
-        ClientConnection::Bind(bind, _) => {
-            let mut conn = bind
-                .reply(Reply::CommandNotSupported, Address::unspecified())
-                .await?;
-            conn.shutdown().await
+        ClientConnection::Bind(bind, addr) => {
+            hanlde_bind_proxy(connector, bind, addr, extension).await
         }
     }
 }
 
 #[instrument(skip(connector, connect), level = Level::DEBUG)]
-async fn hanlde_tcp_proxy(
+async fn hanlde_connect_proxy(
     connector: Arc<Connector>,
     connect: Connect<connect::NeedReply>,
     addr: Address,
@@ -121,6 +125,9 @@ async fn hanlde_tcp_proxy(
                     tracing::trace!("[TCP] tunnel error: {}", err);
                 }
             };
+
+            drop(target_stream);
+
             Ok(())
         }
         Err(err) => {
@@ -137,18 +144,17 @@ async fn hanlde_tcp_proxy(
 async fn handle_udp_proxy(
     connector: Arc<Connector>,
     associate: UdpAssociate<associate::NeedReply>,
-    addr: Address,
+    _: Address,
     extension: Extension,
 ) -> std::io::Result<()> {
     const MAX_UDP_RELAY_PACKET_SIZE: usize = 1500;
 
-    // listen on a random port
     let listen_ip = associate.local_addr()?.ip();
     let udp_socket = UdpSocket::bind(SocketAddr::from((listen_ip, 0))).await;
 
     match udp_socket.and_then(|socket| socket.local_addr().map(|addr| (socket, addr))) {
         Ok((udp_socket, listen_addr)) => {
-            tracing::info!("[UDP] {listen_addr} listen on");
+            tracing::info!("[UDP] listen on: {listen_addr}");
 
             let mut reply_listener = associate
                 .reply(Reply::Succeeded, Address::from(listen_addr))
@@ -211,6 +217,112 @@ async fn handle_udp_proxy(
                 .await?;
             conn.shutdown().await?;
             Err(err)
+        }
+    }
+}
+
+/// Handles the SOCKS5 BIND command, which is used to listen for inbound connections.
+/// This is typically used in server mode applications, such as FTP passive mode.
+///
+/// ### Workflow
+///
+/// 1. **Client sends BIND request**
+///    - Client sends a BIND request to the SOCKS5 proxy server.
+///    - Proxy server responds with an IP address and port, which is the temporary listening port allocated by the proxy server.
+///
+/// 2. **Proxy server listens for inbound connections**
+///    - Proxy server listens on the allocated temporary port.
+///    - Proxy server sends a BIND response to the client, notifying the listening address and port.
+///
+/// 3. **Client receives BIND response**
+///    - Client receives the BIND response from the proxy server, knowing the address and port the proxy server is listening on.
+///
+/// 4. **Target server initiates connection**
+///    - Target server initiates a connection to the proxy server's listening address and port.
+///
+/// 5. **Proxy server accepts inbound connection**
+///    - Proxy server accepts the inbound connection from the target server.
+///    - Proxy server sends a second BIND response to the client, notifying that the inbound connection has been established.
+///
+/// 6. **Client receives second BIND response**
+///    - Client receives the second BIND response from the proxy server, knowing that the inbound connection has been established.
+///
+/// 7. **Data transfer**
+///    - Proxy server forwards data between the client and the target server.
+///
+/// ### Text Flowchart
+///
+/// ```plaintext
+/// Client                Proxy Server                Target Server
+///   |                        |                        |
+///   |----BIND request------->|                        |
+///   |                        |                        |
+///   |                        |<---Allocate port-------|
+///   |                        |                        |
+///   |<---BIND response-------|                        |
+///   |                        |                        |
+///   |                        |<---Target connects-----|
+///   |                        |                        |
+///   |                        |----Second BIND response>|
+///   |                        |                        |
+///   |<---Second BIND response|                        |
+///   |                        |                        |
+///   |----Data transfer------>|----Forward data------->|
+///   |<---Data transfer-------|<---Forward data--------|
+///   |                        |                        |
+/// ```
+///
+/// # Arguments
+///
+/// * `connector` - The connector instance.
+/// * `bind` - The BIND request details.
+/// * `addr` - The address to bind to.
+/// * `extension` - Additional extensions.
+///
+/// # Returns
+///
+/// A `Result` indicating success or failure.
+#[instrument(skip(connector, bind, _addr), level = Level::DEBUG)]
+async fn hanlde_bind_proxy(
+    connector: Arc<Connector>,
+    bind: Bind<bind::NeedFirstReply>,
+    _addr: Address,
+    extension: Extension,
+) -> std::io::Result<()> {
+    let listen_ip = bind.local_addr()?.ip();
+    let listen_ip = connector
+        .tcp_connector()
+        .bind_socket_addr(listen_ip, extension);
+    let listener = TcpListener::bind(listen_ip).await?;
+
+    let conn = bind
+        .reply(Reply::Succeeded, Address::from(listener.local_addr()?))
+        .await?;
+
+    let (mut inbound, inbound_addr) = listener.accept().await?;
+    tracing::info!("[BIND] accepted connection from {}", inbound_addr);
+
+    match conn
+        .reply(Reply::Succeeded, Address::from(inbound_addr))
+        .await
+    {
+        Ok(mut conn) => {
+            match tokio::io::copy_bidirectional(&mut inbound, &mut conn).await {
+                Ok((a, b)) => {
+                    tracing::trace!("[BIND] client wrote {} bytes and received {} bytes", a, b);
+                }
+                Err(err) => {
+                    tracing::trace!("[BIND] tunnel error: {}", err);
+                }
+            }
+
+            drop(inbound);
+
+            conn.shutdown().await
+        }
+        Err((err, tcp)) => {
+            drop(tcp);
+            return Err(err);
         }
     }
 }
