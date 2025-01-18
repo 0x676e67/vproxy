@@ -1,4 +1,5 @@
 use auth::Authenticator;
+use http::uri::Authority;
 use tracing::{instrument, Level};
 
 use super::accept::Accept;
@@ -17,7 +18,7 @@ use hyper_util::{
 };
 use std::{
     io::{self, ErrorKind},
-    net::{SocketAddr, ToSocketAddrs},
+    net::SocketAddr,
     sync::Arc,
     time::Duration,
 };
@@ -180,11 +181,11 @@ impl Handler {
             // Note: only after client received an empty body with STATUS_OK can the
             // connection be upgraded, so we can't return a response inside
             // `on_upgrade` future.
-            if let Some(addr) = host_addr(req.uri()) {
+            if let Some(authority) = req.uri().authority().cloned() {
                 tokio::task::spawn(async move {
                     match hyper::upgrade::on(req).await {
                         Ok(upgraded) => {
-                            if let Err(e) = self.tunnel(upgraded, addr, extension).await {
+                            if let Err(e) = self.tunnel(upgraded, authority, extension).await {
                                 tracing::warn!("server io error: {}", e);
                             };
                         }
@@ -214,14 +215,13 @@ impl Handler {
     async fn tunnel(
         &self,
         upgraded: Upgraded,
-        addr_str: String,
+        authority: Authority,
         extension: Extension,
     ) -> std::io::Result<()> {
         let mut server = {
-            let addrs = addr_str.to_socket_addrs()?;
             self.connector
                 .tcp_connector()
-                .connect_with_addrs(addrs, extension)
+                .connect_with_authority(authority, extension)
                 .await?
         };
 
@@ -242,10 +242,6 @@ impl Handler {
 
         Ok(())
     }
-}
-
-fn host_addr(uri: &http::Uri) -> Option<String> {
-    uri.authority().map(|auth| auth.to_string())
 }
 
 fn empty() -> BoxBody<Bytes, hyper::Error> {

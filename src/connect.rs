@@ -1,13 +1,16 @@
 use super::{extension::Extension, http::error::Error};
 use cidr::{IpCidr, Ipv4Cidr, Ipv6Cidr};
-use http::{Request, Response};
+use http::{uri::Authority, Request, Response};
 use hyper::body::Incoming;
 use hyper_util::{
     client::legacy::{connect, Client},
     rt::{TokioExecutor, TokioTimer},
 };
 use rand::random;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::{
+    net::ToSocketAddrs,
+    time::{SystemTime, UNIX_EPOCH},
+};
 use std::{
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
     time::Duration,
@@ -198,6 +201,52 @@ impl TcpConnector<'_> {
             (None, Some(fallback)) => Ok(SocketAddr::new(fallback, 0)),
             _ => default().map(|ip| SocketAddr::new(ip, 0)),
         }
+    }
+
+    /// Attempts to establish a TCP connection to each of the target addresses
+    /// resolved from the provided authority.
+    ///
+    /// This method takes an `Authority` and an `Extension` as arguments. It resolves
+    /// the authority to a list of socket addresses and attempts to connect to each
+    /// address in turn using the `connect` method. If a connection is successfully
+    /// established, it returns the connected `TcpStream`. If all connection attempts
+    /// fail, it returns the last encountered error.
+    ///
+    /// # Arguments
+    ///
+    /// * `authority` - The authority (host:port) to resolve and connect to.
+    /// * `extension` - The extensions used during the connection process.
+    ///
+    /// # Returns
+    ///
+    /// A `std::io::Result<TcpStream>` representing the result of the connection attempt.
+    /// If successful, it returns `Ok(TcpStream)`. If all attempts fail, it returns the
+    /// last encountered error.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// let connector = Connector::new(Some(cidr), Some(cidr_range), Some(fallback), connect_timeout);
+    /// let tcp_connector = TcpConnector { inner: &connector };
+    /// let authority = "example.com:80".parse().unwrap();
+    /// let extension = Extension::default();
+    /// let stream = tcp_connector.connect_with_authority(authority, extension).await?;
+    /// ```
+    pub async fn connect_with_authority(
+        &self,
+        authority: Authority,
+        extension: Extension,
+    ) -> std::io::Result<TcpStream> {
+        let mut last_err = None;
+        let addrs = authority.as_str().to_socket_addrs()?;
+        for target_addr in addrs {
+            match self.connect(target_addr, &extension).await {
+                Ok(stream) => return Ok(stream),
+                Err(e) => last_err = Some(e),
+            };
+        }
+
+        Err(error(last_err))
     }
 
     /// Attempts to establish a TCP connection to each of the target addresses
