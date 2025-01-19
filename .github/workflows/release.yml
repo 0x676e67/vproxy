@@ -44,12 +44,26 @@ jobs:
             echo "tag=latest" >> $GITHUB_ENV
           fi
 
-      - name: Build Packages
+      - name: Style check
+        run: cargo fmt --all -- --check
+
+      - name: Clippy check
+        run: cargo clippy --all-targets
+
+      - name: Linux build
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          docker run --rm -t -v $(pwd):/build -w /build -e tag=$tag ghcr.io/0x676e67/cargo-zigbuild -c "os=linux ./.github/build.sh"
+
+      - name: MacOS build
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          docker run --rm -t -v $(pwd):/build -w /build -e tag=$tag ghcr.io/0x676e67/cargo-zigbuild -c "os=macos ./.github/build.sh"
+
+      - name: Windows build
         if: startsWith(github.ref, 'refs/tags/')
         shell: bash
         run: |
-          docker run --rm -t -v $(pwd):/build -w /build -e tag=$tag ghcr.io/0x676e67/cargo-zigbuild -c "os=linux ./.github/build.sh"
-          docker run --rm -t -v $(pwd):/build -w /build -e tag=$tag ghcr.io/0x676e67/cargo-zigbuild -c "os=macos ./.github/build.sh"
           docker run --rm -t -v $(pwd):/build -w /build -e tag=$tag ghcr.io/0x676e67/cargo-zigbuild -c "os=windows ./.github/build.sh"
           
       - name: Upload binaries to GitHub Release
@@ -90,15 +104,6 @@ jobs:
         with:
           toolchain: stable
           override: true
-
-      - name: Style check
-        run: cargo fmt --all -- --check
-
-      - name: Clippy check
-        run: cargo clippy --all-targets
-
-      - name: Build
-        run: cargo build
 
       - uses: katyo/publish-crates@v2
         if: startsWith(github.ref, 'refs/tags/')
