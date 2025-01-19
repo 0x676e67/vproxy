@@ -4,8 +4,10 @@ use tracing::{instrument, Level};
 
 use super::accept::Accept;
 use super::error::Error;
+use super::genca;
+use super::tls::{RustlsAcceptor, RustlsConfig};
 use crate::http::accept::DefaultAcceptor;
-use crate::serve::Context;
+use crate::serve::{Context, Serve};
 use crate::{connect::Connector, extension::Extension};
 use bytes::Bytes;
 use http::StatusCode;
@@ -16,6 +18,7 @@ use hyper_util::{
     rt::{TokioExecutor, TokioIo},
     server::conn::auto::Builder,
 };
+use std::path::PathBuf;
 use std::{
     io::{self, ErrorKind},
     net::SocketAddr,
@@ -28,15 +31,15 @@ use tokio::{
 };
 
 /// HTTP server.
-pub struct Server<A = DefaultAcceptor> {
+pub struct HttpServer<A = DefaultAcceptor> {
     acceptor: A,
     builder: Builder<TokioExecutor>,
     listener: TcpListener,
     http_proxy: Handler,
 }
 
-impl Server {
-    /// Create a server from ProxyContext.
+impl HttpServer {
+    /// Create a http server from Context.
     pub fn new(ctx: Context) -> std::io::Result<Self> {
         let socket = if ctx.bind.is_ipv4() {
             tokio::net::TcpSocket::new_v4()?
@@ -48,8 +51,13 @@ impl Server {
 
         let listener = socket.listen(ctx.concurrent as u32)?;
         let acceptor = DefaultAcceptor::new();
-        let builder = Builder::new(TokioExecutor::new());
+        let mut builder = Builder::new(TokioExecutor::new());
         let http_proxy = Handler::from(ctx);
+
+        builder
+            .http1()
+            .title_case_headers(true)
+            .preserve_header_case(true);
 
         Ok(Self {
             acceptor,
@@ -60,29 +68,62 @@ impl Server {
     }
 }
 
-impl<A> Server<A>
+impl<A> HttpServer<A>
 where
     A: Accept<TcpStream> + Clone + Send + Sync + 'static,
     A::Stream: AsyncRead + AsyncWrite + Unpin + Send,
     A::Future: Send,
 {
     /// Overwrite acceptor.
-    pub fn acceptor<Acceptor>(self, acceptor: Acceptor) -> Server<Acceptor> {
-        Server {
+    pub fn acceptor<Acceptor>(self, acceptor: Acceptor) -> HttpServer<Acceptor> {
+        HttpServer {
             acceptor,
             builder: self.builder,
             listener: self.listener,
             http_proxy: self.http_proxy,
         }
     }
+}
 
-    /// Returns a mutable reference to the Http builder.
-    pub fn http_builder(&mut self) -> &mut Builder<TokioExecutor> {
-        &mut self.builder
+/// HTTPS server.
+pub struct HttpsServer<A = RustlsAcceptor> {
+    http: HttpServer<A>,
+}
+
+impl HttpsServer {
+    /// Create a https server from Context.
+    pub fn new(
+        ctx: Context,
+        tls_cert: Option<PathBuf>,
+        tls_key: Option<PathBuf>,
+    ) -> std::io::Result<HttpsServer<RustlsAcceptor>> {
+        let config = match (tls_cert, tls_key) {
+            (Some(cert), Some(key)) => RustlsConfig::from_pem_chain_file(cert, key),
+            _ => {
+                let (cert, key) = genca::get_self_signed_cert().map_err(io_other)?;
+                RustlsConfig::from_pem(cert, key)
+            }
+        }?;
+
+        let acceptor = RustlsAcceptor::new(config, ctx.connect_timeout);
+        HttpServer::new(ctx).map(|http| Self {
+            http: http.acceptor(acceptor),
+        })
     }
+}
 
-    /// Serve the proxy.
-    pub(super) async fn serve(self) -> crate::Result<()> {
+impl<A> Serve for HttpServer<A>
+where
+    A: Accept<TcpStream> + Clone + Send + Sync + 'static,
+    A::Stream: AsyncRead + AsyncWrite + Unpin + Send,
+    A::Future: Send,
+{
+    async fn serve(self) -> std::io::Result<()> {
+        tracing::info!(
+            "Http(s) proxy server listening on {}",
+            self.listener.local_addr()?
+        );
+
         let mut incoming = self.listener;
         let acceptor = self.acceptor;
         let builder = self.builder;
@@ -114,6 +155,12 @@ where
                 }
             });
         }
+    }
+}
+
+impl Serve for HttpsServer {
+    async fn serve(self) -> std::io::Result<()> {
+        self.http.serve().await
     }
 }
 
