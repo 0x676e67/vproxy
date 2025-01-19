@@ -146,15 +146,15 @@ while true; do curl -x http://127.0.0.1:8100 -s https://api.ip.sb/ip -A Mozilla;
 
 - TTL Extension
 
-Append `-ttl-` to the username, where TTL is a fixed value (e.g., `username-ttl-2`). The TTL value is the number of requests that can be made with the same IP. When the TTL value is reached, the IP will be changed. For HTTP users who are using passwordless authorization and need a fixed IP address, you can add the `ttl` header to the request (e.g., `ttl: 2`). By keeping the TTL value unchanged, you can use a fixed IP.
+Append `-ttl-` to the username, where TTL is a fixed value (e.g., `username-ttl-2`). The TTL value is the number of requests that can be made with the same IP. When the TTL value is reached, the IP will be changed.
 
 - Session Extension
 
-Append `-session-id` to the username, where session is a fixed value and ID is an arbitrary random value (e.g., `username-session-123456`). Keep the Session ID unchanged to use a fixed IP.For HTTP users who are using password-less authorization and need a fixed IP address, you can add the `session` header to the request (e.g., `session: 123456`).
+Append `-session-id` to the username, where session is a fixed value and ID is an arbitrary random value (e.g., `username-session-123456`). Keep the Session ID unchanged to use a fixed IP.
 
 - Range Extension
 
-Append `-range-id` to the username, where range is a fixed value and ID is any random value (e.g. `username-range-123456`). By keeping the Range ID unchanged, you can use a fixed CIDR range in a fixed range. in addition, you must set the startup parameter `--cidr-range`, and the length is within a valid range. For HTTP users that use passwordless authorization and require a valid range IP address, you can add a `range` header to the request (e.g. `range: 123456`). 
+Append `-range-id` to the username, where range is a fixed value and ID is any random value (e.g. `username-range-123456`). By keeping the Range ID unchanged, you can use a fixed CIDR range in a fixed range. in addition, you must set the startup parameter `--cidr-range`, and the length is within a valid range.
 
 ### Examples
 
