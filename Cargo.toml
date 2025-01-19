@@ -30,7 +30,7 @@ fxhash = "0.2.1"
 
 # for log
 tracing = "0.1.40"
-tracing-subscriber = { version = "0.3.18", features = ["env-filter"] }
+tracing-subscriber = { version = "0.3.19", features = ["env-filter"] }
 
 # for http
 http = "1"
