@@ -24,16 +24,12 @@ use rtnetlink::{new_connection, Error, Handle, IpVersion};
 /// sysctl_route_add_cidr(&subnet);
 /// ```
 pub async fn sysctl_route_add_cidr(subnet: &cidr::IpCidr) {
-    if !nix::unistd::Uid::effective().is_root() {
-        return;
-    }
-
     let (connection, handle, _) = new_connection().unwrap();
 
     tokio::spawn(connection);
 
     if let Err(e) = add_route(handle.clone(), subnet).await {
-        eprintln!("{e}");
+        tracing::trace!("Failed to apply route: {}", e);
     }
 }
 
@@ -64,6 +60,7 @@ async fn add_route(handle: Handle, cidr: &cidr::IpCidr) -> Result<(), Error> {
                 for attr in route.attributes.iter() {
                     if let RouteAttribute::Destination(dest) = attr {
                         if dest == &route_address {
+                            tracing::info!("IP route {} already exists", cidr);
                             return Ok(true);
                         }
                     }
@@ -76,7 +73,7 @@ async fn add_route(handle: Handle, cidr: &cidr::IpCidr) -> Result<(), Error> {
     // Add a route to the loopback interface.
     match cidr {
         cidr::IpCidr::V4(v4) => {
-            if route_check(
+            if !route_check(
                 IpVersion::V4,
                 AddressFamily::Inet,
                 v4.network_length(),
@@ -84,22 +81,22 @@ async fn add_route(handle: Handle, cidr: &cidr::IpCidr) -> Result<(), Error> {
             )
             .await?
             {
-                return Ok(());
+                route
+                    .add()
+                    .v4()
+                    .destination_prefix(v4.first_address(), v4.network_length())
+                    .kind(RouteType::Local)
+                    .protocol(RouteProtocol::Boot)
+                    .scope(RouteScope::Universe)
+                    .output_interface(iface_idx)
+                    .priority(1024)
+                    .execute()
+                    .await?;
+                tracing::info!("Added IPv4 route {}", cidr);
             }
-            route
-                .add()
-                .v4()
-                .destination_prefix(v4.first_address(), v4.network_length())
-                .kind(RouteType::Local)
-                .protocol(RouteProtocol::Boot)
-                .scope(RouteScope::Universe)
-                .output_interface(iface_idx)
-                .priority(1024)
-                .execute()
-                .await?
         }
         cidr::IpCidr::V6(v6) => {
-            if route_check(
+            if !route_check(
                 IpVersion::V6,
                 AddressFamily::Inet6,
                 v6.network_length(),
@@ -107,19 +104,19 @@ async fn add_route(handle: Handle, cidr: &cidr::IpCidr) -> Result<(), Error> {
             )
             .await?
             {
-                return Ok(());
+                route
+                    .add()
+                    .v6()
+                    .destination_prefix(v6.first_address(), v6.network_length())
+                    .kind(RouteType::Local)
+                    .protocol(RouteProtocol::Boot)
+                    .scope(RouteScope::Universe)
+                    .output_interface(iface_idx)
+                    .priority(1024)
+                    .execute()
+                    .await?;
+                tracing::info!("Added IPv6 route {}", cidr);
             }
-            route
-                .add()
-                .v6()
-                .destination_prefix(v6.first_address(), v6.network_length())
-                .kind(RouteType::Local)
-                .protocol(RouteProtocol::Boot)
-                .scope(RouteScope::Universe)
-                .output_interface(iface_idx)
-                .priority(1024)
-                .execute()
-                .await?
         }
     }
 
@@ -154,7 +151,10 @@ pub fn sysctl_ipv6_no_local_bind() {
     let old_value = ctl.value_string().expect("could not get sysctl value");
 
     let target_value = match old_value.as_ref() {
-        "0" => "1",
+        "0" => {
+            tracing::info!("Set sysctl {} to 1", CTLNAME);
+            "1"
+        }
         _ => &old_value,
     };
 

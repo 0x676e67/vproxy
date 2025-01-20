@@ -1,5 +1,7 @@
 use crate::{serve, BootArgs, BIN_NAME};
 use daemonize::Daemonize;
+use nix::sys::signal;
+use nix::unistd::{Pid, Uid, User};
 use std::{
     fs::{File, Permissions},
     os::unix::fs::PermissionsExt,
@@ -21,7 +23,7 @@ fn pid() -> Option<String> {
 
 #[inline(always)]
 pub fn check_root() {
-    if !nix::unistd::Uid::effective().is_root() {
+    if !Uid::effective().is_root() {
         println!("You must run this executable with root permissions");
         std::process::exit(-1)
     }
@@ -52,12 +54,16 @@ pub fn start(args: BootArgs) -> crate::Result<()> {
         .stderr(stderr) // Redirect stderr to `/tmp/daemon.err`.
         .privileged_action(|| "Executed before drop privileges");
 
-    if let Ok(user) = std::env::var("SUDO_USER") {
-        if let Ok(Some(real_user)) = nix::unistd::User::from_name(&user) {
-            daemonize = daemonize
-                .user(real_user.name.as_str())
-                .group(real_user.gid.as_raw());
-        }
+    let user_name = std::env::var("SUDO_USER")
+        .ok()
+        .and_then(|user| User::from_name(&user).ok().flatten())
+        .or_else(|| User::from_uid(Uid::current()).ok().flatten());
+
+    if let Some(real_user) = user_name {
+        println!("Running as user {}", real_user.name);
+        daemonize = daemonize
+            .user(real_user.name.as_str())
+            .group(real_user.gid.as_raw());
     }
 
     if let Some(err) = daemonize.start().err() {
@@ -69,8 +75,6 @@ pub fn start(args: BootArgs) -> crate::Result<()> {
 }
 
 pub fn stop() -> crate::Result<()> {
-    use nix::{sys::signal, unistd::Pid};
-
     check_root();
 
     if let Some(pid) = pid() {
