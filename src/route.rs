@@ -90,6 +90,7 @@ async fn add_route(handle: Handle, cidr: &cidr::IpCidr) -> Result<(), Error> {
                     .scope(RouteScope::Universe)
                     .output_interface(iface_idx)
                     .priority(1024)
+                    .table_id(255)
                     .execute()
                     .await?;
                 tracing::info!("Added IPv4 route {}", cidr);
@@ -113,6 +114,7 @@ async fn add_route(handle: Handle, cidr: &cidr::IpCidr) -> Result<(), Error> {
                     .scope(RouteScope::Universe)
                     .output_interface(iface_idx)
                     .priority(1024)
+                    .table_id(255)
                     .execute()
                     .await?;
                 tracing::info!("Added IPv6 route {}", cidr);
