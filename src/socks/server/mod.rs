@@ -318,8 +318,9 @@ async fn hanlde_bind_proxy(
     _addr: Address,
     extension: Extension,
 ) -> std::io::Result<()> {
-    let listen_ip =
-        connector.bind_socket_addr(|| bind.local_addr().map(|socket| socket.ip()), extension)?;
+    let listen_ip = connector
+        .bind_socket_addr(|| bind.local_addr().map(|socket| socket.ip()), extension)
+        .await?;
     let listener = TcpListener::bind(listen_ip).await?;
 
     let conn = bind
