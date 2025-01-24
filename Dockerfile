@@ -21,7 +21,6 @@ COPY --from=builder /app/target/release/vproxy /bin/vproxy
 
 # Iproute2 and procps are needed for the vproxy to work
 RUN apk add --no-cache iproute2 procps
-RUN echo "net.ipv6.conf.all.disable_ipv6 = 0" >> /etc/sysctl.conf
 
 # Set the entrypoint
 ENTRYPOINT ["/bin/vproxy"]

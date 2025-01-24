@@ -1,9 +1,11 @@
+use cidr::IpCidr;
 use futures::TryStreamExt;
 use netlink_packet_route::{
     route::{RouteAddress, RouteAttribute, RouteProtocol, RouteScope, RouteType},
     AddressFamily,
 };
 use rtnetlink::{new_connection, Error, Handle, IpVersion};
+use sysctl::{Sysctl, SysctlError};
 
 /// Attempts to add a route to the given subnet on the loopback interface.
 ///
@@ -23,7 +25,7 @@ use rtnetlink::{new_connection, Error, Handle, IpVersion};
 /// let subnet = cidr::IpCidr::from_str("192.168.1.0/24").unwrap();
 /// sysctl_route_add_cidr(&subnet);
 /// ```
-pub async fn sysctl_route_add_cidr(subnet: &cidr::IpCidr) {
+pub async fn sysctl_route_add_cidr(subnet: &IpCidr) {
     let (connection, handle, _) = new_connection().unwrap();
 
     tokio::spawn(connection);
@@ -33,7 +35,7 @@ pub async fn sysctl_route_add_cidr(subnet: &cidr::IpCidr) {
     }
 }
 
-async fn add_route(handle: Handle, cidr: &cidr::IpCidr) -> Result<(), Error> {
+async fn add_route(handle: Handle, cidr: &IpCidr) -> Result<(), Error> {
     const LOCAL_TABLE_ID: u8 = 255;
 
     let route = handle.route();
@@ -80,7 +82,7 @@ async fn add_route(handle: Handle, cidr: &cidr::IpCidr) -> Result<(), Error> {
 
     // Add a route to the loopback interface.
     match cidr {
-        cidr::IpCidr::V4(v4) => {
+        IpCidr::V4(v4) => {
             if !route_check(
                 IpVersion::V4,
                 AddressFamily::Inet,
@@ -104,7 +106,7 @@ async fn add_route(handle: Handle, cidr: &cidr::IpCidr) -> Result<(), Error> {
                 tracing::info!("Added IPv4 route {}", cidr);
             }
         }
-        cidr::IpCidr::V6(v6) => {
+        IpCidr::V6(v6) => {
             if !route_check(
                 IpVersion::V6,
                 AddressFamily::Inet6,
@@ -136,10 +138,9 @@ async fn add_route(handle: Handle, cidr: &cidr::IpCidr) -> Result<(), Error> {
 /// Tries to disable local binding for IPv6.
 ///
 /// This function uses the `sysctl` command to disable local binding for IPv6.
-/// It checks if the current user has root privileges before attempting to
-/// change the setting. If the user does not have root privileges, the function
-/// returns immediately. If the `sysctl` command fails, it prints an error
-/// message to the console.
+/// It attempts to change the setting by calling the `execute_sysctl` function
+/// with the appropriate parameters. If the `sysctl` command fails, it logs an
+/// error message.
 ///
 /// # Example
 ///
@@ -147,31 +148,72 @@ async fn add_route(handle: Handle, cidr: &cidr::IpCidr) -> Result<(), Error> {
 /// sysctl_ipv6_no_local_bind();
 /// ```
 pub fn sysctl_ipv6_no_local_bind() {
-    if !nix::unistd::Uid::effective().is_root() {
-        return;
+    if let Err(err) = execute_sysctl("net.ipv6.ip_nonlocal_bind", "1") {
+        tracing::trace!("Failed to execute sysctl: {}", err)
     }
+}
 
-    use sysctl::Sysctl;
-    const CTLNAME: &str = "net.ipv6.ip_nonlocal_bind";
+///
+/// This function uses the `sysctl` command to enable IPv6 on all interfaces.
+/// It attempts to change the setting by calling the `execute_sysctl` function
+/// with the appropriate parameters. If the `sysctl` command fails, it logs an
+/// error message.
+///
+/// # Example
+///
+/// ```
+/// sysctl_ipv6_all_enable_ipv6();
+/// ```
+///
+/// # Errors
+///
+/// If the `sysctl` command fails, this function logs an error message using
+/// the `tracing` crate and returns an error.
+///
+/// # Safety
+///
+/// This function requires root privileges to execute the `sysctl` command.
+/// Ensure that the program is running with the necessary permissions.
+///
+/// # See Also
+///
+/// * `execute_sysctl` - The function used to execute the `sysctl` command.
+///
+pub fn sysctl_ipv6_all_enable_ipv6() {
+    if let Err(err) = execute_sysctl("net.ipv6.conf.all.disable_ipv6", "0") {
+        tracing::trace!("Failed to execute sysctl: {}", err)
+    } 
+}
 
-    let ctl = <sysctl::Ctl as Sysctl>::new(CTLNAME)
-        .unwrap_or_else(|_| panic!("could not get sysctl '{}'", CTLNAME));
-    let _ = ctl.name().expect("could not get sysctl name");
+/// This function executes a `sysctl` command to modify a kernel parameter.
+/// It creates a new `sysctl::Ctl` object with the specified command, retrieves
+/// the current value of the parameter, logs the old value, and then sets the
+/// parameter to the new value. If any step fails, it returns an error.
+///
+/// # Arguments
+///
+/// * `command` - The sysctl command to execute (e.g., "net.ipv6.ip_nonlocal_bind").
+/// * `value` - The value to set for the specified sysctl command.
+///
+/// # Returns
+///
+/// * `Result<(), SysctlError>` - Returns `Ok(())` if the command succeeds,
+///   otherwise returns a `SysctlError`.
+///
+/// # Example
+///
+/// ```
+/// execute_sysctl("net.ipv6.ip_nonlocal_bind", "1")?;
+/// ```
+fn execute_sysctl(command: &str, value: &str) -> Result<(), SysctlError> {
+    let ctl = <sysctl::Ctl as Sysctl>::new(command)?;
+    assert_eq!(command, ctl.name()?);
 
-    let old_value = ctl.value_string().expect("could not get sysctl value");
+    let old_value = ctl.value_string()?;
+    tracing::trace!("sysctl {} value: {}", command, old_value);
 
-    let target_value = match old_value.as_ref() {
-        "0" => {
-            tracing::info!("Set sysctl {} to 1", CTLNAME);
-            "1"
-        }
-        _ => &old_value,
-    };
+    tracing::info!("set sysctl {} to {}", command, value);
+    ctl.set_value_string(value)?;
 
-    ctl.set_value_string(target_value).unwrap_or_else(|e| {
-        panic!(
-            "could not set sysctl '{}' to '{}': {}",
-            CTLNAME, target_value, e
-        )
-    });
+    Ok(())
 }
