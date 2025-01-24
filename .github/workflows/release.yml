@@ -26,7 +26,18 @@ jobs:
       - name: Install depends
         if: startsWith(github.ref, 'refs/tags/')
         run: |
-          sudo apt update && sudo apt install upx rename -y
+          sudo apt update && sudo apt install upx -y
+
+      - uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+          override: true
+
+      - name: Style check
+        run: cargo fmt --all -- --check
+
+      - name: Clippy check
+        run: cargo clippy --all-targets
 
       - name: Get tag
         if: startsWith(github.ref, 'refs/tags/')
@@ -34,6 +45,8 @@ jobs:
         uses: dawidd6/action-get-tag@v1
         with:
           strip_v: true
+
+      - uses: goto-bus-stop/setup-zig@v2
 
       - name: Tag Check
         run: |
@@ -44,27 +57,25 @@ jobs:
             echo "tag=latest" >> $GITHUB_ENV
           fi
 
-      - name: Style check
-        run: cargo fmt --all -- --check
+      - name: Install cargo zigbuild
+        if: startsWith(github.ref, 'refs/tags/')
+        run: cargo install --locked cargo-zigbuild
 
-      - name: Clippy check
-        run: cargo clippy --all-targets
-
-      - name: Linux build
+      - name: Build Linux Target
         if: startsWith(github.ref, 'refs/tags/')
         run: |
-          docker run --rm -t -v $(pwd):/build -w /build -e tag=$tag ghcr.io/0x676e67/cargo-zigbuild -c "os=linux ./.github/build.sh"
+          os=linux ./.github/build.sh
 
-      - name: MacOS build
+      - name: Build macOS Target
         if: startsWith(github.ref, 'refs/tags/')
         run: |
-          docker run --rm -t -v $(pwd):/build -w /build -e tag=$tag ghcr.io/0x676e67/cargo-zigbuild -c "os=macos ./.github/build.sh"
+          os=macos ./.github/build.sh
 
-      - name: Windows build
+      - name: Build Windows Target
         if: startsWith(github.ref, 'refs/tags/')
         shell: bash
         run: |
-          docker run --rm -t -v $(pwd):/build -w /build -e tag=$tag ghcr.io/0x676e67/cargo-zigbuild -c "os=windows ./.github/build.sh"
+          os=windows ./.github/build.sh
           
       - name: Upload binaries to GitHub Release
         uses: softprops/action-gh-release@v1
