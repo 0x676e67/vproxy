@@ -210,10 +210,13 @@ fn execute_sysctl(command: &str, value: &str) -> Result<(), SysctlError> {
     assert_eq!(command, ctl.name()?);
 
     let old_value = ctl.value_string()?;
-    tracing::trace!("sysctl {} value: {}", command, old_value);
+    tracing::trace!(
+        "Current value of sysctl parameter '{}': {}",
+        command,
+        old_value
+    );
 
-    tracing::info!("set sysctl {} to {}", command, value);
-    ctl.set_value_string(value)?;
-
-    Ok(())
+    ctl.set_value_string(value).map(|_| {
+        tracing::info!("Updated sysctl parameter '{}' to value: {}", command, value);
+    })
 }
