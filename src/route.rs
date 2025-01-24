@@ -182,7 +182,7 @@ pub fn sysctl_ipv6_no_local_bind() {
 pub fn sysctl_ipv6_all_enable_ipv6() {
     if let Err(err) = execute_sysctl("net.ipv6.conf.all.disable_ipv6", "0") {
         tracing::trace!("Failed to execute sysctl: {}", err)
-    } 
+    }
 }
 
 /// This function executes a `sysctl` command to modify a kernel parameter.
