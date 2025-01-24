@@ -46,8 +46,6 @@ jobs:
         with:
           strip_v: true
 
-      - uses: goto-bus-stop/setup-zig@v2
-
       - name: Tag Check
         run: |
           echo "tag=${{ steps.tag.outputs.tag }}" >> $GITHUB_ENV
@@ -56,6 +54,9 @@ jobs:
             echo "tag=latest" >> $GITHUB_OUTPUT
             echo "tag=latest" >> $GITHUB_ENV
           fi
+
+      - uses: goto-bus-stop/setup-zig@v2
+        if: startsWith(github.ref, 'refs/tags/')
 
       - name: Install cargo zigbuild
         if: startsWith(github.ref, 'refs/tags/')
