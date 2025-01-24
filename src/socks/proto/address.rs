@@ -2,7 +2,7 @@ use crate::socks::proto::{AsyncStreamOperation, StreamOperation};
 use bytes::BufMut;
 use std::{
     io::Cursor,
-    net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, ToSocketAddrs},
+    net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
 };
 use tokio::io::{AsyncRead, AsyncReadExt};
 
@@ -205,17 +205,6 @@ impl AsyncStreamOperation for Address {
                     port,
                 ))))
             }
-        }
-    }
-}
-
-impl ToSocketAddrs for Address {
-    type Iter = std::vec::IntoIter<SocketAddr>;
-
-    fn to_socket_addrs(&self) -> std::io::Result<Self::Iter> {
-        match self {
-            Address::SocketAddress(addr) => Ok(vec![*addr].into_iter()),
-            Address::DomainAddress(addr, port) => Ok((addr.as_str(), *port).to_socket_addrs()?),
         }
     }
 }
