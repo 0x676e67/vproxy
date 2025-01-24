@@ -179,9 +179,7 @@ fn main() -> Result<()> {
         Commands::PS => daemon::status(),
         #[cfg(target_family = "unix")]
         Commands::Log => daemon::log(),
-        Commands::Oneself {
-            command,
-        } => match command {
+        Commands::Oneself { command } => match command {
             Oneself::Update => oneself::update(),
             Oneself::Uninstall => oneself::uninstall(),
         },
