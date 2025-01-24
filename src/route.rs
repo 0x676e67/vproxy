@@ -155,7 +155,6 @@ pub fn sysctl_ipv6_no_local_bind(subnet: &IpCidr) {
     }
 }
 
-///
 /// This function uses the `sysctl` command to enable IPv6 on all interfaces.
 /// It attempts to change the setting by calling the `execute_sysctl` function
 /// with the appropriate parameters. If the `sysctl` command fails, it logs an

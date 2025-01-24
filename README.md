@@ -35,7 +35,7 @@ Commands:
   stop     Stop server daemon
   ps       Show server daemon process
   log      Show server daemon log
-  update   Update application
+  self     Modify server installation
   help     Print this message or the help of the given subcommand(s)
 
 Options:
@@ -138,8 +138,11 @@ vproxy log
 # Show daemon status
 vproxy status
 
-# Online update
-vproxy update
+# Download and install updates to vproxy
+vproxy self update
+
+# Uninstall vproxy
+vproxy self uninstall
 
 # Test loop request
 while true; do curl -x http://127.0.0.1:8100 -s https://api.ip.sb/ip -A Mozilla; done

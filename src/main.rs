@@ -4,11 +4,11 @@ mod daemon;
 mod error;
 mod extension;
 mod http;
+mod oneself;
 #[cfg(target_os = "linux")]
 mod route;
 mod serve;
 mod socks;
-mod update;
 
 use clap::{Args, Parser, Subcommand};
 use std::{net::SocketAddr, path::PathBuf};
@@ -70,8 +70,12 @@ pub enum Commands {
     #[cfg(target_family = "unix")]
     Log,
 
-    /// Update application
-    Update,
+    /// Modify server installation
+    #[clap(name = "self")]
+    Oneself {
+        #[clap(subcommand)]
+        command: Oneself,
+    },
 }
 
 /// Choose the authentication type
@@ -152,6 +156,15 @@ pub struct BootArgs {
     proxy: Proxy,
 }
 
+#[derive(Subcommand, Clone)]
+
+pub enum Oneself {
+    /// Download and install updates to the proxy server
+    Update,
+    /// Uninstall proxy server
+    Uninstall,
+}
+
 fn main() -> Result<()> {
     let opt = Opt::parse();
     match opt.commands {
@@ -166,6 +179,11 @@ fn main() -> Result<()> {
         Commands::PS => daemon::status(),
         #[cfg(target_family = "unix")]
         Commands::Log => daemon::log(),
-        Commands::Update => update::update(),
+        Commands::Oneself {
+            command,
+        } => match command {
+            Oneself::Update => oneself::update(),
+            Oneself::Uninstall => oneself::uninstall(),
+        },
     }
 }
