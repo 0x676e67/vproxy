@@ -124,7 +124,7 @@ async fn hanlde_connect_proxy(
                 .connect_with_domain((domain, port), extension)
                 .await
         }
-        Address::SocketAddress(socket_addr) => connector.connect(socket_addr, &extension).await,
+        Address::SocketAddress(socket_addr) => connector.connect(socket_addr, extension).await,
     };
 
     match target_stream {

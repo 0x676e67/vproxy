@@ -180,13 +180,13 @@ impl TcpConnector<'_> {
             (Some(cidr), _) => match cidr {
                 IpCidr::V4(cidr) => {
                     let ip = IpAddr::V4(
-                        assign_ipv4_from_extension(cidr, self.inner.cidr_range, &extension).await,
+                        assign_ipv4_from_extension(cidr, self.inner.cidr_range, extension).await,
                     );
                     Ok(SocketAddr::new(ip, 0))
                 }
                 IpCidr::V6(cidr) => {
                     let ip = IpAddr::V6(
-                        assign_ipv6_from_extension(cidr, self.inner.cidr_range, &extension).await,
+                        assign_ipv6_from_extension(cidr, self.inner.cidr_range, extension).await,
                     );
                     Ok(SocketAddr::new(ip, 0))
                 }
@@ -228,7 +228,7 @@ impl TcpConnector<'_> {
         let mut last_err = None;
 
         for target_addr in addrs {
-            match self.connect(target_addr, &extension).await {
+            match self.connect(target_addr, extension).await {
                 Ok(stream) => return Ok(stream),
                 Err(e) => last_err = Some(e),
             };
@@ -353,7 +353,7 @@ impl TcpConnector<'_> {
     pub async fn connect(
         &self,
         target_addr: SocketAddr,
-        extension: &Extension,
+        extension: Extension,
     ) -> std::io::Result<TcpStream> {
         match (self.inner.cidr, self.inner.fallback) {
             (None, Some(fallback)) => {
@@ -417,7 +417,7 @@ impl TcpConnector<'_> {
         &self,
         target_addr: SocketAddr,
         cidr: IpCidr,
-        extension: &Extension,
+        extension: Extension,
     ) -> std::io::Result<TcpStream> {
         let socket = self.create_socket_with_cidr(cidr, extension).await?;
         socket.connect(target_addr).await
@@ -490,7 +490,7 @@ impl TcpConnector<'_> {
         target_addr: SocketAddr,
         cidr: IpCidr,
         fallback: IpAddr,
-        extension: &Extension,
+        extension: Extension,
     ) -> std::io::Result<TcpStream> {
         match self.connect_with_cidr(target_addr, cidr, extension).await {
             Ok(first) => Ok(first),
@@ -562,7 +562,7 @@ impl TcpConnector<'_> {
     async fn create_socket_with_cidr(
         &self,
         cidr: IpCidr,
-        extension: &Extension,
+        extension: Extension,
     ) -> std::io::Result<TcpSocket> {
         match cidr {
             IpCidr::V4(cidr) => {
@@ -625,9 +625,9 @@ impl UdpConnector<'_> {
     pub async fn bind_socket(&self, extension: Extension) -> std::io::Result<UdpSocket> {
         match (self.inner.cidr, self.inner.fallback) {
             (None, Some(fallback)) => self.create_socket_with_addr(fallback).await,
-            (Some(cidr), None) => self.create_socket_with_cidr(cidr, &extension).await,
+            (Some(cidr), None) => self.create_socket_with_cidr(cidr, extension).await,
             (Some(cidr), Some(fallback)) => {
-                self.create_socket_with_cidr_and_fallback(cidr, fallback, &extension)
+                self.create_socket_with_cidr_and_fallback(cidr, fallback, extension)
                     .await
             }
             (None, None) => UdpSocket::bind(SocketAddr::from(([0, 0, 0, 0], 0))).await,
@@ -765,7 +765,7 @@ impl UdpConnector<'_> {
     async fn create_socket_with_cidr(
         &self,
         cidr: IpCidr,
-        extension: &Extension,
+        extension: Extension,
     ) -> std::io::Result<UdpSocket> {
         match cidr {
             IpCidr::V4(cidr) => {
@@ -805,7 +805,7 @@ impl UdpConnector<'_> {
         &self,
         cidr: IpCidr,
         fallback: IpAddr,
-        extension: &Extension,
+        extension: Extension,
     ) -> std::io::Result<UdpSocket> {
         match self.create_socket_with_cidr(cidr, extension).await {
             Ok(first) => Ok(first),
@@ -871,19 +871,19 @@ impl HttpConnector<'_> {
         let mut connector = self.inner.http.clone();
         match (self.inner.cidr, self.inner.fallback) {
             (Some(IpCidr::V4(cidr)), Some(IpAddr::V6(v6))) => {
-                let v4 = assign_ipv4_from_extension(cidr, self.inner.cidr_range, &extension).await;
+                let v4 = assign_ipv4_from_extension(cidr, self.inner.cidr_range, extension).await;
                 connector.set_local_addresses(v4, v6);
             }
             (Some(IpCidr::V4(cidr)), None) => {
-                let v4 = assign_ipv4_from_extension(cidr, self.inner.cidr_range, &extension).await;
+                let v4 = assign_ipv4_from_extension(cidr, self.inner.cidr_range, extension).await;
                 connector.set_local_address(Some(v4.into()));
             }
             (Some(IpCidr::V6(cidr)), Some(IpAddr::V4(v4))) => {
-                let v6 = assign_ipv6_from_extension(cidr, self.inner.cidr_range, &extension).await;
+                let v6 = assign_ipv6_from_extension(cidr, self.inner.cidr_range, extension).await;
                 connector.set_local_addresses(v4, v6);
             }
             (Some(IpCidr::V6(cidr)), None) => {
-                let v6 = assign_ipv6_from_extension(cidr, self.inner.cidr_range, &extension).await;
+                let v6 = assign_ipv6_from_extension(cidr, self.inner.cidr_range, extension).await;
                 connector.set_local_address(Some(v6.into()));
             }
             (None, addr) => connector.set_local_address(addr),
@@ -940,7 +940,7 @@ fn error(last_err: Option<std::io::Error>) -> std::io::Error {
 async fn assign_ipv4_from_extension(
     cidr: Ipv4Cidr,
     cidr_range: Option<u8>,
-    extension: &Extension,
+    extension: Extension,
 ) -> Ipv4Addr {
     if let Some(combined) = combined(extension).await {
         match extension {
@@ -975,7 +975,7 @@ async fn assign_ipv4_from_extension(
 async fn assign_ipv6_from_extension(
     cidr: Ipv6Cidr,
     cidr_range: Option<u8>,
-    extension: &Extension,
+    extension: Extension,
 ) -> Ipv6Addr {
     if let Some(combined) = combined(extension).await {
         match extension {
@@ -1137,8 +1137,8 @@ fn assign_ipv6_with_range(cidr: Ipv6Cidr, range: u8, combined: u128) -> Ipv6Addr
 ///
 /// Returns an `Option<u64>` which is `Some(combined_value)` if the operation
 /// is applicable and successful, or `None` if the `extension` variant does not
-async fn combined(extension: &Extension) -> Option<u64> {
-    match *extension {
+async fn combined(extension: Extension) -> Option<u64> {
+    match extension {
         Extension::Range(value) => Some(value),
         Extension::Session(value) => Some(value),
         Extension::TTL(ttl) => tokio::task::spawn_blocking(move || {
@@ -1201,7 +1201,7 @@ mod tests {
     async fn test_assign_ipv4_from_extension() {
         let cidr = "2001:470:e953::/48".parse().unwrap();
         let extension = Extension::Session(0x12345);
-        let ipv6_address = assign_ipv6_from_extension(cidr, None, &extension).await;
+        let ipv6_address = assign_ipv6_from_extension(cidr, None, extension).await;
         assert_eq!(
             ipv6_address,
             std::net::Ipv6Addr::from([0x2001, 0x470, 0xe953, 0, 0, 0, 1, 0x2345])

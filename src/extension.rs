@@ -1,6 +1,6 @@
 /// Enum representing different types of extensions.
 #[allow(clippy::upper_case_acronyms)]
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Copy, Debug, Default)]
 pub enum Extension {
     #[default]
     None,
