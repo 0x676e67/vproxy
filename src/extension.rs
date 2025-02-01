@@ -1,3 +1,5 @@
+use std::time::{SystemTime, UNIX_EPOCH};
+
 /// Enum representing different types of extensions.
 #[allow(clippy::upper_case_acronyms)]
 #[derive(Clone, Copy, Debug, Default)]
@@ -168,7 +170,16 @@ fn parse_session_extension(s: &str) -> Extension {
 #[inline(always)]
 fn parse_ttl_extension(s: &str) -> Extension {
     if let Ok(ttl) = s.parse::<u64>() {
-        return Extension::TTL(ttl);
+        let start = SystemTime::now();
+        let timestamp = start
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(rand::random());
+
+        let time = timestamp - (timestamp % ttl);
+
+        let hash = fxhash::hash64(&time.to_be_bytes());
+        return Extension::TTL(hash);
     }
     Extension::None
 }
