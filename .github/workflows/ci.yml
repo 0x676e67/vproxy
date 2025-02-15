@@ -99,7 +99,7 @@ jobs:
     name: Publish crates
     runs-on: ubuntu-latest
     environment: Linux
-    needs: ["build"]
+    needs: ["build", "style"]
     if: startsWith(github.ref, 'refs/tags/')
     steps:
       - uses: actions/checkout@v3
