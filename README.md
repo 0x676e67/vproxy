@@ -1,6 +1,6 @@
 # vproxy
 
-[![Release](https://github.com/0x676e67/vproxy/actions/workflows/release.yml/badge.svg)](https://github.com/0x676e67/vproxy/actions/workflows/release.yml)
+[![CI](https://github.com/0x676e67/vproxy/actions/workflows/ci.yml/badge.svg)](https://github.com/0x676e67/vproxy/actions/workflows/ci.yml)
 [![Crates.io License](https://img.shields.io/crates/l/vproxy)](./LICENSE)
 ![Crates.io MSRV](https://img.shields.io/crates/msrv/vproxy)
 [![crates.io](https://img.shields.io/crates/v/vproxy.svg)](https://crates.io/crates/vproxy)
