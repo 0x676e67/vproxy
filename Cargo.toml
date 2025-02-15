@@ -27,7 +27,6 @@ self_update = { version = "0.42.0", default-features = false, features = [
     "compression-flate2",
 ] }
 fxhash = "0.2.1"
-num_cpus = "1.0"
 
 # for log
 tracing = "0.1.40"
