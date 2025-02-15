@@ -7,7 +7,7 @@ description = "A high-performance HTTP/HTTPS/SOCKS5 proxy server"
 readme = "README.md"
 license = "GPL-3.0"
 repository = "https://github.com/0x676e67/vproxy"
-rust-version = "1.81"
+rust-version = "1.84"
 
 [dependencies]
 base64 = "0.22.0"
