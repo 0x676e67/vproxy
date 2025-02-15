@@ -34,7 +34,7 @@ tracing-subscriber = { version = "0.3.19", features = ["env-filter"] }
 
 # for http
 http = "1"
-hyper = { version = "1.5.0", features = ["http1", "server"] }
+hyper = { version = "1.6.0", features = ["http1", "server"] }
 hyper-util = { version = "0.1.10", features = ["full"] }
 http-body-util = "0.1"
 
