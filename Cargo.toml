@@ -21,7 +21,7 @@ tokio = { version = "1", features = [
     "io-util",
 ] }
 rand = "0.9.0"
-clap = { version = "4", features = ["derive", "env"] }
+clap = { version = "4.5.31", features = ["derive", "env"] }
 self_update = { version = "0.42.0", default-features = false, features = [
     "rustls",
     "archive-tar",
@@ -29,11 +29,11 @@ self_update = { version = "0.42.0", default-features = false, features = [
 ] }
 fxhash = "0.2.1"
 
-# for log
+# log
 tracing = "0.1.40"
 tracing-subscriber = { version = "0.3.19", features = ["env-filter"] }
 
-# for http
+# http
 http = "1"
 hyper = { version = "1.6.0", features = ["http1", "server"] }
 hyper-util = { version = "0.1.10", features = ["full"] }
@@ -42,16 +42,16 @@ http-body-util = "0.1"
 # rustls
 rustls-pki-types = { version = "1.11.0" }
 rustls-pemfile = { version = "2.2.0" }
-tokio-rustls = { version = "0.26.0", default-features = false, features = ["tls12"] }
+tokio-rustls = { version = "0.26.2", default-features = false, features = ["tls12"] }
 rcgen = "0.13.0"
 
-# for socks5
-bytes = "1.10.0"
+# socks5
+bytes = "1.10.1"
 pin-project-lite = "0.2.16"
 tokio-stream = "0.1.0"
 percent-encoding = "2.3.1"
 
-# for memory allocator
+# memory allocator
 tcmalloc = { version = "0.3.0", optional = true }
 snmalloc-rs = { version = "0.3.8", optional = true }
 rpmalloc = { version = "0.2.2", optional = true }
