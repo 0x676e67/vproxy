@@ -1,7 +1,7 @@
 use self::{associate::UdpAssociate, bind::Bind, connect::Connect};
 use super::{super::error::Error, auth::Auth};
 use crate::socks::{
-    proto::{self, handshake, Address, AsyncStreamOperation, Command, Method},
+    proto::{self, Address, AsyncStreamOperation, Command, Method, handshake},
     server::AuthAdaptor,
 };
 use std::{net::SocketAddr, sync::Arc, time::Duration};

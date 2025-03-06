@@ -1,9 +1,9 @@
 use super::{extension::Extension, http::error::Error};
 use cidr::{IpCidr, Ipv4Cidr, Ipv6Cidr};
-use http::{uri::Authority, Request, Response};
+use http::{Request, Response, uri::Authority};
 use hyper::body::Incoming;
 use hyper_util::{
-    client::legacy::{connect, Client},
+    client::legacy::{Client, connect},
     rt::{TokioExecutor, TokioTimer},
 };
 use rand::random;
@@ -12,7 +12,7 @@ use std::{
     time::Duration,
 };
 use tokio::{
-    net::{lookup_host, TcpSocket, TcpStream, UdpSocket},
+    net::{TcpSocket, TcpStream, UdpSocket, lookup_host},
     time::timeout,
 };
 

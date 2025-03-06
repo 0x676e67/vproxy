@@ -1,6 +1,6 @@
 use crate::{
     extension::Extension,
-    socks::proto::{handshake::password, AsyncStreamOperation, Method, UsernamePassword},
+    socks::proto::{AsyncStreamOperation, Method, UsernamePassword, handshake::password},
 };
 use password::{Request, Response, Status::*};
 use std::{

@@ -1,6 +1,6 @@
 use auth::Authenticator;
 use http::uri::Authority;
-use tracing::{instrument, Level};
+use tracing::{Level, instrument};
 
 use super::accept::Accept;
 use super::error::Error;
@@ -11,9 +11,9 @@ use crate::serve::{Context, Serve};
 use crate::{connect::Connector, extension::Extension};
 use bytes::Bytes;
 use http::StatusCode;
-use http_body_util::{combinators::BoxBody, BodyExt, Empty, Full};
+use http_body_util::{BodyExt, Empty, Full, combinators::BoxBody};
 use hyper::service::service_fn;
-use hyper::{body::Incoming, upgrade::Upgraded, Method, Request, Response};
+use hyper::{Method, Request, Response, body::Incoming, upgrade::Upgraded};
 use hyper_util::{
     rt::{TokioExecutor, TokioIo},
     server::conn::auto::Builder,
@@ -303,11 +303,11 @@ fn full<T: Into<Bytes>>(chunk: T) -> BoxBody<Bytes, hyper::Error> {
 }
 
 mod auth {
-    use super::{empty, Error};
+    use super::{Error, empty};
     use crate::extension::Extension;
     use base64::Engine;
     use bytes::Bytes;
-    use http::{header, HeaderMap, Response, StatusCode};
+    use http::{HeaderMap, Response, StatusCode, header};
     use http_body_util::combinators::BoxBody;
 
     impl TryInto<Response<BoxBody<Bytes, hyper::Error>>> for Error {

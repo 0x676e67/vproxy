@@ -1,7 +1,7 @@
 use crate::BIN_NAME;
 use rcgen::{
-    date_time_ymd, BasicConstraints, CertificateParams, DistinguishedName, DnType, IsCa, KeyPair,
-    KeyUsagePurpose, SanType,
+    BasicConstraints, CertificateParams, DistinguishedName, DnType, IsCa, KeyPair, KeyUsagePurpose,
+    SanType, date_time_ymd,
 };
 
 /// Get self-signed certificate and key.

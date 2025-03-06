@@ -1,10 +1,10 @@
 use cidr::IpCidr;
 use futures::TryStreamExt;
 use netlink_packet_route::{
-    route::{RouteAddress, RouteAttribute, RouteProtocol, RouteScope, RouteType},
     AddressFamily,
+    route::{RouteAddress, RouteAttribute, RouteProtocol, RouteScope, RouteType},
 };
-use rtnetlink::{new_connection, Error, Handle, IpVersion};
+use rtnetlink::{Error, Handle, IpVersion, new_connection};
 use sysctl::{Sysctl, SysctlError};
 
 /// Attempts to add a route to the given subnet on the loopback interface.

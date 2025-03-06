@@ -1,8 +1,8 @@
 use crate::{
+    AuthMode, BootArgs, Proxy, Result,
     connect::Connector,
     http::{HttpServer, HttpsServer},
     socks::Socks5Server,
-    AuthMode, BootArgs, Proxy, Result,
 };
 use std::net::SocketAddr;
 use tracing_subscriber::{EnvFilter, FmtSubscriber};

@@ -1,4 +1,4 @@
-use crate::{serve, BootArgs, BIN_NAME};
+use crate::{BIN_NAME, BootArgs, serve};
 use daemonize::Daemonize;
 use nix::sys::signal;
 use nix::unistd::{Pid, Uid, User};

@@ -8,8 +8,8 @@ use std::{
 use tokio::{
     io::{AsyncRead, AsyncWrite, AsyncWriteExt, ReadBuf},
     net::{
-        tcp::{OwnedReadHalf, OwnedWriteHalf, ReadHalf, WriteHalf},
         TcpStream,
+        tcp::{OwnedReadHalf, OwnedWriteHalf, ReadHalf, WriteHalf},
     },
 };
 

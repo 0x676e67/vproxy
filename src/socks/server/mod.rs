@@ -14,7 +14,7 @@ use super::{
 };
 pub use crate::socks::server::{
     auth::AuthAdaptor,
-    connection::{associate::UdpAssociate, ClientConnection, IncomingConnection},
+    connection::{ClientConnection, IncomingConnection, associate::UdpAssociate},
 };
 use crate::{
     connect::Connector,
@@ -27,7 +27,7 @@ use crate::{
 };
 
 use tokio::{io::AsyncWriteExt, net::UdpSocket, sync::RwLock};
-use tracing::{instrument, Level};
+use tracing::{Level, instrument};
 
 pub struct Socks5Server {
     listener: TcpListener,

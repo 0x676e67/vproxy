@@ -12,8 +12,8 @@ use std::{
     task::{Context, Poll},
 };
 use tokio::io::{AsyncRead, AsyncWrite};
-use tokio::time::{timeout, Timeout};
-use tokio_rustls::{server::TlsStream, Accept, TlsAcceptor};
+use tokio::time::{Timeout, timeout};
+use tokio_rustls::{Accept, TlsAcceptor, server::TlsStream};
 
 pin_project! {
     /// Future type for [`RustlsAcceptor`](crate::tls_rustls::RustlsAcceptor).
@@ -99,7 +99,7 @@ where
                     }
                     Poll::Ready(Ok(Err(e))) => return Poll::Ready(Err(e)),
                     Poll::Ready(Err(timeout)) => {
-                        return Poll::Ready(Err(Error::new(ErrorKind::TimedOut, timeout)))
+                        return Poll::Ready(Err(Error::new(ErrorKind::TimedOut, timeout)));
                     }
                     Poll::Pending => return Poll::Pending,
                 },

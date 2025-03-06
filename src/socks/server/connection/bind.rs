@@ -9,8 +9,8 @@ use std::{
 use tokio::{
     io::{AsyncRead, AsyncWrite, AsyncWriteExt, ReadBuf},
     net::{
-        tcp::{ReadHalf, WriteHalf},
         TcpStream,
+        tcp::{ReadHalf, WriteHalf},
     },
 };
 

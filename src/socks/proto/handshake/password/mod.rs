@@ -17,7 +17,7 @@ pub struct UsernamePassword {
 
 impl std::fmt::Display for UsernamePassword {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        use percent_encoding::{percent_encode, NON_ALPHANUMERIC};
+        use percent_encoding::{NON_ALPHANUMERIC, percent_encode};
         match (self.username.is_empty(), self.password.is_empty()) {
             (true, true) => write!(f, ""),
             (true, false) => write!(
