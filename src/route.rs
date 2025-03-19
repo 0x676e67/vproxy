@@ -1,10 +1,12 @@
+use std::net::{Ipv4Addr, Ipv6Addr};
+
 use cidr::IpCidr;
 use futures::TryStreamExt;
 use netlink_packet_route::{
     AddressFamily,
     route::{RouteAddress, RouteAttribute, RouteProtocol, RouteScope, RouteType},
 };
-use rtnetlink::{Error, Handle, IpVersion, new_connection};
+use rtnetlink::{Error, Handle, RouteMessageBuilder, new_connection};
 use sysctl::{Sysctl, SysctlError};
 
 /// Attempts to add a route to the given subnet on the loopback interface.
@@ -38,7 +40,6 @@ pub async fn sysctl_route_add_cidr(subnet: &IpCidr) {
 async fn add_route(handle: Handle, cidr: &IpCidr) -> Result<(), Error> {
     const LOCAL_TABLE_ID: u8 = 255;
 
-    let route = handle.route();
     let iface_idx = handle
         .link()
         .get()
@@ -50,87 +51,71 @@ async fn add_route(handle: Handle, cidr: &IpCidr) -> Result<(), Error> {
         .header
         .index;
 
+    let route = handle.route();
+
+    let (route_message, address_family, destination_prefix_length, route_address) = match cidr {
+        IpCidr::V4(v4) => (
+            RouteMessageBuilder::<Ipv4Addr>::new().build(),
+            AddressFamily::Inet,
+            v4.network_length(),
+            RouteAddress::Inet(v4.first_address()),
+        ),
+        IpCidr::V6(v6) => (
+            RouteMessageBuilder::<Ipv6Addr>::new().build(),
+            AddressFamily::Inet6,
+            v6.network_length(),
+            RouteAddress::Inet6(v6.first_address()),
+        ),
+    };
+
     // Check if the route already exists
-    let route_check = |ip_version: IpVersion,
-                       address_family: AddressFamily,
-                       destination_prefix_length: u8,
-                       route_address: RouteAddress| async move {
-        let mut routes = handle.route().get(ip_version).execute();
-        while let Some(route) = routes.try_next().await? {
-            let header = route.header;
-            tracing::trace!(
-                "route attributes: {:?}\nroute header: {:?}",
-                route.attributes,
-                header
-            );
-            if header.address_family == address_family
-                && header.destination_prefix_length == destination_prefix_length
-                && header.table == LOCAL_TABLE_ID
-            {
-                for attr in route.attributes.iter() {
-                    if let RouteAttribute::Destination(dest) = attr {
-                        if dest == &route_address {
-                            tracing::info!("IP route {} already exists", cidr);
-                            return Ok(true);
-                        }
+    let mut routes = route.get(route_message).execute();
+    while let Some(route) = routes.try_next().await? {
+        let header = route.header;
+        tracing::trace!(
+            "route attributes: {:?}\nroute header: {:?}",
+            route.attributes,
+            header
+        );
+        if header.address_family == address_family
+            && header.destination_prefix_length == destination_prefix_length
+            && header.table == LOCAL_TABLE_ID
+        {
+            for attr in route.attributes.iter() {
+                if let RouteAttribute::Destination(dest) = attr {
+                    if dest == &route_address {
+                        tracing::info!("IP route {} already exists", cidr);
+                        return Ok(());
                     }
                 }
             }
         }
-        Ok(false)
+    }
+
+    // Generate the route message
+    let route_message = match cidr {
+        IpCidr::V4(v4) => RouteMessageBuilder::<Ipv4Addr>::new()
+            .destination_prefix(v4.first_address(), v4.network_length())
+            .kind(RouteType::Local)
+            .protocol(RouteProtocol::Boot)
+            .scope(RouteScope::Universe)
+            .output_interface(iface_idx)
+            .priority(1024)
+            .table_id(LOCAL_TABLE_ID.into())
+            .build(),
+        IpCidr::V6(v6) => RouteMessageBuilder::<Ipv6Addr>::new()
+            .destination_prefix(v6.first_address(), v6.network_length())
+            .kind(RouteType::Local)
+            .protocol(RouteProtocol::Boot)
+            .scope(RouteScope::Universe)
+            .output_interface(iface_idx)
+            .priority(1024)
+            .table_id(LOCAL_TABLE_ID.into())
+            .build(),
     };
 
-    // Add a route to the loopback interface.
-    match cidr {
-        IpCidr::V4(v4) => {
-            if !route_check(
-                IpVersion::V4,
-                AddressFamily::Inet,
-                v4.network_length(),
-                RouteAddress::Inet(v4.first_address()),
-            )
-            .await?
-            {
-                route
-                    .add()
-                    .v4()
-                    .destination_prefix(v4.first_address(), v4.network_length())
-                    .kind(RouteType::Local)
-                    .protocol(RouteProtocol::Boot)
-                    .scope(RouteScope::Universe)
-                    .output_interface(iface_idx)
-                    .priority(1024)
-                    .table_id(LOCAL_TABLE_ID.into())
-                    .execute()
-                    .await?;
-                tracing::info!("Added IPv4 route {}", cidr);
-            }
-        }
-        IpCidr::V6(v6) => {
-            if !route_check(
-                IpVersion::V6,
-                AddressFamily::Inet6,
-                v6.network_length(),
-                RouteAddress::Inet6(v6.first_address()),
-            )
-            .await?
-            {
-                route
-                    .add()
-                    .v6()
-                    .destination_prefix(v6.first_address(), v6.network_length())
-                    .kind(RouteType::Local)
-                    .protocol(RouteProtocol::Boot)
-                    .scope(RouteScope::Universe)
-                    .output_interface(iface_idx)
-                    .priority(1024)
-                    .table_id(LOCAL_TABLE_ID.into())
-                    .execute()
-                    .await?;
-                tracing::info!("Added IPv6 route {}", cidr);
-            }
-        }
-    }
+    route.add(route_message).execute().await?;
+    tracing::info!("Added IPv6 route {}", cidr);
 
     Ok(())
 }
