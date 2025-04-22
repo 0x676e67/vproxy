@@ -1,5 +1,6 @@
 use super::{extension::Extension, http::error::Error};
 use cidr::{IpCidr, Ipv4Cidr, Ipv6Cidr};
+use futures_util::future::Either;
 use http::{Request, Response, uri::Authority};
 use hyper::body::Incoming;
 use hyper_util::{
@@ -495,12 +496,34 @@ impl TcpConnector<'_> {
         fallback: IpAddr,
         extension: Extension,
     ) -> std::io::Result<TcpStream> {
-        match self.connect_with_cidr(target_addr, cidr, extension).await {
-            Ok(first) => Ok(first),
-            Err(err) => {
-                tracing::debug!("try connect with ipv6 failed: {}", err);
-                self.connect_with_addr(target_addr, fallback).await
+        let preferred_fut = self.connect_with_cidr(target_addr, cidr, extension);
+        futures_util::pin_mut!(preferred_fut);
+
+        let fallback_fut = self.connect_with_addr(target_addr, fallback);
+        futures_util::pin_mut!(fallback_fut);
+
+        let fallback_delay = tokio::time::sleep(self.inner.connect_timeout);
+        futures_util::pin_mut!(fallback_delay);
+
+        let (result, future) = match futures_util::future::select(preferred_fut, fallback_delay)
+            .await
+        {
+            Either::Left((result, _fallback_delay)) => (result, Either::Right(fallback_fut)),
+            Either::Right(((), preferred_fut)) => {
+                // Delay is done, start polling both the preferred and the fallback
+                match futures_util::future::select(preferred_fut, fallback_fut).await {
+                    Either::Left((result, fallback_fut)) => (result, Either::Right(fallback_fut)),
+                    Either::Right((result, preferred_fut)) => (result, Either::Left(preferred_fut)),
+                }
             }
+        };
+
+        if result.is_err() {
+            // Fallback to the remaining future (could be preferred or fallback)
+            // if we get an error
+            future.await
+        } else {
+            result
         }
     }
 

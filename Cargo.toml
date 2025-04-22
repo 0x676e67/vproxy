@@ -28,6 +28,7 @@ self_update = { version = "0.42.0", default-features = false, features = [
     "compression-flate2",
 ] }
 fxhash = "0.2.1"
+futures-util = { version = "0.3.30", default-features = false }
 
 # log
 tracing = "0.1.40"
