@@ -62,7 +62,7 @@ mimalloc = { version = "0.1.46", default-features = false, optional = true }
 [target.'cfg(target_os = "linux")'.dependencies]
 sysctl = "0.6.0"
 rtnetlink = "0.16"
-netlink-packet-route = "0.22"
+netlink-packet-route = "0.23"
 futures = "0.3.30"
 
 [target.'cfg(target_family = "unix")'.dependencies]
