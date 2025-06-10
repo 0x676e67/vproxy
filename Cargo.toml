@@ -19,6 +19,7 @@ tokio = { version = "1.45.1", features = [
     "rt-multi-thread",
     "macros",
     "io-util",
+    "signal",
 ] }
 rand = "0.9.1"
 clap = { version = "4.5.40", features = ["derive", "env"] }

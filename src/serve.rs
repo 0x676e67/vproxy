@@ -96,8 +96,21 @@ pub fn run(args: BootArgs) -> Result<()> {
                 crate::route::sysctl_route_add_cidr(cidr).await;
             }
 
+            let shutdown_signal = async {
+                tokio::signal::ctrl_c()
+                    .await
+                    .expect("failed to listen for shutdown signal");
+                tracing::info!("Shutdown signal received, shutting down gracefully...");
+            };
+
             let server = Server::new(args)?;
-            server.serve().await.map_err(Into::into)
+
+            tokio::select! {
+                _ = server.serve() => Ok(()),
+                _ = shutdown_signal => {
+                    Ok(())
+                }
+            }
         })
 }
 
