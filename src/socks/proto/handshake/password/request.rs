@@ -23,7 +23,7 @@ impl StreamOperation for Request {
         let ver = ver[0];
 
         if ver != super::SUBNEGOTIATION_VERSION {
-            let err = format!("Unsupported sub-negotiation version {0:#x}", ver);
+            let err = format!("Unsupported sub-negotiation version {ver:#x}");
             return Err(std::io::Error::new(std::io::ErrorKind::Unsupported, err));
         }
 
@@ -72,7 +72,7 @@ impl AsyncStreamOperation for Request {
         let ver = r.read_u8().await?;
 
         if ver != super::SUBNEGOTIATION_VERSION {
-            let err = format!("Unsupported sub-negotiation version {0:#x}", ver);
+            let err = format!("Unsupported sub-negotiation version {ver:#x}");
             return Err(std::io::Error::new(std::io::ErrorKind::Unsupported, err));
         }
 

@@ -49,7 +49,7 @@ impl From<Version> for u8 {
 impl std::fmt::Display for Version {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let v: u8 = (*self).into();
-        write!(f, "{}", v)
+        write!(f, "{v}")
     }
 }
 

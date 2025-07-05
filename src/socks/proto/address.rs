@@ -18,7 +18,7 @@ impl TryFrom<u8> for AddressType {
     type Error = std::io::Error;
 
     fn try_from(code: u8) -> core::result::Result<Self, Self::Error> {
-        let err = format!("Unsupported address type code {0:#x}", code);
+        let err = format!("Unsupported address type code {code:#x}");
         match code {
             0x01 => Ok(AddressType::IPv4),
             0x03 => Ok(AddressType::Domain),

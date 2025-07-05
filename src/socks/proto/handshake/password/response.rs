@@ -18,7 +18,7 @@ impl TryFrom<u8> for Status {
     type Error = std::io::Error;
 
     fn try_from(value: u8) -> Result<Self, Self::Error> {
-        let err = format!("Invalid sub-negotiation status {0:#x}", value);
+        let err = format!("Invalid sub-negotiation status {value:#x}");
         match value {
             0x00 => Ok(Status::Succeeded),
             0xff => Ok(Status::Failed),
@@ -63,7 +63,7 @@ impl StreamOperation for Response {
         let ver = ver[0];
 
         if ver != super::SUBNEGOTIATION_VERSION {
-            let err = format!("Unsupported sub-negotiation version {0:#x}", ver);
+            let err = format!("Unsupported sub-negotiation version {ver:#x}");
             return Err(std::io::Error::new(std::io::ErrorKind::Unsupported, err));
         }
 
@@ -91,7 +91,7 @@ impl AsyncStreamOperation for Response {
         let ver = r.read_u8().await?;
 
         if ver != super::SUBNEGOTIATION_VERSION {
-            let err = format!("Unsupported sub-negotiation version {0:#x}", ver);
+            let err = format!("Unsupported sub-negotiation version {ver:#x}");
             return Err(std::io::Error::new(std::io::ErrorKind::Unsupported, err));
         }
 

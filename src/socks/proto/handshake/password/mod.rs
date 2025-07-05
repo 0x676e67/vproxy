@@ -33,7 +33,7 @@ impl std::fmt::Display for UsernamePassword {
             (false, false) => {
                 let username = percent_encode(self.username.as_bytes(), NON_ALPHANUMERIC);
                 let password = percent_encode(self.password.as_bytes(), NON_ALPHANUMERIC);
-                write!(f, "{}:{}", username, password)
+                write!(f, "{username}:{password}")
             }
         }
     }

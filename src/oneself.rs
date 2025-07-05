@@ -30,13 +30,13 @@ pub(super) fn update() -> crate::Result<()> {
         if let Some(body) = &release.body {
             if !body.trim().is_empty() {
                 println!("{} upgraded to {}:\n", BIN_NAME, release.version);
-                println!("{}", body);
+                println!("{body}");
             } else {
                 println!("{} upgraded to {}", BIN_NAME, release.version);
             }
         }
     } else {
-        println!("{} is up-to-date", BIN_NAME);
+        println!("{BIN_NAME} is up-to-date");
     }
 
     Ok(())

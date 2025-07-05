@@ -54,8 +54,8 @@ impl std::fmt::Display for Method {
             Method::NoAuth => write!(f, "NoAuth"),
             Method::GssApi => write!(f, "GssApi"),
             Method::Password => write!(f, "UserPass"),
-            Method::IanaReserved(value) => write!(f, "IanaReserved({0:#x})", value),
-            Method::Private(value) => write!(f, "Private({0:#x})", value),
+            Method::IanaReserved(value) => write!(f, "IanaReserved({value:#x})"),
+            Method::Private(value) => write!(f, "Private({value:#x})"),
             Method::NoAcceptableMethods => write!(f, "NoAcceptableMethods"),
         }
     }

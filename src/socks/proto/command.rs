@@ -9,7 +9,7 @@ impl TryFrom<u8> for Command {
     type Error = std::io::Error;
 
     fn try_from(code: u8) -> std::result::Result<Self, Self::Error> {
-        let err = format!("Unsupported command code {0:#x}", code);
+        let err = format!("Unsupported command code {code:#x}");
         match code {
             0x01 => Ok(Command::Connect),
             0x02 => Ok(Command::Bind),

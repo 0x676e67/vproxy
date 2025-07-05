@@ -20,7 +20,7 @@ use hyper_util::{
 };
 use std::path::PathBuf;
 use std::{
-    io::{self, ErrorKind},
+    io::{self},
     net::SocketAddr,
     sync::Arc,
     time::Duration,
@@ -176,7 +176,7 @@ async fn accept(listener: &mut TcpListener) -> (TcpStream, SocketAddr) {
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
 
 pub(super) fn io_other<E: Into<BoxError>>(error: E) -> io::Error {
-    io::Error::new(ErrorKind::Other, error)
+    io::Error::other(error)
 }
 
 #[derive(Clone)]

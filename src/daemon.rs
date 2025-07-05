@@ -31,7 +31,7 @@ pub fn check_root() {
 
 pub fn start(args: BootArgs) -> crate::Result<()> {
     if let Some(pid) = pid() {
-        println!("{} is already running with pid: {}", BIN_NAME, pid);
+        println!("{BIN_NAME} is already running with pid: {pid}");
         return Ok(());
     }
 
@@ -116,7 +116,7 @@ pub fn status() -> crate::Result<()> {
                 }
             }
         }
-        None => println!("{} is not running", BIN_NAME),
+        None => println!("{BIN_NAME} is not running"),
     }
     Ok(())
 }
@@ -145,9 +145,9 @@ pub fn log() -> crate::Result<()> {
                     start = false;
                     println!("{placeholder}");
                 }
-                println!("{}", content);
+                println!("{content}");
             } else if let Err(err) = line {
-                eprintln!("Error reading line: {}", err);
+                eprintln!("Error reading line: {err}");
             }
         }
 

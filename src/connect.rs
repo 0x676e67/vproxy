@@ -1199,8 +1199,8 @@ mod tests {
             let ipv4_address1 = assign_ipv4_with_range(cidr, range, combined);
             let ipv4_address2 = assign_ipv4_with_range(cidr, range, combined);
 
-            println!("IPv4 Address 1: {}", ipv4_address1);
-            println!("IPv4 Address 2: {}", ipv4_address2);
+            println!("IPv4 Address 1: {ipv4_address1}");
+            println!("IPv4 Address 2: {ipv4_address2}");
         }
     }
 
@@ -1216,8 +1216,8 @@ mod tests {
             let ipv6_address1 = assign_ipv6_with_range(cidr, range, combined);
             let ipv6_address2 = assign_ipv6_with_range(cidr, range, combined);
 
-            println!("{}", ipv6_address1);
-            println!("{}", ipv6_address2)
+            println!("{ipv6_address1}");
+            println!("{ipv6_address2}")
         }
     }
 
