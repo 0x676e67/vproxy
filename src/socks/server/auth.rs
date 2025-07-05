@@ -3,10 +3,7 @@ use crate::{
     socks::proto::{AsyncStreamOperation, Method, UsernamePassword, handshake::password},
 };
 use password::{Request, Response, Status::*};
-use std::{
-    future::Future,
-    io::Error,
-};
+use std::{future::Future, io::Error};
 use tokio::net::TcpStream;
 
 pub trait Auth: Send {
@@ -107,9 +104,7 @@ impl Auth for PasswordAuth {
 
             Ok((true, extension))
         } else {
-            Err(Error::other(
-                "username or password is incorrect",
-            ))
+            Err(Error::other("username or password is incorrect"))
         }
     }
 }

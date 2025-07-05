@@ -102,7 +102,11 @@ fn parse_extension(
     if !s.contains(prefix) {
         return None;
     }
-    let s = if trim { s.trim_start_matches(prefix) } else { s };
+    let s = if trim {
+        s.trim_start_matches(prefix)
+    } else {
+        s
+    };
     let extension = handler(s);
     tracing::trace!("Extension: {:?}", extension);
     Some(extension)
