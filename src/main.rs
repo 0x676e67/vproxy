@@ -1,3 +1,6 @@
+#![cfg_attr(test, deny(warnings))]
+#![cfg_attr(not(test), warn(unused_crate_dependencies))]
+
 mod connect;
 #[cfg(target_family = "unix")]
 mod daemon;
