@@ -38,6 +38,26 @@ pub struct Connector {
     http: connect::HttpConnector,
 }
 
+/// `TcpConnector` is a lightweight wrapper for TCP connection settings.
+/// It provides methods to create and manage TCP connections using the configuration from `Connector`.
+pub struct TcpConnector<'a> {
+    inner: &'a Connector,
+}
+
+/// `UdpConnector` is a lightweight wrapper for UDP connection settings.
+/// It provides methods to create and manage UDP sockets using the configuration from `Connector`.
+pub struct UdpConnector<'a> {
+    inner: &'a Connector,
+}
+
+/// `HttpConnector` is a lightweight wrapper for HTTP connection settings.
+/// It provides methods to create and manage HTTP connections using the configuration from `Connector`.
+pub struct HttpConnector<'a> {
+    inner: &'a Connector,
+}
+
+// ==== impl Connector ====
+
 impl Connector {
     /// Constructs a new `Connector` instance, accepting optional IPv6 CIDR and
     /// fallback IP address as parameters.
@@ -59,115 +79,29 @@ impl Connector {
         }
     }
 
-    /// Returns a new instance of `HttpConnector` configured with the same settings
-    /// as the current `Connector`.
-    ///
-    /// This method clones the internal `HttpConnector` and copies the CIDR, CIDR range,
-    /// and fallback IP address settings from the current `Connector` instance.
-    ///
-    /// # Returns
-    ///
-    /// A new `HttpConnector` instance with the same configuration as the current `Connector`.
-    ///
-    /// # Example
-    ///
-    /// ```
-    /// let connector = Connector::new(Some(cidr), Some(cidr_range), Some(fallback), connect_timeout);
-    /// let http_connector = connector.http_connector();
-    /// ```
-    #[inline(always)]
+    /// Creates a new `HttpConnector` using the current configuration.
+    #[inline]
     pub fn http_connector(&self) -> HttpConnector {
         HttpConnector { inner: self }
     }
 
-    /// Returns a new instance of `TcpConnector` configured with the same settings
-    /// as the current `Connector`.
-    ///
-    /// This method copies the CIDR, CIDR range, fallback IP address, and connect timeout
-    /// settings from the current `Connector` instance.
-    ///
-    /// # Returns
-    ///
-    /// A new `TcpConnector` instance with the same configuration as the current `Connector`.
-    ///
-    /// # Example
-    ///
-    /// ```
-    /// let connector = Connector::new(Some(cidr), Some(cidr_range), Some(fallback), connect_timeout);
-    /// let tcp_connector = connector.tcp_connector();
-    /// ```
-    #[inline(always)]
+    /// Creates a new `TcpConnector` using the current configuration.
+    #[inline]
     pub fn tcp_connector(&self) -> TcpConnector {
         TcpConnector { inner: self }
     }
 
-    /// Returns a new instance of `UdpConnector` configured with the same settings
-    /// as the current `Connector`.
-    /// This method copies the CIDR, CIDR range, fallback IP address, and connect timeout
-    /// settings from the current `Connector` instance.
-    /// # Returns
-    /// A new `UdpConnector` instance with the same configuration as the current `Connector`.
-    /// # Example
-    /// ```
-    /// let connector = Connector::new(Some(cidr), Some(cidr_range), Some(fallback), connect_timeout);
-    /// let udp_connector = connector.udp_connector();
-    /// ```
-    #[inline(always)]
+    /// Creates a new `UdpConnector` using the current configuration.
+    #[inline]
     pub fn udp_connector(&self) -> UdpConnector {
         UdpConnector { inner: self }
     }
 }
 
-/// A `TcpConnector` is responsible for establishing TCP connections with
-/// the specified configuration settings.
-///
-/// The `TcpConnector` struct holds configuration settings such as CIDR,
-/// CIDR range, fallback IP address, and connection timeout. These settings
-/// are used to configure and establish TCP connections.
-///
-/// # Fields
-///
-/// * `cidr` - An optional CIDR range to assign the IP address from.
-/// * `cidr_range` - An optional CIDR range value.
-/// * `fallback` - An optional fallback IP address to use if the primary
-///   address assignment fails.
-/// * `connect_timeout` - The timeout duration for establishing a connection.
-///
-/// # Example
-///
-/// ```
-/// let connector = Connector::new(Some(cidr), Some(cidr_range), Some(fallback), connect_timeout);
-/// let tcp_connector = connector.tcp_connector();
-/// ```
-pub struct TcpConnector<'a> {
-    inner: &'a Connector,
-}
+// ==== impl TcpConnector ====
 
 impl TcpConnector<'_> {
     /// Binds a socket to an IP address based on the provided CIDR, fallback IP, and extensions.
-    ///
-    /// This method determines the appropriate IP address to bind the socket to based on the
-    /// configuration of the `Connector`. It first checks if a CIDR range is provided. If so,
-    /// it assigns an IP address from the CIDR range using the provided extensions. If no CIDR
-    /// range is provided but a fallback IP address is available, it uses the fallback IP address.
-    /// If neither is available, it uses the default IP address provided as an argument.
-    ///
-    /// # Arguments
-    ///
-    /// * `default` - The default IP address to use if no CIDR or fallback IP is available.
-    /// * `extension` - The extensions used to determine the IP address from the CIDR range.
-    ///
-    /// # Returns
-    ///
-    /// A `SocketAddr` representing the bound address.
-    ///
-    /// # Example
-    ///
-    /// ```
-    /// let connector = Connector::new(Some(cidr), Some(cidr_range), Some(fallback), connect_timeout);
-    /// let tcp_connector = TcpConnector { inner: &connector };
-    /// let socket_addr = tcp_connector.bind_socket_addr(default_ip, extension);
-    /// ```
     pub fn bind_socket_addr<F>(
         &self,
         default: F,
@@ -202,28 +136,6 @@ impl TcpConnector<'_> {
 
     /// Attempts to establish a TCP connection to each of the target addresses
     /// in the provided iterator using the provided extensions.
-    ///
-    /// This function takes an `IntoIterator` of `SocketAddr` for the target
-    /// addresses and an `Extensions` reference. It attempts to connect to
-    /// each target address in turn using the `try_connect_with_iter` function.
-    ///
-    /// If a connection to any of the target addresses is established, it
-    /// returns the connected `TcpStream`. If all connection attempts fail,
-    /// it returns the last error encountered. If no connection attempts were
-    /// made because the iterator is empty, it returns a `ConnectionAborted`
-    /// error.
-    ///
-    /// # Arguments
-    ///
-    /// * `addrs` - An `IntoIterator` of the target addresses to connect to.
-    /// * `extension` - A reference to the extensions to use for the connection
-    ///   attempt.
-    ///
-    /// # Returns
-    ///
-    /// This function returns a `std::io::Result<TcpStream>`. If a connection is
-    /// successfully established, it returns `Ok(stream)`. If there is an
-    /// error at any step, it returns the error in the `Result`.
     pub async fn connect_with_addrs(
         &self,
         addrs: impl IntoIterator<Item = SocketAddr>,
@@ -243,33 +155,6 @@ impl TcpConnector<'_> {
 
     /// Attempts to establish a TCP connection to each of the target addresses
     /// resolved from the provided authority.
-    ///
-    /// This method takes an `Authority` and an `Extension` as arguments. It resolves
-    /// the authority to a list of socket addresses and attempts to connect to each
-    /// address in turn using the `connect` method. If a connection is successfully
-    /// established, it returns the connected `TcpStream`. If all connection attempts
-    /// fail, it returns the last encountered error.
-    ///
-    /// # Arguments
-    ///
-    /// * `authority` - The authority (host:port) to resolve and connect to.
-    /// * `extension` - The extensions used during the connection process.
-    ///
-    /// # Returns
-    ///
-    /// A `std::io::Result<TcpStream>` representing the result of the connection attempt.
-    /// If successful, it returns `Ok(TcpStream)`. If all attempts fail, it returns the
-    /// last encountered error.
-    ///
-    /// # Example
-    ///
-    /// ```
-    /// let connector = Connector::new(Some(cidr), Some(cidr_range), Some(fallback), connect_timeout);
-    /// let tcp_connector = TcpConnector { inner: &connector };
-    /// let authority = "example.com:80".parse().unwrap();
-    /// let extension = Extension::default();
-    /// let stream = tcp_connector.connect_with_authority(authority, extension).await?;
-    /// ```
     #[inline]
     pub async fn connect_with_authority(
         &self,
@@ -282,30 +167,6 @@ impl TcpConnector<'_> {
 
     /// Attempts to establish a TCP connection to the target domain using the
     /// provided extensions.
-    ///
-    /// This function takes a tuple of a `String` and a `u16` for the host and
-    /// port of the target domain and an `Extensions` reference. It resolves
-    /// the host to a list of IP addresses using the `lookup_host` function and
-    /// then attempts to connect to each IP address in turn using the
-    /// `try_connect_with_iter` function.
-    ///
-    /// If a connection to any of the IP addresses is established, it returns
-    /// the connected `TcpStream`. If all connection attempts fail, it
-    /// returns the last error encountered. If no connection attempts were made
-    /// because the host could not be resolved to any IP addresses,
-    /// it returns a `ConnectionAborted` error.
-    ///
-    /// # Arguments
-    ///
-    /// * `host` - The host and port of the target domain.
-    /// * `extension` - A reference to the extensions to use for the connection
-    ///   attempt.
-    ///
-    /// # Returns
-    ///
-    /// This function returns a `std::io::Result<TcpStream>`. If a connection is
-    /// successfully established, it returns `Ok(stream)`. If there is an
-    /// error at any step, it returns the error in the `Result`.
     #[inline]
     pub async fn connect_with_domain(
         &self,
@@ -318,42 +179,6 @@ impl TcpConnector<'_> {
 
     /// Attempts to establish a TCP connection to the target address using the
     /// provided extensions, CIDR range, and fallback IP address.
-    ///
-    /// This function takes a `SocketAddr` for the target address and an
-    /// `Extensions` reference. It first checks the type of the extension.
-    /// If the extension is `Http2Socks5`, it attempts to connect to the target
-    /// address via the SOCKS5 proxy using the `try_connect_to_socks5` function.
-    /// If the extension is `None` or `Session`, it checks the CIDR range and
-    /// fallback IP address.
-    ///
-    /// If only the CIDR range is provided, it attempts to connect to the target
-    /// address using an IP address from the CIDR range with the
-    /// `try_connect_with_cidr` function. If only the fallback IP address is
-    /// provided, it attempts to connect to the target address using the
-    /// fallback IP address with the `try_connect_with_fallback` function.
-    /// If both the CIDR range and fallback IP address are provided, it attempts
-    /// to connect to the target address using an IP address from the CIDR range
-    /// and falls back to the fallback IP address if the connection attempt
-    /// fails with the `try_connect_with_cidr_and_fallback` function.
-    /// If neither the CIDR range nor the fallback IP address is provided, it
-    /// attempts to connect to the target address directly using
-    /// `TcpStream::connect`.
-    ///
-    /// Each connection attempt is wrapped in a timeout. If the connection
-    /// attempt does not complete within the timeout, it is cancelled and a
-    /// `TimedOut` error is returned.
-    ///
-    /// # Arguments
-    ///
-    /// * `target_addr` - The target address to connect to.
-    /// * `extension` - A reference to the extensions to use for the connection
-    ///   attempt.
-    ///
-    /// # Returns
-    ///
-    /// This function returns a `std::io::Result<TcpStream>`. If a connection is
-    /// successfully established, it returns `Ok(stream)`. If there is an
-    /// error at any step, it returns the error in the `Result`.
     pub async fn connect(
         &self,
         target_addr: SocketAddr,
@@ -393,29 +218,6 @@ impl TcpConnector<'_> {
 
     /// Attempts to establish a TCP connection to the target address using an IP
     /// address from the provided CIDR range.
-    ///
-    /// This function takes a `SocketAddr` for the target address, an `IpCidr` for
-    /// the CIDR range, and an `Extensions` reference for assigning the IP address.
-    /// It creates a socket and assigns an IP address from the CIDR range using the
-    /// `create_socket_with_cidr` function. It then attempts to connect to the
-    /// target address using the created socket.
-    ///
-    /// If the connection attempt is successful, it returns the connected
-    /// `TcpStream`. If the connection attempt fails, it returns the error in the
-    /// `Result`.
-    ///
-    /// # Arguments
-    ///
-    /// * `target_addr` - The target address to connect to.
-    /// * `cidr` - The CIDR range to assign the IP address from.
-    /// * `extension` - A reference to the extensions to use when assigning the IP
-    ///   address.
-    ///
-    /// # Returns
-    ///
-    /// This function returns a `std::io::Result<TcpStream>`. If a connection is
-    /// successfully established, it returns `Ok(stream)`. If there is an error at
-    /// any step, it returns the error in the `Result`.
     #[inline]
     async fn connect_with_cidr(
         &self,
@@ -429,26 +231,6 @@ impl TcpConnector<'_> {
 
     /// Attempts to establish a TCP connection to the target address using the
     /// provided fallback IP address.
-    ///
-    /// This function takes a `SocketAddr` for the target address and an `IpAddr`
-    /// for the fallback IP address. It creates a socket and binds it to the
-    /// fallback IP address using the `create_socket_with_ip` function.
-    /// It then attempts to connect to the target address using the created socket.
-    ///
-    /// If the connection attempt is successful, it returns the connected
-    /// `TcpStream`. If the connection attempt fails, it returns the error in the
-    /// `Result`.
-    ///
-    /// # Arguments
-    ///
-    /// * `target_addr` - The target address to connect to.
-    /// * `fallback` - The fallback IP address to use for the connection attempt.
-    ///
-    /// # Returns
-    ///
-    /// This function returns a `std::io::Result<TcpStream>`. If a connection is
-    /// successfully established, it returns `Ok(stream)`. If there is an error at
-    /// any step, it returns the error in the `Result`.
     #[inline]
     async fn connect_with_addr(
         &self,
@@ -462,33 +244,6 @@ impl TcpConnector<'_> {
     /// Attempts to establish a TCP connection to the target address using an IP
     /// address from the provided CIDR range. If the connection attempt fails, it
     /// falls back to using the provided fallback IP address.
-    ///
-    /// This function takes a `SocketAddr` for the target address, an `IpCidr` for
-    /// the CIDR range, an `IpAddr` for the fallback IP address, and an `Extensions`
-    /// reference for assigning the IP address. It first creates a socket and
-    /// assigns an IP address from the CIDR range
-    /// using the `create_socket_with_cidr` function. It then attempts to connect to
-    /// the target address using the created socket.
-    ///
-    /// If the connection attempt is successful, it returns the connected
-    /// `TcpStream`. If the connection attempt fails, it logs the error
-    /// and then attempts to connect to the target address using the fallback IP
-    /// address with the `try_connect_with_fallback` function.
-    ///
-    /// # Arguments
-    ///
-    /// * `target_addr` - The target address to connect to.
-    /// * `cidr` - The CIDR range to assign the IP address from.
-    /// * `fallback` - The fallback IP address to use if the connection attempt
-    ///   fails.
-    /// * `extension` - A reference to the extensions to use when assigning the IP
-    ///   address.
-    ///
-    /// # Returns
-    ///
-    /// This function returns a `std::io::Result<TcpStream>`. If a connection is
-    /// successfully established, it returns `Ok(stream)`. If there is an error at
-    /// any step, it returns the error in the `Result`.
     async fn connect_with_cidr_and_fallback(
         &self,
         target_addr: SocketAddr,
@@ -528,22 +283,6 @@ impl TcpConnector<'_> {
     }
 
     /// Creates a TCP socket and binds it to the provided IP address.
-    ///
-    /// This function takes an `IpAddr` reference as an argument and creates a new
-    /// TCP socket based on the IP version. If the IP address is IPv4, it creates a
-    /// new IPv4 socket. If the IP address is IPv6, it creates a new IPv6 socket.
-    /// After creating the socket, it binds the socket to the provided IP address on
-    /// port 0.
-    ///
-    /// # Arguments
-    ///
-    /// * `ip` - A reference to the IP address to bind the socket to.
-    ///
-    /// # Returns
-    ///
-    /// This function returns a `std::io::Result<TcpSocket>`. If the socket is
-    /// successfully created and bound, it returns `Ok(socket)`. If there is an
-    /// error creating or binding the socket, it returns the error in the `Result`.
     fn create_socket_with_addr(&self, ip: IpAddr) -> std::io::Result<TcpSocket> {
         match ip {
             IpAddr::V4(_) => {
@@ -561,30 +300,7 @@ impl TcpConnector<'_> {
         }
     }
 
-    /// Creates a TCP socket and binds it to an IP address within the provided CIDR
-    /// range.
-    ///
-    /// This function takes an `IpCidr` and an `Extensions` reference as arguments.
-    /// It creates a new TCP socket based on the IP version of the CIDR. If the CIDR
-    /// is IPv4, it creates a new IPv4 socket and assigns an IPv4 address from the
-    /// CIDR range using the `assign_ipv4_from_extension` function. If the CIDR is
-    /// IPv6, it creates a new IPv6 socket and assigns an IPv6 address from the CIDR
-    /// range using the `assign_ipv6_from_extension` function. After creating the
-    /// socket and assigning the IP address, it binds the socket to the assigned IP
-    /// address on port 0.
-    ///
-    /// # Arguments
-    ///
-    /// * `cidr` - The CIDR range to assign the IP address from.
-    /// * `extension` - A reference to the extensions to use when assigning the IP
-    ///   address.
-    ///
-    /// # Returns
-    ///
-    /// This function returns a `std::io::Result<TcpSocket>`. If the socket is
-    /// successfully created, assigned an IP address, and bound, it returns
-    /// `Ok(socket)`. If there is an error at any step, it returns the error in the
-    /// `Result`.
+    /// Creates a TCP socket and binds it to an IP address within the provided CIDR range.
     async fn create_socket_with_cidr(
         &self,
         cidr: IpCidr,
@@ -615,43 +331,11 @@ impl TcpConnector<'_> {
     }
 }
 
-/// `UdpConnector` struct is used to create UDP connectors, optionally configured
-/// with an IPv6 CIDR and a fallback IP address.
-///
-/// This struct provides methods to bind UDP sockets to appropriate IP addresses
-/// based on the configuration of the `Connector`.
-pub struct UdpConnector<'a> {
-    inner: &'a Connector,
-}
+// ==== impl UdpConnector ====
 
 impl UdpConnector<'_> {
     /// Binds a UDP socket to an IP address based on the provided CIDR, fallback IP, and extensions.
-    ///
-    /// This method determines the appropriate IP address to bind the socket to based on the
-    /// configuration of the `Connector`. It first checks if a CIDR range is provided. If so,
-    /// it assigns an IP address from the CIDR range using the provided extensions. If no CIDR
-    /// range is provided but a fallback IP address is available, it uses the fallback IP address.
-    /// If neither is available, it binds to a default address.
-    ///
-    /// # Arguments
-    ///
-    /// * `extension` - The extensions used to determine the IP address from the CIDR range.
-    ///
-    /// # Returns
-    ///
-    /// A `std::io::Result<UdpSocket>` representing the result of the binding attempt.
-    /// If successful, it returns `Ok(UdpSocket)`. If the binding fails, it returns the
-    /// encountered error.
-    ///
-    /// # Example
-    ///
-    /// ```
-    /// let connector = Connector::new(Some(cidr), Some(cidr_range), Some(fallback), connect_timeout);
-    /// let tcp_connector = TcpConnector { inner: &connector };
-    /// let extension = Extension::default();
-    /// let udp_socket = tcp_connector.bind_socket(extension).await?;
-    /// ```
-    #[inline(always)]
+    #[inline]
     pub async fn bind_socket(&self, extension: Extension) -> std::io::Result<UdpSocket> {
         match (self.inner.cidr, self.inner.fallback) {
             (None, Some(fallback)) => self.create_socket_with_addr(fallback).await,
@@ -665,32 +349,7 @@ impl UdpConnector<'_> {
     }
 
     /// Sends a UDP packet to the specified address using the provided UDP socket.
-    ///
-    /// This method sends a UDP packet to the specified destination address using the provided
-    /// UDP socket.
-    ///
-    /// # Arguments
-    ///
-    /// * `dispatch_socket` - The UDP socket used to send the packet.
-    /// * `pkt` - The packet data to be sent.
-    /// * `dst_addr` - The destination address to send the packet to.
-    ///
-    /// # Returns
-    ///
-    /// A `std::io::Result<()>` representing the result of the send attempt.
-    /// If successful, it returns `Ok(())`. If the send fails, it returns the encountered error.
-    ///
-    /// # Example
-    ///
-    /// ```
-    /// let connector = Connector::new(Some(cidr), Some(cidr_range), Some(fallback), connect_timeout);
-    /// let tcp_connector = TcpConnector { inner: &connector };
-    /// let udp_socket = UdpSocket::bind("0.0.0.0:0").await?;
-    /// let pkt = b"Hello, world!";
-    /// let dst_addr = "127.0.0.1:8080".parse().unwrap();
-    /// tcp_connector.send_packet_with_addr(&udp_socket, pkt, dst_addr).await?;
-    /// ```
-    #[inline(always)]
+    #[inline]
     pub async fn send_packet_with_addr(
         &self,
         dispatch_socket: &UdpSocket,
@@ -701,31 +360,6 @@ impl UdpConnector<'_> {
     }
 
     /// Sends a UDP packet to the specified domain and port using the provided UDP socket.
-    ///
-    /// This method resolves the domain to an IP address and sends a UDP packet to the specified
-    /// destination domain and port using the provided UDP socket.
-    ///
-    /// # Arguments
-    ///
-    /// * `dispatch_socket` - The UDP socket used to send the packet.
-    /// * `pkt` - The packet data to be sent.
-    /// * `dst_domain` - A tuple containing the destination domain and port.
-    ///
-    /// # Returns
-    ///
-    /// A `std::io::Result<()>` representing the result of the send attempt.
-    /// If successful, it returns `Ok(())`. If the send fails, it returns the encountered error.
-    ///
-    /// # Example
-    ///
-    /// ```
-    /// let connector = Connector::new(Some(cidr), Some(cidr_range), Some(fallback), connect_timeout);
-    /// let tcp_connector = TcpConnector { inner: &connector };
-    /// let udp_socket = UdpSocket::bind("0.0.0.0:0").await?;
-    /// let pkt = b"Hello, world!";
-    /// let dst_domain = ("example.com".to_string(), 8080);
-    /// tcp_connector.send_packet_with_domain(&udp_socket, pkt, dst_domain).await?;
-    /// ```
     pub async fn send_packet_with_domain(
         &self,
         dispatch_socket: &UdpSocket,
@@ -747,51 +381,12 @@ impl UdpConnector<'_> {
     }
 
     /// Creates a UDP socket and binds it to the provided IP address.
-    ///
-    /// This function takes an `IpAddr` reference as an argument and creates a new
-    /// UDP socket based on the IP version. If the IP address is IPv4, it creates a
-    /// new IPv4 socket. If the IP address is IPv6, it creates a new IPv6 socket.
-    /// After creating the socket, it binds the socket to the provided IP address on
-    /// port 0.
-    ///
-    /// # Arguments
-    ///
-    /// * `ip` - A reference to the IP address to bind the socket to.
-    ///
-    /// # Returns
-    ///
-    /// This function returns a `std::io::Result<UdpSocket>`. If the socket is
-    /// successfully created and bound, it returns `Ok(socket)`. If there is an
-    /// error creating or binding the socket, it returns the error in the `Result`.
     #[inline]
     async fn create_socket_with_addr(&self, ip: IpAddr) -> std::io::Result<UdpSocket> {
         UdpSocket::bind(SocketAddr::new(ip, 0)).await
     }
 
-    /// Creates a UDP socket and binds it to an IP address within the provided CIDR
-    /// range.
-    ///
-    /// This function takes an `IpCidr` and an `Extensions` reference as arguments.
-    /// It creates a new UDP socket based on the IP version of the CIDR. If the CIDR
-    /// is IPv4, it creates a new IPv4 socket and assigns an IPv4 address from the
-    /// CIDR range using the `assign_ipv4_from_extension` function. If the CIDR is
-    /// IPv6, it creates a new IPv6 socket and assigns an IPv6 address from the CIDR
-    /// range using the `assign_ipv6_from_extension` function. After creating the
-    /// socket and assigning the IP address, it binds the socket to the assigned IP
-    /// address on port 0.
-    ///
-    /// # Arguments
-    ///
-    /// * `cidr` - The CIDR range to assign the IP address from.
-    /// * `extension` - A reference to the extensions to use when assigning the IP
-    ///   address.
-    ///
-    /// # Returns
-    ///
-    /// This function returns a `std::io::Result<UdpSocket>`. If the socket is
-    /// successfully created, assigned an IP address, and bound, it returns
-    /// `Ok(socket)`. If there is an error at any step, it returns the error in the
-    /// `Result`.
+    /// Creates a UDP socket and binds it to an IP address within the provided CIDR range.
     async fn create_socket_with_cidr(
         &self,
         cidr: IpCidr,
@@ -820,21 +415,6 @@ impl UdpConnector<'_> {
     /// Creates a UDP socket and binds it to an IP address within the provided CIDR
     /// range. If the binding fails, it falls back to using the provided fallback IP
     /// address.
-    /// This function takes an `IpCidr` for the CIDR range, an `IpAddr` for the fallback
-    /// IP address, and an `Extensions` reference for assigning the IP address. It first
-    /// creates a socket and assigns an IP address from the CIDR range using the
-    /// `create_socket_with_cidr` function. It then attempts to bind the socket to the
-    /// assigned IP address. If the binding is successful, it returns the bound `UdpSocket`.
-    /// If the binding fails, it logs the error and then attempts to bind the socket to the
-    /// fallback IP address using the `create_socket_with_addr` function.
-    /// # Arguments
-    /// * `cidr` - The CIDR range to assign the IP address from.
-    /// * `fallback` - The fallback IP address to use if the binding fails.
-    /// * `extension` - A reference to the extensions to use when assigning the IP address.
-    /// # Returns
-    /// This function returns a `std::io::Result<UdpSocket>`. If the socket is successfully
-    /// created, assigned an IP address, and bound, it returns `Ok(socket)`. If there is an
-    /// error at any step, it returns the error in the `Result`.
     async fn create_socket_with_cidr_and_fallback(
         &self,
         cidr: IpCidr,
@@ -851,52 +431,10 @@ impl UdpConnector<'_> {
     }
 }
 
-/// A `HttpConnector` is responsible for establishing HTTP connections with
-/// the specified configuration settings.
-///
-/// The `HttpConnector` struct holds configuration settings such as CIDR,
-/// CIDR range, fallback IP address, and connection timeout. These settings
-/// are used to configure and establish HTTP connections.
-///
-/// # Fields
-///
-/// * `inner` - The internal `connect::HttpConnector` used for establishing connections.
-/// * `cidr` - An optional CIDR range to assign the IP address from.
-/// * `cidr_range` - An optional CIDR range value.
-/// * `fallback` - An optional fallback IP address to use if the primary
-///   address assignment fails.
-///
-/// # Example
-///
-/// ```
-/// let connector = Connector::new(Some(cidr), Some(cidr_range), Some(fallback), connect_timeout);
-/// let http_connector = connector.http_connector();
-/// ```
-pub struct HttpConnector<'a> {
-    inner: &'a Connector,
-}
+// ==== impl HttpConnector ====
 
 impl HttpConnector<'_> {
     /// Sends an HTTP request using the configured `HttpConnector`.
-    ///
-    /// This method sets the local addresses based on the provided CIDR and fallback IP address,
-    /// and then sends the HTTP request.
-    ///
-    /// # Arguments
-    ///
-    /// * `req` - The HTTP request to be sent.
-    /// * `extension` - The extension used to determine the local addresses.
-    ///
-    /// # Returns
-    ///
-    /// A `Result` containing the HTTP response if the request was successful, or an `Error` if it failed.
-    ///
-    /// # Example
-    ///
-    /// ```
-    /// let connector = HttpConnector::new(Some(cidr), Some(cidr_range), Some(fallback));
-    /// let response = connector.send_request(request, extension).await?;
-    /// ```
     pub async fn send_request(
         self,
         req: Request<Incoming>,
@@ -937,21 +475,6 @@ impl HttpConnector<'_> {
 
 /// Returns the last error encountered during a series of connection attempts,
 /// or a `ConnectionAborted` error if no connection attempts were made.
-///
-/// This function takes an `Option<std::io::Error>` for the last error
-/// encountered. If an error is provided, it logs the error and returns it.
-/// If no error is provided, it returns a `ConnectionAborted` error with the
-/// message "Failed to connect to any resolved address".
-///
-/// # Arguments
-///
-/// * `last_err` - An `Option<std::io::Error>` for the last error encountered.
-///
-/// # Returns
-///
-/// This function returns a `std::io::Error`. If an error is provided, it
-/// returns the provided error. If no error is provided, it returns a
-/// `ConnectionAborted` error.
 fn error(last_err: Option<std::io::Error>) -> std::io::Error {
     match last_err {
         Some(e) => {
@@ -1066,23 +589,6 @@ fn assign_rand_ipv6(cidr: Ipv6Cidr) -> Ipv6Addr {
 
 /// Generates an IPv4 address within a specified CIDR range, where the address is
 /// influenced by a fixed combined value and a random host part.
-///
-/// # Parameters
-/// - `cidr`: The CIDR notation representing the network range, e.g., "192.168.0.0/24".
-/// - `range`: The length of the address range to be fixed by the combined value (e.g., 28 for a /28 subnet).
-/// - `combined`: A fixed value used to influence the specific address within the range.
-///
-/// # Returns
-/// An `Ipv4Addr` representing the generated IPv4 address.
-///
-/// # Example
-/// ```
-/// let cidr = "192.168.0.0/24".parse::<Ipv4Cidr>().unwrap();
-/// let range = 28;
-/// let combined = 0x5;
-/// let ipv4_address = assign_ipv4_with_range(&cidr, range, combined);
-/// println!("Generated IPv4 Address: {}", ipv4_address);
-/// ```
 fn assign_ipv4_with_range(cidr: Ipv4Cidr, range: u8, combined: u32) -> Ipv4Addr {
     let base_ip: u32 = u32::from(cidr.first_address());
     let prefix_len = cidr.network_length();
@@ -1109,23 +615,6 @@ fn assign_ipv4_with_range(cidr: Ipv4Cidr, range: u8, combined: u32) -> Ipv4Addr 
 
 /// Generates an IPv6 address within a specified CIDR range, where the address is
 /// influenced by a fixed combined value and a random host part.
-///
-/// # Parameters
-/// - `cidr`: The CIDR notation representing the network range, e.g., "2001:470:e953::/48".
-/// - `range`: The length of the address range to be fixed by the combined value (e.g., 64 for a /64 subnet).
-/// - `combined`: A fixed value used to influence the specific address within the range.
-///
-/// # Returns
-/// An `Ipv6Addr` representing the generated IPv6 address.
-///
-/// # Example
-/// ```
-/// let cidr = "2001:470:e953::/48".parse::<Ipv6Cidr>().unwrap();
-/// let range = 64;
-/// let combined = 0x12345;
-/// let ipv6_address = assign_ipv6_with_range(&cidr, range, combined);
-/// println!("Generated IPv6 Address: {}", ipv6_address);
-/// ```
 fn assign_ipv6_with_range(cidr: Ipv6Cidr, range: u8, combined: u128) -> Ipv6Addr {
     let base_ip: u128 = cidr.first_address().into();
     let prefix_len = cidr.network_length();
@@ -1155,24 +644,6 @@ fn assign_ipv6_with_range(cidr: Ipv6Cidr, range: u8, combined: u128) -> Ipv6Addr
 /// This function takes an `Extension` enum and returns an `Option<u64>` containing the value
 /// associated with the `Range`, `Session`, or `TTL` variants. If the `Extension` variant does
 /// not contain a value (i.e., it is not one of the aforementioned variants), the function returns `None`.
-///
-/// # Arguments
-///
-/// * `extension` - An `Extension` enum variant from which to extract the value.
-///
-/// # Returns
-///
-/// * `Option<u64>` - The extracted value if the `extension` is a `Range`, `Session`, or `TTL` variant; otherwise, `None`.
-///
-/// # Examples
-///
-/// ```
-/// let ext = Extension::Range(42);
-/// assert_eq!(extract_value_from_extension(ext), Some(42));
-///
-/// let ext = Extension::Unknown;
-/// assert_eq!(extract_value_from_extension(ext), None);
-/// ```
 fn extract_value_from_extension(extension: Extension) -> Option<u64> {
     match extension {
         Extension::Range(value) => Some(value),
