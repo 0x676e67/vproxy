@@ -138,18 +138,16 @@ fn parse_session_extension(s: &str) -> Extension {
 /// parsed into a `u64`, it returns `Extensions::None`.
 #[inline]
 fn parse_ttl_extension(s: &str) -> Extension {
-    if let Ok(ttl) = s.parse::<u64>() {
-        if let Some(ttl) = NonZeroU64::new(ttl) {
-            let start = SystemTime::now();
-            let timestamp = start
-                .duration_since(UNIX_EPOCH)
-                .map(|d| d.as_secs())
-                .unwrap_or(rand::random());
+    if let Ok(Some(ttl)) = s.parse::<u64>().map(NonZeroU64::new) {
+        let start = SystemTime::now();
+        let timestamp = start
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(rand::random());
 
-            let time = timestamp - (timestamp % ttl.get());
-            let hash = fxhash::hash64(&time.to_be_bytes());
-            return Extension::TTL(hash);
-        }
+        let time = timestamp - (timestamp % ttl.get());
+        let hash = fxhash::hash64(&time.to_be_bytes());
+        return Extension::TTL(hash);
     }
     Extension::None
 }
