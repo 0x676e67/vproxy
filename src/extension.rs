@@ -1,4 +1,7 @@
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::{
+    num::NonZeroU64,
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 /// Enum representing different types of extensions.
 #[allow(clippy::upper_case_acronyms)]
@@ -79,18 +82,6 @@ fn parser(prefix: String, full: String) -> Extension {
 ///
 /// If the string `s` does not start with the prefix, the function returns
 /// `None`.
-///
-/// # Arguments
-///
-/// * `trim` - Whether to trim the string before checking the prefix.
-/// * `s` - The string to handle.
-/// * `prefix` - The prefix to check and remove from the string.
-/// * `handler` - The function to apply to the string after removing the prefix.
-///
-/// # Returns
-///
-/// This function returns an `Option<Extensions>`. If the string starts with the
-/// prefix, it returns `Some(Extensions)`. Otherwise, it returns `None`.
 #[tracing::instrument(level = "trace", skip(handler))]
 #[inline]
 fn parse_extension(
@@ -117,12 +108,6 @@ fn parse_extension(
 /// extension. The function uses the `murmurhash3_x64_128` function to generate
 /// a 128-bit hash from the string. The hash is then returned as a tuple `(a, b)`
 /// wrapped in the `Extensions::Range` variant.
-/// # Arguments
-/// * `s` - The string to parse.
-/// # Returns
-/// This function returns an `Extensions` enum.
-/// If the string is empty, it returns `Extensions::None`.
-/// If the string is not empty, it returns `Extensions::Range(a, b)`.
 #[inline(always)]
 fn parse_range_extension(s: &str) -> Extension {
     let hash = fxhash::hash64(s.as_bytes());
@@ -139,16 +124,6 @@ fn parse_range_extension(s: &str) -> Extension {
 /// wrapped in the `Extensions::Session` variant.
 ///
 /// If the string is empty, the function returns `Extensions::None`.
-///
-/// # Arguments
-///
-/// * `s` - The string to parse.
-///
-/// # Returns
-///
-/// This function returns an `Extensions` enum. If the string is not empty, it
-/// will return a `Extensions::Session` variant containing a tuple `(a, b)`.
-/// Otherwise, it will return `Extensions::None`.
 #[inline(always)]
 fn parse_session_extension(s: &str) -> Extension {
     let hash = fxhash::hash64(s.as_bytes());
@@ -161,29 +136,47 @@ fn parse_session_extension(s: &str) -> Extension {
 /// the TTL value. If successful, it returns an `Extensions::Session` variant
 /// with the parsed TTL value and a fixed value of `1`. If the string cannot be
 /// parsed into a `u64`, it returns `Extensions::None`.
-///
-/// # Arguments
-///
-/// * `s` - The string to parse as a TTL value.
-///
-/// # Returns
-///
-/// Returns an `Extensions` enum variant. If parsing is successful, returns
-/// `Extensions::Session` with the TTL value and `1`. Otherwise, returns
-/// `Extensions::None`.
-#[inline(always)]
+#[inline]
 fn parse_ttl_extension(s: &str) -> Extension {
     if let Ok(ttl) = s.parse::<u64>() {
-        let start = SystemTime::now();
-        let timestamp = start
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(rand::random());
+        if let Some(ttl) = NonZeroU64::new(ttl) {
+            let start = SystemTime::now();
+            let timestamp = start
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(rand::random());
 
-        let time = timestamp - (timestamp % ttl);
-
-        let hash = fxhash::hash64(&time.to_be_bytes());
-        return Extension::TTL(hash);
+            let time = timestamp - (timestamp % ttl.get());
+            let hash = fxhash::hash64(&time.to_be_bytes());
+            return Extension::TTL(hash);
+        }
     }
     Extension::None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_ttl_extension_zero() {
+        // Should return Extension::None for zero input
+        assert!(matches!(parse_ttl_extension("0"), Extension::None));
+    }
+
+    #[test]
+    fn test_parse_ttl_extension_nonzero() {
+        // Should return Extension::TTL for non-zero input
+        let ext = parse_ttl_extension("60");
+        match ext {
+            Extension::TTL(_) => {}
+            _ => panic!("Expected Extension::TTL"),
+        }
+    }
+
+    #[test]
+    fn test_parse_ttl_extension_invalid() {
+        // Should return Extension::None for invalid input
+        assert!(matches!(parse_ttl_extension("abc"), Extension::None));
+    }
 }
