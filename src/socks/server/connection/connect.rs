@@ -72,7 +72,7 @@ impl Connect<NeedReply> {
 impl Connect<Ready> {
     /// Returns the read/write half of the stream.
     #[inline]
-    pub fn split(&mut self) -> (ReadHalf, WriteHalf) {
+    pub fn split(&mut self) -> (ReadHalf<'_>, WriteHalf<'_>) {
         self.stream.split()
     }
 

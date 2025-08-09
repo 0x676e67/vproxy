@@ -246,7 +246,7 @@ impl Bind<Ready> {
 
     /// Split the connection into a read and a write half.
     #[inline]
-    pub fn split(&mut self) -> (ReadHalf, WriteHalf) {
+    pub fn split(&mut self) -> (ReadHalf<'_>, WriteHalf<'_>) {
         self.stream.split()
     }
 }

@@ -63,7 +63,7 @@ pub struct HttpConnector<'a> {
 // ==== impl Connector ====
 
 impl Connector {
-    /// Constructs a new `Connector` instance, accepting optional IPv6 CIDR and
+    /// Constructs a new [`Connector`] instance, accepting optional IPv6 CIDR and
     /// fallback IP address as parameters.
     pub(super) fn new(
         cidr: Option<IpCidr>,
@@ -83,21 +83,21 @@ impl Connector {
         }
     }
 
-    /// Creates a new `HttpConnector` using the current configuration.
+    /// Creates a new [`HttpConnector`] using the current configuration.
     #[inline]
-    pub fn http_connector(&self) -> HttpConnector {
+    pub fn http_connector(&self) -> HttpConnector<'_> {
         HttpConnector { inner: self }
     }
 
-    /// Creates a new `TcpConnector` using the current configuration.
+    /// Creates a new [`TcpConnector`] using the current configuration.
     #[inline]
-    pub fn tcp_connector(&self) -> TcpConnector {
+    pub fn tcp_connector(&self) -> TcpConnector<'_> {
         TcpConnector { inner: self }
     }
 
-    /// Creates a new `UdpConnector` using the current configuration.
+    /// Creates a new [`UdpConnector`] using the current configuration.
     #[inline]
-    pub fn udp_connector(&self) -> UdpConnector {
+    pub fn udp_connector(&self) -> UdpConnector<'_> {
         UdpConnector { inner: self }
     }
 }
