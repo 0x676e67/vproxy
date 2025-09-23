@@ -1,166 +1,180 @@
 use std::{
     fs::{File, Permissions},
     os::unix::fs::PermissionsExt,
-    path::Path,
+    path::{Path, PathBuf},
 };
 
 use daemonize::Daemonize;
-use nix::{
-    sys::signal,
-    unistd::{Pid, Uid, User},
-};
 
-use crate::{BIN_NAME, BootArgs, serve};
+use crate::{BootArgs, server};
 
-const PID_PATH: &str = concat!("/var/run/", env!("CARGO_PKG_NAME"), ".pid");
+const DEFAULT_PID_PATH: &str = concat!("/var/run/", env!("CARGO_PKG_NAME"), ".pid");
 const DEFAULT_STDOUT_PATH: &str = concat!("/var/run/", env!("CARGO_PKG_NAME"), ".out");
 const DEFAULT_STDERR_PATH: &str = concat!("/var/run/", env!("CARGO_PKG_NAME"), ".err");
 
-#[inline(always)]
-fn pid() -> Option<String> {
-    if let Ok(data) = std::fs::read(PID_PATH) {
-        let binding = String::from_utf8(data).expect("pid file is not utf8");
-        return Some(binding.trim().to_string());
-    }
-    None
+pub struct Daemon {
+    pid_file: PathBuf,
+    stdout_file: PathBuf,
+    stderr_file: PathBuf,
 }
 
-#[inline(always)]
-pub fn check_root() {
-    if !Uid::effective().is_root() {
-        println!("You must run this executable with root permissions");
-        std::process::exit(-1)
-    }
-}
-
-pub fn start(args: BootArgs) -> crate::Result<()> {
-    if let Some(pid) = pid() {
-        println!("{BIN_NAME} is already running with pid: {pid}");
-        return Ok(());
-    }
-
-    check_root();
-
-    let pid_file = File::create(PID_PATH)?;
-    pid_file.set_permissions(Permissions::from_mode(0o755))?;
-
-    let stdout = File::create(DEFAULT_STDOUT_PATH)?;
-    stdout.set_permissions(Permissions::from_mode(0o755))?;
-
-    let stderr = File::create(DEFAULT_STDERR_PATH)?;
-    stdout.set_permissions(Permissions::from_mode(0o755))?;
-
-    let mut daemonize = Daemonize::new()
-        .pid_file(PID_PATH) // Every method except `new` and `start`
-        .chown_pid_file(true) // is optional, see `Daemonize` documentation
-        .umask(0o777) // Set umask, `0o027` by default.
-        .stdout(stdout) // Redirect stdout to `/tmp/daemon.out`.
-        .stderr(stderr) // Redirect stderr to `/tmp/daemon.err`.
-        .privileged_action(|| "Executed before drop privileges");
-
-    let user_name = std::env::var("SUDO_USER")
-        .ok()
-        .and_then(|user| User::from_name(&user).ok().flatten())
-        .or_else(|| User::from_uid(Uid::current()).ok().flatten());
-
-    if let Some(real_user) = user_name {
-        daemonize = daemonize
-            .user(real_user.name.as_str())
-            .group(real_user.gid.as_raw());
-    }
-
-    if let Some(err) = daemonize.start().err() {
-        eprintln!("Error: {err}");
-        std::process::exit(-1)
-    }
-
-    serve::run(args)
-}
-
-pub fn stop() -> crate::Result<()> {
-    check_root();
-
-    if let Some(pid) = pid() {
-        let pid = pid.parse::<i32>()?;
-        for _ in 0..360 {
-            if signal::kill(Pid::from_raw(pid), signal::SIGINT).is_err() {
-                break;
-            }
-            std::thread::sleep(std::time::Duration::from_secs(1))
+impl Default for Daemon {
+    fn default() -> Self {
+        Daemon {
+            pid_file: PathBuf::from(DEFAULT_PID_PATH),
+            stdout_file: PathBuf::from(DEFAULT_STDOUT_PATH),
+            stderr_file: PathBuf::from(DEFAULT_STDERR_PATH),
         }
-        let _ = std::fs::remove_file(PID_PATH);
     }
-
-    Ok(())
 }
 
-pub fn restart(args: BootArgs) -> crate::Result<()> {
-    stop()?;
-    start(args)
-}
-
-pub fn status() -> crate::Result<()> {
-    match pid() {
-        Some(pid) => {
-            let mut sys = sysinfo::System::new();
-
-            // First, we update all information of our `System` struct.
-            sys.refresh_all();
-
-            // Display processes ID
-            for (raw_pid, process) in sys.processes().iter() {
-                if raw_pid.as_u32().eq(&(pid.parse::<u32>()?)) {
-                    println!("{:<6} {:<6}  {:<6}", "PID", "CPU(%)", "MEM(MB)");
-                    println!(
-                        "{:<6}   {:<6.1}  {:<6.1}",
-                        raw_pid,
-                        process.cpu_usage(),
-                        (process.memory() as f64) / 1024.0 / 1024.0
-                    );
-                }
-            }
+impl Daemon {
+    /// Get the pid of the daemon
+    fn get_pid(&self) -> crate::Result<Option<String>> {
+        if let Ok(data) = std::fs::read(&self.pid_file) {
+            let binding = String::from_utf8(data)?;
+            return Ok(Some(binding.trim().to_string()));
         }
-        None => println!("{BIN_NAME} is not running"),
+        Ok(None)
     }
-    Ok(())
-}
 
-pub fn log() -> crate::Result<()> {
-    fn read_and_print_file(file_path: &'static str, placeholder: &str) -> crate::Result<()> {
-        if !Path::new(file_path).exists() {
+    /// Check if the current user is root
+    fn check_root(&self) {
+        if !nix::unistd::Uid::effective().is_root() {
+            println!("You must run this executable with root permissions");
+            std::process::exit(-1)
+        }
+    }
+
+    /// Start the daemon
+    pub fn start(&self, config: BootArgs) -> crate::Result<()> {
+        if let Some(pid) = self.get_pid()? {
+            println!("pingly is already running with pid: {pid}");
             return Ok(());
         }
 
-        // Check if the file is empty before opening it
-        let metadata = std::fs::metadata(file_path)?;
-        if metadata.len() == 0 {
-            return Ok(());
-        }
+        self.check_root();
 
-        let file = File::open(file_path)?;
-        let reader = std::io::BufReader::new(file);
-        let mut start = true;
+        let pid_file = File::create(&self.pid_file)?;
+        pid_file.set_permissions(Permissions::from_mode(0o755))?;
 
-        use std::io::BufRead;
+        let stdout = File::create(&self.stdout_file)?;
+        stdout.set_permissions(Permissions::from_mode(0o755))?;
 
-        for line in reader.lines() {
-            if let Ok(content) = line {
-                if start {
-                    start = false;
-                    println!("{placeholder}");
-                }
-                println!("{content}");
-            } else if let Err(err) = line {
-                eprintln!("Error reading line: {err}");
+        let stderr = File::create(&self.stderr_file)?;
+        stderr.set_permissions(Permissions::from_mode(0o755))?;
+
+        let mut daemonize = Daemonize::new()
+            .pid_file(&self.pid_file)
+            .chown_pid_file(true)
+            .umask(0o777)
+            .stdout(stdout)
+            .stderr(stderr)
+            .privileged_action(|| "Executed before drop privileges");
+
+        if let Ok(user) = std::env::var("SUDO_USER") {
+            if let Ok(Some(real_user)) = nix::unistd::User::from_name(&user) {
+                daemonize = daemonize
+                    .user(real_user.name.as_str())
+                    .group(real_user.gid.as_raw());
             }
         }
+
+        if let Some(err) = daemonize.start().err() {
+            eprintln!("Error: {err}");
+            std::process::exit(-1)
+        }
+
+        server::run(config)
+    }
+
+    /// Stop the daemon
+    pub fn stop(&self) -> crate::Result<()> {
+        use nix::{sys::signal, unistd::Pid};
+
+        self.check_root();
+
+        if let Some(pid) = self.get_pid()? {
+            let pid = pid.parse::<i32>()?;
+            for _ in 0..360 {
+                if signal::kill(Pid::from_raw(pid), signal::SIGINT).is_err() {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_secs(1))
+            }
+        }
+
+        std::fs::remove_file(&self.pid_file)?;
 
         Ok(())
     }
 
-    read_and_print_file(DEFAULT_STDOUT_PATH, "STDOUT>")?;
+    /// Restart the daemon
+    pub fn restart(&self, config: BootArgs) -> crate::Result<()> {
+        self.stop()?;
+        self.start(config)
+    }
 
-    read_and_print_file(DEFAULT_STDERR_PATH, "STDERR>")?;
+    /// Show the status of the daemon
+    pub fn status(&self) -> crate::Result<()> {
+        match self.get_pid()? {
+            None => println!("pingly is not running"),
+            Some(pid) => {
+                let mut sys = sysinfo::System::new();
+                sys.refresh_all();
 
-    Ok(())
+                for (raw_pid, process) in sys.processes().iter() {
+                    if raw_pid.as_u32().eq(&(pid.parse::<u32>()?)) {
+                        println!("{:<6} {:<6}  {:<6}", "PID", "CPU(%)", "MEM(MB)");
+                        println!(
+                            "{:<6}   {:<6.1}  {:<6.1}",
+                            raw_pid,
+                            process.cpu_usage(),
+                            (process.memory() as f64) / 1024.0 / 1024.0
+                        );
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Show the log of the daemon
+    pub fn log(&self) -> crate::Result<()> {
+        fn read_and_print_file(file_path: &Path, placeholder: &str) -> crate::Result<()> {
+            if !file_path.exists() {
+                return Ok(());
+            }
+
+            let metadata = std::fs::metadata(file_path)?;
+            if metadata.len() == 0 {
+                return Ok(());
+            }
+
+            let file = File::open(file_path)?;
+            let reader = std::io::BufReader::new(file);
+            let mut start = true;
+
+            use std::io::BufRead;
+
+            for line in reader.lines() {
+                if let Ok(content) = line {
+                    if start {
+                        start = false;
+                        println!("{placeholder}");
+                    }
+                    println!("{content}");
+                } else if let Err(err) = line {
+                    eprintln!("Error reading line: {err}");
+                }
+            }
+
+            Ok(())
+        }
+
+        read_and_print_file(&self.stdout_file, "STDOUT>")?;
+        read_and_print_file(&self.stderr_file, "STDERR>")?;
+
+        Ok(())
+    }
 }

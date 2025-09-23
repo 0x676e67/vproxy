@@ -1,6 +1,6 @@
 use tokio::io::{AsyncRead, AsyncReadExt};
 
-use crate::socks::proto::{Address, AsyncStreamOperation, Reply, StreamOperation, Version};
+use crate::server::socks::proto::{Address, AsyncStreamOperation, Reply, StreamOperation, Version};
 
 /// Response
 ///

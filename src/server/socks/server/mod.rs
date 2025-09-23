@@ -16,14 +16,14 @@ use super::{
     proto::{Address, Reply, UdpHeader},
     server::connection::associate::{self, AssociatedUdpSocket},
 };
-pub use crate::socks::server::{
+pub use crate::server::socks::server::{
     auth::AuthAdaptor,
     connection::{ClientConnection, IncomingConnection, associate::UdpAssociate},
 };
-use crate::{
+use crate::server::{
+    Context, Serve,
     connect::{Connector, TcpConnector, UdpConnector},
     extension::Extension,
-    serve::{Context, Serve},
     socks::error::Error,
 };
 
@@ -37,9 +37,9 @@ impl Socks5Server {
     /// Create a new socks5 server
     pub fn new(ctx: Context) -> std::io::Result<Self> {
         let auth = match (ctx.auth.username, ctx.auth.password) {
-            (Some(username), Some(password)) => AuthAdaptor::new_password(username, password),
+            (Some(username), Some(password)) => AuthAdaptor::password(username, password),
 
-            _ => AuthAdaptor::new_no_auth(),
+            _ => AuthAdaptor::no(),
         };
 
         let socket = if ctx.bind.is_ipv4() {

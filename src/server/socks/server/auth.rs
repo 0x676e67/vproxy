@@ -3,49 +3,59 @@ use std::{future::Future, io::Error};
 use password::{Request, Response, Status::*};
 use tokio::net::TcpStream;
 
-use crate::{
+use crate::server::{
     extension::Extension,
     socks::proto::{AsyncStreamOperation, Method, UsernamePassword, handshake::password},
 };
 
+/// Trait for SOCKS authentication methods.
 pub trait Auth: Send {
     type Output;
+
+    /// Returns the SOCKS authentication method type.
     fn method(&self) -> Method;
+
+    /// Executes the authentication process with the client.
     fn execute(&self, stream: &mut TcpStream) -> impl Future<Output = Self::Output> + Send;
 }
 
+/// Unified interface for different SOCKS authentication methods.
+#[non_exhaustive]
 pub enum AuthAdaptor {
     NoAuth(NoAuth),
-    Password(PasswordAuth),
+    PasswordAuth(PasswordAuth),
 }
 
 impl AuthAdaptor {
-    pub fn new_no_auth() -> Self {
+    // Create a new [`AuthAdaptor`] instance with no authentication.
+    #[inline]
+    pub fn no() -> Self {
         Self::NoAuth(NoAuth)
     }
 
-    pub fn new_password<S>(username: S, password: S) -> Self
-    where
-        S: Into<String>,
-    {
-        Self::Password(PasswordAuth::new(username, password))
+    // Create a new [`AuthAdaptor`] instance with username and password authentication.
+    #[inline]
+    pub fn password<S: Into<String>>(username: S, password: S) -> Self {
+        AuthAdaptor::PasswordAuth(PasswordAuth::new(username, password))
     }
 }
 
 impl Auth for AuthAdaptor {
     type Output = std::io::Result<(bool, Extension)>;
 
+    #[inline]
     fn method(&self) -> Method {
         match self {
             Self::NoAuth(auth) => auth.method(),
-            Self::Password(auth) => auth.method(),
+            Self::PasswordAuth(auth) => auth.method(),
         }
     }
 
+    #[inline]
     async fn execute(&self, stream: &mut TcpStream) -> Self::Output {
         match self {
             Self::NoAuth(auth) => auth.execute(stream).await,
-            Self::Password(auth) => auth.execute(stream).await,
+            Self::PasswordAuth(auth) => auth.execute(stream).await,
         }
     }
 }
@@ -56,10 +66,12 @@ pub struct NoAuth;
 impl Auth for NoAuth {
     type Output = std::io::Result<(bool, Extension)>;
 
+    #[inline]
     fn method(&self) -> Method {
         Method::NoAuth
     }
 
+    #[inline]
     async fn execute(&self, _stream: &mut TcpStream) -> Self::Output {
         Ok((true, Extension::None))
     }
@@ -71,12 +83,8 @@ pub struct PasswordAuth {
 }
 
 impl PasswordAuth {
-    /// Creates a new `Password` instance with the given username, password, and
-    /// IP whitelist.
-    pub fn new<S>(username: S, password: S) -> Self
-    where
-        S: Into<String>,
-    {
+    /// Create a new [`PasswordAuth`] instance with the given username and password.
+    pub fn new<S: Into<String>>(username: S, password: S) -> Self {
         Self {
             inner: UsernamePassword::new(username, password),
         }
@@ -86,6 +94,7 @@ impl PasswordAuth {
 impl Auth for PasswordAuth {
     type Output = std::io::Result<(bool, Extension)>;
 
+    #[inline]
     fn method(&self) -> Method {
         Method::Password
     }

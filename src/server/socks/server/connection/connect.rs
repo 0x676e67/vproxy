@@ -13,7 +13,7 @@ use tokio::{
     },
 };
 
-use crate::socks::proto::{Address, AsyncStreamOperation, Reply, Response};
+use crate::server::socks::proto::{Address, AsyncStreamOperation, Reply, Response};
 
 /// Socks5 connection type `Connect`
 ///

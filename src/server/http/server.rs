@@ -22,16 +22,13 @@ use tokio::{
 use tracing::{Level, instrument};
 
 use super::{
+    super::{
+        Context, Serve, connect::Connector, extension::Extension, http::accept::DefaultAcceptor,
+    },
     accept::Accept,
     error::Error,
     genca,
     tls::{RustlsAcceptor, RustlsConfig},
-};
-use crate::{
-    connect::Connector,
-    extension::Extension,
-    http::accept::DefaultAcceptor,
-    serve::{Context, Serve},
 };
 
 /// HTTP server.
@@ -312,8 +309,7 @@ mod auth {
     use http::{HeaderMap, Response, StatusCode, header};
     use http_body_util::combinators::BoxBody;
 
-    use super::{Error, empty};
-    use crate::extension::Extension;
+    use super::{Error, Extension, empty};
 
     impl TryInto<Response<BoxBody<Bytes, hyper::Error>>> for Error {
         type Error = http::Error;
@@ -349,8 +345,22 @@ mod auth {
                 Authenticator::Password {
                     username, password, ..
                 } => {
-                    // Extract basic auth
-                    let auth_str = option_ext(headers).ok_or(Error::ProxyAuthenticationRequired)?;
+                    let parse_basic_auth = |headers: &HeaderMap| -> Option<String> {
+                        let basic_auth = headers
+                            .get(header::PROXY_AUTHORIZATION)
+                            .and_then(|hv| hv.to_str().ok())
+                            .and_then(|s| s.strip_prefix("Basic "))?;
+
+                        let auth_bytes = base64::engine::general_purpose::STANDARD
+                            .decode(basic_auth.as_bytes())
+                            .ok()?;
+
+                        String::from_utf8(auth_bytes).ok()
+                    };
+
+                    // Parse username and password from headers
+                    let auth_str =
+                        parse_basic_auth(headers).ok_or(Error::ProxyAuthenticationRequired)?;
                     // Find last ':' index
                     let last_colon_index = auth_str
                         .rfind(':')
@@ -374,18 +384,5 @@ mod auth {
                 }
             }
         }
-    }
-
-    fn option_ext(headers: &HeaderMap) -> Option<String> {
-        let basic_auth = headers
-            .get(header::PROXY_AUTHORIZATION)
-            .and_then(|hv| hv.to_str().ok())
-            .and_then(|s| s.strip_prefix("Basic "))?;
-
-        let auth_bytes = base64::engine::general_purpose::STANDARD
-            .decode(basic_auth.as_bytes())
-            .ok()?;
-
-        String::from_utf8(auth_bytes).ok()
     }
 }

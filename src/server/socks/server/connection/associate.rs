@@ -12,7 +12,7 @@ use tokio::{
     net::{TcpStream, ToSocketAddrs, UdpSocket},
 };
 
-use crate::socks::proto::{
+use crate::server::socks::proto::{
     Address, AsyncStreamOperation, Reply, Response, StreamOperation, UdpHeader,
 };
 

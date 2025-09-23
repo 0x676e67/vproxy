@@ -14,7 +14,7 @@ use tokio::{
     },
 };
 
-use crate::socks::proto::{Address, AsyncStreamOperation, Reply, Response};
+use crate::server::socks::proto::{Address, AsyncStreamOperation, Reply, Response};
 
 /// Socks5 command type `Bind`
 /// you may get a `Bind<NeedFirstReply>`. After replying the client 2 times

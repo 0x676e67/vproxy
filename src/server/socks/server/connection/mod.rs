@@ -4,7 +4,7 @@ use tokio::{io::AsyncWriteExt, net::TcpStream};
 
 use self::{associate::UdpAssociate, bind::Bind, connect::Connect};
 use super::{super::error::Error, auth::Auth};
-use crate::socks::{
+use crate::server::socks::{
     proto::{self, Address, AsyncStreamOperation, Command, Method, handshake},
     server::AuthAdaptor,
 };

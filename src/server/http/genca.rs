@@ -3,11 +3,9 @@ use rcgen::{
     SanType, date_time_ymd,
 };
 
-use crate::BIN_NAME;
-
 /// Get self-signed certificate and key.
 pub fn get_self_signed_cert() -> crate::Result<(Vec<u8>, Vec<u8>)> {
-    let temp_dir = std::env::temp_dir().join(BIN_NAME);
+    let temp_dir = std::env::temp_dir().join(env!("CARGO_PKG_NAME"));
     if !temp_dir.exists() {
         tracing::info!("Creating temp cert directory: {}", temp_dir.display());
         std::fs::create_dir_all(&temp_dir)?;
@@ -35,8 +33,8 @@ fn generate_self_signed() -> crate::Result<(Vec<u8>, Vec<u8>)> {
     params.not_before = date_time_ymd(1975, 1, 1);
     params.not_after = date_time_ymd(4096, 1, 1);
     let mut distinguished_name = DistinguishedName::new();
-    distinguished_name.push(DnType::CommonName, BIN_NAME);
-    distinguished_name.push(DnType::OrganizationName, BIN_NAME);
+    distinguished_name.push(DnType::CommonName, env!("CARGO_PKG_NAME"));
+    distinguished_name.push(DnType::OrganizationName, env!("CARGO_PKG_NAME"));
     params.distinguished_name = distinguished_name;
     params.key_usages = vec![
         KeyUsagePurpose::DigitalSignature,

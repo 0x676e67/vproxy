@@ -1,17 +1,16 @@
+#![deny(unused)]
+#![deny(unsafe_code)]
+#![cfg_attr(docsrs, feature(doc_cfg))]
 #![cfg_attr(test, deny(warnings))]
 #![cfg_attr(not(test), warn(unused_crate_dependencies))]
 
-mod connect;
 #[cfg(target_family = "unix")]
 mod daemon;
 mod error;
-mod extension;
-mod http;
 mod oneself;
 #[cfg(target_os = "linux")]
 mod route;
-mod serve;
-mod socks;
+mod server;
 
 use std::{net::SocketAddr, path::PathBuf};
 
@@ -36,8 +35,6 @@ static ALLOC: snmalloc_rs::SnMalloc = snmalloc_rs::SnMalloc;
 #[cfg(feature = "rpmalloc")]
 #[global_allocator]
 static ALLOC: rpmalloc::RpMalloc = rpmalloc::RpMalloc;
-
-const BIN_NAME: &str = env!("CARGO_PKG_NAME");
 
 type Result<T, E = error::Error> = std::result::Result<T, E>;
 
@@ -171,18 +168,19 @@ pub enum Oneself {
 
 fn main() -> Result<()> {
     let opt = Opt::parse();
+    let daemon = daemon::Daemon::default();
     match opt.commands {
-        Commands::Run(args) => serve::run(args),
+        Commands::Run(args) => server::run(args),
         #[cfg(target_family = "unix")]
-        Commands::Start(args) => daemon::start(args),
+        Commands::Start(args) => daemon.start(args),
         #[cfg(target_family = "unix")]
-        Commands::Restart(args) => daemon::restart(args),
+        Commands::Restart(args) => daemon.restart(args),
         #[cfg(target_family = "unix")]
-        Commands::Stop => daemon::stop(),
+        Commands::Stop => daemon.stop(),
         #[cfg(target_family = "unix")]
-        Commands::PS => daemon::status(),
+        Commands::PS => daemon.status(),
         #[cfg(target_family = "unix")]
-        Commands::Log => daemon::log(),
+        Commands::Log => daemon.log(),
         Commands::Oneself { command } => match command {
             Oneself::Update => oneself::update(),
             Oneself::Uninstall => oneself::uninstall(),

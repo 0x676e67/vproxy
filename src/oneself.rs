@@ -1,21 +1,10 @@
-use self_update::{cargo_crate_version, update::UpdateStatus};
-
-use crate::BIN_NAME;
+use self_update::{backends::github, cargo_crate_version, update::UpdateStatus};
 
 /// Updates the current executable to the latest version available.
-///
-/// This function uses the `self_update` crate to check for updates and apply them if available.
-/// It configures the update process with various options such as repository name, binary name,
-/// target platform, and current version. If an update is found, it downloads and applies the
-/// update, and then prints the release notes or a message indicating that the update was
-/// successful.
-///
-/// # Errors
-///
-/// This function returns an error if the update process fails at any step, such as building the
-/// updater, checking for updates, or applying the update.
 pub(super) fn update() -> crate::Result<()> {
-    let status = self_update::backends::github::Update::configure()
+    const BIN_NAME: &str = env!("CARGO_PKG_NAME");
+
+    let status = github::Update::configure()
         .repo_owner("0x676e67")
         .repo_name(BIN_NAME)
         .bin_name(BIN_NAME)
@@ -44,15 +33,6 @@ pub(super) fn update() -> crate::Result<()> {
 }
 
 /// Uninstalls the current executable.
-///
-/// This function deletes the currently running executable from the file system.
-/// It retrieves the path to the current executable using `std::env::current_exe` and then
-/// removes the file at that path. This operation requires appropriate file system permissions.
-///
-/// # Errors
-///
-/// This function returns an error if it fails to retrieve the current executable path or if it
-/// fails to delete the file.
 pub(super) fn uninstall() -> crate::Result<()> {
     let current_exe = std::env::current_exe()?;
     println!("Uninstalling {}", current_exe.display());

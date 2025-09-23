@@ -6,7 +6,7 @@ use std::{
 use bytes::BufMut;
 use tokio::io::{AsyncRead, AsyncReadExt};
 
-use crate::socks::proto::{AsyncStreamOperation, StreamOperation};
+use crate::server::socks::proto::{AsyncStreamOperation, StreamOperation};
 
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 #[repr(u8)]
@@ -323,7 +323,7 @@ impl From<&Address> for Address {
 }
 
 impl TryFrom<&str> for Address {
-    type Error = crate::socks::error::Error;
+    type Error = crate::server::socks::error::Error;
 
     fn try_from(addr: &str) -> std::result::Result<Self, Self::Error> {
         if let Ok(addr) = addr.parse::<SocketAddr>() {
