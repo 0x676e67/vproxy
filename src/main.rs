@@ -130,7 +130,7 @@ pub struct BootArgs {
     log: tracing::Level,
 
     /// Bind address
-    #[clap(short, long, default_value = "0.0.0.0:1080")]
+    #[clap(short, long, default_value = "127.0.0.1:1080")]
     bind: SocketAddr,
 
     /// Connection timeout in seconds
