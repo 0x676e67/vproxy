@@ -4,7 +4,7 @@ use connection::{
     bind::{self, Bind},
     connect::{self, Connect},
 };
-use tokio::net::TcpListener;
+use tokio::{net::TcpListener, sync::Semaphore};
 
 pub mod auth;
 pub mod connection;
@@ -31,6 +31,7 @@ pub struct Socks5Server {
     listener: TcpListener,
     auth: Arc<AuthAdaptor>,
     connector: Connector,
+    sem: Arc<Semaphore>,
 }
 
 impl Socks5Server {
@@ -54,6 +55,7 @@ impl Socks5Server {
             listener: socket.listen(ctx.concurrent as _)?,
             auth: Arc::new(auth),
             connector: ctx.connector,
+            sem: Arc::new(Semaphore::new(ctx.concurrent)),
         })
     }
 }
@@ -65,7 +67,14 @@ impl Serve for Socks5Server {
         while let Ok((stream, socket_addr)) = self.listener.accept().await {
             let connector = self.connector.clone();
             let auth = self.auth.clone();
+            let sem = self.sem.clone();
             tokio::spawn(async move {
+                let _permit = match sem.acquire().await {
+                    Ok(permit) => permit,
+                    Err(_) => {
+                        return;
+                    }
+                };
                 if let Err(err) = handle(
                     IncomingConnection::new(stream, auth),
                     socket_addr,
