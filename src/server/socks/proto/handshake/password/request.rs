@@ -53,11 +53,11 @@ impl StreamOperation for Request {
 
         let username = self.user_pass.username_bytes();
         buf.put_u8(username.len() as u8);
-        buf.put_slice(&username);
+        buf.put_slice(username);
 
         let password = self.user_pass.password_bytes();
         buf.put_u8(password.len() as u8);
-        buf.put_slice(&password);
+        buf.put_slice(password);
     }
 
     #[inline]
