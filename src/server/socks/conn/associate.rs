@@ -12,9 +12,7 @@ use tokio::{
     net::{TcpStream, ToSocketAddrs, UdpSocket},
 };
 
-use crate::server::socks::proto::{
-    Address, AsyncStreamOperation, Reply, Response, StreamOperation, UdpHeader,
-};
+use super::proto::{Address, AsyncStreamOperation, Reply, Response, StreamOperation, UdpHeader};
 
 /// Socks5 connection type `UdpAssociate`
 #[derive(Debug)]
@@ -101,11 +99,13 @@ impl<S: Default> UdpAssociate<S> {
     /// a small amount of data. When not set, data is buffered until there is a
     /// sufficient amount to send out, thereby avoiding the frequent sending
     /// of small packets.
+    #[inline]
     pub fn set_nodelay(&self, nodelay: bool) -> std::io::Result<()> {
         self.stream.set_nodelay(nodelay)
     }
 
     /// Gets the value of the `IP_TTL` option for this socket.
+    #[inline]
     pub fn ttl(&self) -> std::io::Result<u32> {
         self.stream.ttl()
     }
@@ -114,6 +114,7 @@ impl<S: Default> UdpAssociate<S> {
     ///
     /// This value sets the time-to-live field that is used in every packet sent
     /// from this socket.
+    #[inline]
     pub fn set_ttl(&self, ttl: u32) -> std::io::Result<()> {
         self.stream.set_ttl(ttl)
     }
@@ -232,12 +233,14 @@ impl AssociatedUdpSocket {
     }
 
     /// Get the maximum UDP packet size, with socks5 UDP header included.
+    #[inline]
     pub fn get_max_packet_size(&self) -> usize {
         self.buf_size.load(Ordering::Relaxed)
     }
 
     /// Set the maximum UDP packet size, with socks5 UDP header included, for
     /// adjusting the receiving buffer size.
+    #[inline]
     pub fn set_max_packet_size(&self, size: usize) {
         self.buf_size.store(size, Ordering::Release);
     }

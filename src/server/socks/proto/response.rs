@@ -1,6 +1,6 @@
 use tokio::io::{AsyncRead, AsyncReadExt};
 
-use crate::server::socks::proto::{Address, AsyncStreamOperation, Reply, StreamOperation, Version};
+use super::{Address, AsyncStreamOperation, Reply, StreamOperation, Version};
 
 /// Response
 ///
@@ -13,11 +13,13 @@ use crate::server::socks::proto::{Address, AsyncStreamOperation, Reply, StreamOp
 /// ```
 #[derive(Clone, Debug)]
 pub struct Response {
-    pub reply: Reply,
-    pub address: Address,
+    reply: Reply,
+    address: Address,
 }
 
 impl Response {
+    /// Create a new [`Response`] instance.
+    #[inline]
     pub fn new(reply: Reply, address: Address) -> Self {
         Self { reply, address }
     }
@@ -50,6 +52,7 @@ impl StreamOperation for Response {
         self.address.write_to_buf(buf);
     }
 
+    #[inline]
     fn len(&self) -> usize {
         3 + self.address.len()
     }

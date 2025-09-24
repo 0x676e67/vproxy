@@ -6,7 +6,7 @@ use std::{
 use bytes::BufMut;
 use tokio::io::{AsyncRead, AsyncReadExt};
 
-use crate::server::socks::proto::{AsyncStreamOperation, StreamOperation};
+use super::{AsyncStreamOperation, StreamOperation};
 
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 #[repr(u8)]

@@ -46,6 +46,7 @@ impl StreamOperation for Request {
         self.address.write_to_buf(buf);
     }
 
+    #[inline]
     fn len(&self) -> usize {
         3 + self.address.len()
     }

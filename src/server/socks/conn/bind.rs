@@ -14,7 +14,7 @@ use tokio::{
     },
 };
 
-use crate::server::socks::proto::{Address, AsyncStreamOperation, Reply, Response};
+use super::proto::{Address, AsyncStreamOperation, Reply, Response};
 
 /// Socks5 command type `Bind`
 /// you may get a `Bind<NeedFirstReply>`. After replying the client 2 times
@@ -42,6 +42,7 @@ pub struct NeedSecondReply;
 pub struct Ready;
 
 impl Bind<NeedFirstReply> {
+    /// Create a new [`Bind<NeedFirstReply>`] from a [`TcpStream`].
     #[inline]
     pub(super) fn new(stream: TcpStream) -> Self {
         Self {
@@ -118,11 +119,13 @@ impl Bind<NeedFirstReply> {
     /// a small amount of data. When not set, data is buffered until there is a
     /// sufficient amount to send out, thereby avoiding the frequent sending
     /// of small packets.
+    #[inline]
     pub fn set_nodelay(&self, nodelay: bool) -> std::io::Result<()> {
         self.stream.set_nodelay(nodelay)
     }
 
     /// Gets the value of the `IP_TTL` option for this socket.
+    #[inline]
     pub fn ttl(&self) -> std::io::Result<u32> {
         self.stream.ttl()
     }
@@ -131,6 +134,7 @@ impl Bind<NeedFirstReply> {
     ///
     /// This value sets the time-to-live field that is used in every packet sent
     /// from this socket.
+    #[inline]
     pub fn set_ttl(&self, ttl: u32) -> std::io::Result<()> {
         self.stream.set_ttl(ttl)
     }

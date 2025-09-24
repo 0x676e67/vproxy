@@ -1,10 +1,11 @@
 mod address;
 mod command;
-pub mod handshake;
 mod reply;
 mod request;
 mod response;
 mod udp;
+
+pub mod handshake;
 
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 

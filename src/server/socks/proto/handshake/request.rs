@@ -1,3 +1,4 @@
+use smallvec::SmallVec;
 use tokio::io::{AsyncRead, AsyncReadExt};
 
 use crate::server::socks::proto::{AsyncStreamOperation, Method, StreamOperation, Version};
@@ -13,7 +14,7 @@ use crate::server::socks::proto::{AsyncStreamOperation, Method, StreamOperation,
 /// ```
 #[derive(Clone, Debug)]
 pub struct Request {
-    methods: Vec<Method>,
+    methods: SmallVec<[Method; 8]>,
 }
 
 impl Request {
@@ -37,22 +38,23 @@ impl StreamOperation for Request {
         r.read_exact(&mut mlen)?;
         let mlen = mlen[0];
 
-        let mut methods = vec![0; mlen as usize];
+        let mut methods: SmallVec<[u8; 8]> = SmallVec::with_capacity(mlen as usize);
         r.read_exact(&mut methods)?;
 
-        let methods = methods.into_iter().map(Method::from).collect();
-
-        Ok(Self { methods })
+        Ok(Self {
+            methods: methods.into_iter().map(Method::from).collect(),
+        })
     }
 
     fn write_to_buf<B: bytes::BufMut>(&self, buf: &mut B) {
         buf.put_u8(Version::V5.into());
         buf.put_u8(self.methods.len() as u8);
-
-        let methods = self.methods.iter().map(u8::from).collect::<Vec<u8>>();
-        buf.put_slice(&methods);
+        for &method in &self.methods {
+            buf.put_u8(u8::from(method));
+        }
     }
 
+    #[inline]
     fn len(&self) -> usize {
         2 + self.methods.len()
     }

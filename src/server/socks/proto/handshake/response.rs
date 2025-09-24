@@ -17,6 +17,7 @@ pub struct Response {
 }
 
 impl Response {
+    #[inline]
     pub fn new(method: Method) -> Self {
         Self { method }
     }
@@ -45,6 +46,7 @@ impl StreamOperation for Response {
         buf.put_u8(u8::from(self.method));
     }
 
+    #[inline]
     fn len(&self) -> usize {
         2
     }

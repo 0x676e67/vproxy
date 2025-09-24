@@ -1,6 +1,6 @@
 use tokio::io::{AsyncRead, AsyncReadExt};
 
-use crate::server::socks::proto::{Address, AsyncStreamOperation, StreamOperation};
+use super::{Address, AsyncStreamOperation, StreamOperation};
 
 /// SOCKS5 UDP packet header
 ///
@@ -18,10 +18,14 @@ pub struct UdpHeader {
 }
 
 impl UdpHeader {
+    /// Create a new [`UdpHeader`] instance.
+    #[inline]
     pub fn new(frag: u8, address: Address) -> Self {
         Self { frag, address }
     }
 
+    /// Maximum length of a serialized [`UdpHeader`].
+    #[inline]
     pub const fn max_serialized_len() -> usize {
         3 + Address::max_serialized_len()
     }

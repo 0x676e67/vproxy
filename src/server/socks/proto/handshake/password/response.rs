@@ -10,6 +10,7 @@ pub enum Status {
 }
 
 impl From<Status> for u8 {
+    #[inline]
     fn from(value: Status) -> Self {
         value as u8
     }
@@ -52,6 +53,7 @@ pub struct Response {
 }
 
 impl Response {
+    #[inline]
     pub fn new(status: Status) -> Self {
         Self { status }
     }
@@ -71,6 +73,7 @@ impl StreamOperation for Response {
         let mut status = [0; 1];
         r.read_exact(&mut status)?;
         let status = Status::try_from(status[0])?;
+
         Ok(Self { status })
     }
 
@@ -79,6 +82,7 @@ impl StreamOperation for Response {
         buf.put_u8(self.status.into());
     }
 
+    #[inline]
     fn len(&self) -> usize {
         2
     }

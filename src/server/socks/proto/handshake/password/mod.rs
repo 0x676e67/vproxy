@@ -52,11 +52,13 @@ impl UsernamePassword {
         }
     }
 
-    pub fn username_arr(&self) -> Vec<u8> {
-        self.username.as_bytes().to_vec()
+    #[inline]
+    pub fn username_bytes(&self) -> &[u8] {
+        self.username.as_bytes()
     }
 
-    pub fn password_arr(&self) -> Vec<u8> {
-        self.password.as_bytes().to_vec()
+    #[inline]
+    pub fn password_bytes(&self) -> &[u8] {
+        self.password.as_bytes()
     }
 }

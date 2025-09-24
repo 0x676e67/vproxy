@@ -1,17 +1,17 @@
+pub mod associate;
+pub mod bind;
+pub mod connect;
+
 use std::{net::SocketAddr, sync::Arc, time::Duration};
 
 use tokio::{io::AsyncWriteExt, net::TcpStream};
 
 use self::{associate::UdpAssociate, bind::Bind, connect::Connect};
-use super::{super::error::Error, auth::Auth};
-use crate::server::socks::{
+use super::{
+    auth::{Auth, AuthAdaptor},
+    error::Error,
     proto::{self, Address, AsyncStreamOperation, Command, Method, handshake},
-    server::AuthAdaptor,
 };
-
-pub mod associate;
-pub mod bind;
-pub mod connect;
 
 /// An incoming connection. This may not be a valid socks5 connection. You need
 /// to call [`handshake()`](#method.handshake) to perform the socks5 handshake.
@@ -234,11 +234,13 @@ impl AuthenticatedStream {
     /// a small amount of data. When not set, data is buffered until there is a
     /// sufficient amount to send out, thereby avoiding the frequent sending
     /// of small packets.
+    #[inline]
     pub fn set_nodelay(&self, nodelay: bool) -> std::io::Result<()> {
         self.0.set_nodelay(nodelay)
     }
 
     /// Gets the value of the `IP_TTL` option for this socket.
+    #[inline]
     pub fn ttl(&self) -> std::io::Result<u32> {
         self.0.ttl()
     }
@@ -247,6 +249,7 @@ impl AuthenticatedStream {
     ///
     /// This value sets the time-to-live field that is used in every packet sent
     /// from this socket.
+    #[inline]
     pub fn set_ttl(&self, ttl: u32) -> std::io::Result<()> {
         self.0.set_ttl(ttl)
     }

@@ -20,6 +20,7 @@ impl TryFrom<u8> for Command {
 }
 
 impl From<Command> for u8 {
+    #[inline]
     fn from(cmd: Command) -> Self {
         match cmd {
             Command::Connect => 0x01,

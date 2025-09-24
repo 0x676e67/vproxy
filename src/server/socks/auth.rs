@@ -23,7 +23,7 @@ pub trait Auth: Send {
 #[non_exhaustive]
 pub enum AuthAdaptor {
     NoAuth(NoAuth),
-    PasswordAuth(PasswordAuth),
+    Password(Password),
 }
 
 impl AuthAdaptor {
@@ -36,7 +36,7 @@ impl AuthAdaptor {
     // Create a new [`AuthAdaptor`] instance with username and password authentication.
     #[inline]
     pub fn password<S: Into<String>>(username: S, password: S) -> Self {
-        AuthAdaptor::PasswordAuth(PasswordAuth::new(username, password))
+        AuthAdaptor::Password(Password::new(username, password))
     }
 }
 
@@ -47,7 +47,7 @@ impl Auth for AuthAdaptor {
     fn method(&self) -> Method {
         match self {
             Self::NoAuth(auth) => auth.method(),
-            Self::PasswordAuth(auth) => auth.method(),
+            Self::Password(auth) => auth.method(),
         }
     }
 
@@ -55,7 +55,7 @@ impl Auth for AuthAdaptor {
     async fn execute(&self, stream: &mut TcpStream) -> Self::Output {
         match self {
             Self::NoAuth(auth) => auth.execute(stream).await,
-            Self::PasswordAuth(auth) => auth.execute(stream).await,
+            Self::Password(auth) => auth.execute(stream).await,
         }
     }
 }
@@ -78,11 +78,11 @@ impl Auth for NoAuth {
 }
 
 /// Username and password as the socks5 handshake method.
-pub struct PasswordAuth {
+pub struct Password {
     inner: UsernamePassword,
 }
 
-impl PasswordAuth {
+impl Password {
     /// Create a new [`PasswordAuth`] instance with the given username and password.
     pub fn new<S: Into<String>>(username: S, password: S) -> Self {
         Self {
@@ -91,7 +91,7 @@ impl PasswordAuth {
     }
 }
 
-impl Auth for PasswordAuth {
+impl Auth for Password {
     type Output = std::io::Result<(bool, Extension)>;
 
     #[inline]
