@@ -1,30 +1,34 @@
+mod auth;
+mod connection;
+
 use std::{net::SocketAddr, sync::Arc};
 
 use connection::{
     bind::{self, Bind},
     connect::{self, Connect},
 };
-use tokio::net::TcpListener;
-
-pub mod auth;
-pub mod connection;
-
-use tokio::{io::AsyncWriteExt, net::UdpSocket, sync::RwLock};
+use tokio::{
+    io::AsyncWriteExt,
+    net::{TcpListener, UdpSocket},
+    sync::RwLock,
+};
 use tracing::{Level, instrument};
 
 use super::{
     proto::{Address, Reply, UdpHeader},
     server::connection::associate::{self, AssociatedUdpSocket},
 };
-pub use crate::server::socks::server::{
-    auth::AuthAdaptor,
-    connection::{ClientConnection, IncomingConnection, associate::UdpAssociate},
-};
 use crate::server::{
     Context, Serve,
     connect::{Connector, TcpConnector, UdpConnector},
     extension::Extension,
-    socks::error::Error,
+    socks::{
+        error::Error,
+        server::{
+            auth::AuthAdaptor,
+            connection::{ClientConnection, IncomingConnection, associate::UdpAssociate},
+        },
+    },
 };
 
 pub struct Socks5Server {

@@ -25,3 +25,5 @@ Cargo.lock
 *.der
 *.csr
 scripts/
+udp.py
+.venv/
