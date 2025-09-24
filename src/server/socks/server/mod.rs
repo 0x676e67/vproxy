@@ -3,10 +3,6 @@ mod connection;
 
 use std::{net::SocketAddr, sync::Arc};
 
-use connection::{
-    bind::{self, Bind},
-    connect::{self, Connect},
-};
 use tokio::{
     io::AsyncWriteExt,
     net::{TcpListener, UdpSocket},
@@ -14,21 +10,23 @@ use tokio::{
 };
 use tracing::{Level, instrument};
 
+use self::{
+    auth::AuthAdaptor,
+    connection::{
+        ClientConnection, IncomingConnection,
+        associate::{self, AssociatedUdpSocket, UdpAssociate},
+        bind::{self, Bind},
+        connect::{self, Connect},
+    },
+};
 use super::{
+    error::Error,
     proto::{Address, Reply, UdpHeader},
-    server::connection::associate::{self, AssociatedUdpSocket},
 };
 use crate::server::{
     Context, Serve,
     connect::{Connector, TcpConnector, UdpConnector},
     extension::Extension,
-    socks::{
-        error::Error,
-        server::{
-            auth::AuthAdaptor,
-            connection::{ClientConnection, IncomingConnection, associate::UdpAssociate},
-        },
-    },
 };
 
 pub struct Socks5Server {
