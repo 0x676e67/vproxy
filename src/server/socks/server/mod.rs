@@ -169,81 +169,85 @@ async fn handle_udp_proxy(
     const MAX_UDP_RELAY_PACKET_SIZE: usize = 1500;
 
     let listen_ip = associate.local_addr()?.ip();
-    let udp_socket = UdpSocket::bind(SocketAddr::from((listen_ip, 0))).await;
+    let udp_socket = UdpSocket::bind(SocketAddr::from((listen_ip, 0))).await?;
+    let listen_addr = udp_socket.local_addr()?;
 
-    match udp_socket.and_then(|socket| socket.local_addr().map(|addr| (socket, addr))) {
-        Ok((udp_socket, listen_addr)) => {
-            tracing::info!("[UDP] listen on: {listen_addr}");
+    tracing::info!("[UDP] listen on: {listen_addr}");
 
-            let mut reply_listener = associate
-                .reply(Reply::Succeeded, Address::from(listen_addr))
-                .await?;
+    let mut reply_listener = associate
+        .reply(Reply::Succeeded, Address::from(listen_addr))
+        .await?;
 
-            let buf_size = MAX_UDP_RELAY_PACKET_SIZE - UdpHeader::max_serialized_len();
-            let listen_udp = AssociatedUdpSocket::from((udp_socket, buf_size));
+    let buf_size = MAX_UDP_RELAY_PACKET_SIZE - UdpHeader::max_serialized_len();
+    let listen_udp = AssociatedUdpSocket::from((udp_socket, buf_size));
+    let dispatch_socket = connector.bind_socket(extension).await?;
+    let incoming_addr = Arc::new(RwLock::new(SocketAddr::from(([0, 0, 0, 0], 0))));
 
-            let incoming_addr = Arc::new(RwLock::new(SocketAddr::from(([0, 0, 0, 0], 0))));
-            let dispatch_socket = connector.bind_socket(extension).await?;
-
-            let res = loop {
-                tokio::select! {
-                    res = async {
-                        let buf_size = MAX_UDP_RELAY_PACKET_SIZE - UdpHeader::max_serialized_len();
-                        listen_udp.set_max_packet_size(buf_size);
-
-                        let (pkt, frag, dst_addr, src_addr) = listen_udp.recv_from().await?;
-                        if frag != 0 {
-                            return Err("[UDP] packet fragment is not supported".into());
-                        }
-                        *incoming_addr.write().await = src_addr;
-                        tracing::info!("[UDP] {src_addr} -> {dst_addr} incoming packet size {}", pkt.len());
-
-                        match dst_addr {
-                            Address::SocketAddress(dst_addr) => {
-                                connector.send_packet_with_addr(&dispatch_socket, &pkt, dst_addr).await?;
-                            }
-                            Address::DomainAddress(domain, port) => {
-                                connector.send_packet_with_domain(&dispatch_socket, &pkt, (domain, port)).await?;
-                            }
-                        };
-
-                        Ok::<_, Error>(())
-                    } => {
-                        if res.is_err() {
-                            break res;
-                        }
-                    },
-                    res = async {
-                        let mut buf = vec![0u8; MAX_UDP_RELAY_PACKET_SIZE];
-                        let (len, remote_addr) = dispatch_socket.recv_from(&mut buf).await?;
-                        let incoming_addr = *incoming_addr.read().await;
-                        tracing::info!("[UDP] {incoming_addr} <- {remote_addr} feedback to incoming");
-
-                        listen_udp.send_to(&buf[..len], 0, remote_addr.into(), incoming_addr).await?;
-                        Ok::<_, Error>(())
-                    } => {
-                        if res.is_err() {
-                            break res;
-                        }
-                    },
-                    _ = reply_listener.wait_until_closed() => {
-                        tracing::info!("[UDP] {} listener closed", listen_addr);
-                        break Ok::<_, Error>(());
-                    },
-                };
-            };
-
-            reply_listener.shutdown().await?;
-
-            res.map_err(Into::into)
+    let result = tokio::select! {
+        res = handle_client_to_remote(&listen_udp, &dispatch_socket, &connector, &incoming_addr, buf_size) => res,
+        res = handle_remote_to_client(&dispatch_socket, &listen_udp, &incoming_addr) => res,
+        _ = reply_listener.wait_until_closed() => {
+            tracing::info!("[UDP] {} listener closed", listen_addr);
+            Ok(())
         }
-        Err(err) => {
-            let mut conn = associate
-                .reply(Reply::GeneralFailure, Address::unspecified())
-                .await?;
-            conn.shutdown().await?;
-            Err(err)
+    };
+
+    reply_listener.shutdown().await?;
+    result.map_err(Into::into)
+}
+
+async fn handle_client_to_remote(
+    listen_udp: &AssociatedUdpSocket,
+    dispatch_socket: &UdpSocket,
+    connector: &UdpConnector<'_>,
+    incoming_addr: &Arc<RwLock<SocketAddr>>,
+    buf_size: usize,
+) -> Result<(), Error> {
+    loop {
+        listen_udp.set_max_packet_size(buf_size);
+        let (pkt, frag, dst_addr, src_addr) = listen_udp.recv_from().await?;
+
+        if frag != 0 {
+            return Err("[UDP] packet fragment is not supported".into());
         }
+
+        *incoming_addr.write().await = src_addr;
+        tracing::info!(
+            "[UDP] {src_addr} -> {dst_addr} incoming packet size {}",
+            pkt.len()
+        );
+
+        match dst_addr {
+            Address::SocketAddress(dst_addr) => {
+                connector
+                    .send_packet_with_addr(dispatch_socket, &pkt, dst_addr)
+                    .await?;
+            }
+            Address::DomainAddress(domain, port) => {
+                connector
+                    .send_packet_with_domain(dispatch_socket, &pkt, (domain, port))
+                    .await?;
+            }
+        }
+    }
+}
+
+async fn handle_remote_to_client(
+    dispatch_socket: &UdpSocket,
+    listen_udp: &AssociatedUdpSocket,
+    incoming_addr: &Arc<RwLock<SocketAddr>>,
+) -> Result<(), Error> {
+    const MAX_UDP_RELAY_PACKET_SIZE: usize = 1500;
+
+    loop {
+        let mut buf = vec![0u8; MAX_UDP_RELAY_PACKET_SIZE];
+        let (len, remote_addr) = dispatch_socket.recv_from(&mut buf).await?;
+        let incoming_addr = *incoming_addr.read().await;
+
+        tracing::info!("[UDP] {incoming_addr} <- {remote_addr} feedback to incoming");
+        listen_udp
+            .send_to(&buf[..len], 0, remote_addr.into(), incoming_addr)
+            .await?;
     }
 }
 
