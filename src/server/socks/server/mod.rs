@@ -40,7 +40,6 @@ impl Socks5Server {
     pub fn new(ctx: Context) -> std::io::Result<Self> {
         let auth = match (ctx.auth.username, ctx.auth.password) {
             (Some(username), Some(password)) => AuthAdaptor::password(username, password),
-
             _ => AuthAdaptor::no(),
         };
 
