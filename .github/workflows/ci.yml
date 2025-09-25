@@ -38,7 +38,21 @@ jobs:
 
       - name: Clippy check
         run: cargo clippy --all-targets
-        
+
+  tests:
+    name: Tests
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions-rs/toolchain@v1
+        with:
+          toolchain: ${{ matrix.rust }}
+          override: true
+
+      - name: Run tests
+        run: cargo test
+
   build:
     name: Build
     runs-on: ubuntu-latest
