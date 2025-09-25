@@ -84,7 +84,7 @@ async fn add_route(handle: Handle, cidr: &IpCidr) -> Result<(), Error> {
             for attr in route.attributes.iter() {
                 if let RouteAttribute::Destination(dest) = attr {
                     if dest == &route_address {
-                        tracing::info!("IP route {} already exists", cidr);
+                        tracing::info!("Route {} already exists on loopback interface", cidr);
                         return Ok(());
                     }
                 }
@@ -115,7 +115,7 @@ async fn add_route(handle: Handle, cidr: &IpCidr) -> Result<(), Error> {
     };
 
     route.add(route_message).execute().await?;
-    tracing::info!("Added IPv6 route {}", cidr);
+    tracing::info!("Added route {} to loopback interface", cidr);
 
     Ok(())
 }
@@ -200,6 +200,6 @@ fn execute_sysctl(command: &str, value: &str) -> Result<(), SysctlError> {
     tracing::trace!("Sysctl '{}' old value: {}", command, old_value);
 
     ctl.set_value_string(value).map(|_| {
-        tracing::info!("Sysctl '{}' value: {}", command, value);
+        tracing::trace!("Sysctl '{}' value: {}", command, value);
     })
 }
