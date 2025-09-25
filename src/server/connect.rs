@@ -318,6 +318,8 @@ impl TcpConnector<'_> {
                     self.inner.cidr_range,
                     extension,
                 ));
+                socket.set_reuseport(true)?;
+                socket.set_reuseaddr(true)?;
                 socket.bind(SocketAddr::new(bind, 0))?;
                 Ok(socket)
             }
@@ -328,6 +330,8 @@ impl TcpConnector<'_> {
                     self.inner.cidr_range,
                     extension,
                 ));
+                socket.set_reuseport(true)?;
+                socket.set_reuseaddr(true)?;
                 socket.bind(SocketAddr::new(bind, 0))?;
                 Ok(socket)
             }
