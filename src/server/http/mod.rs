@@ -171,13 +171,13 @@ where
     async fn accept(self, (stream, socket_addr): (TcpStream, SocketAddr)) {
         let acceptor = self.acceptor.clone();
         let builder = self.builder.clone();
-        let proxy = self.handler.clone();
+        let handler = self.handler.clone();
 
         if let Ok(stream) = acceptor.accept(stream).await {
             if let Err(err) = builder
                 .serve_connection_with_upgrades(
                     TokioIo::new(stream),
-                    service_fn(|req| <Handler as Clone>::clone(&proxy).proxy(socket_addr, req)),
+                    service_fn(|req| <Handler as Clone>::clone(&handler).proxy(socket_addr, req)),
                 )
                 .await
             {
