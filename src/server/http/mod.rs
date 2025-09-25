@@ -206,7 +206,6 @@ impl From<Context> for Handler {
     fn from(ctx: Context) -> Self {
         let authenticator = match (ctx.auth.username, ctx.auth.password) {
             (Some(username), Some(password)) => Authenticator::Password { username, password },
-
             _ => Authenticator::None,
         };
 
