@@ -22,7 +22,7 @@ use hyper_util::{
     server::conn::auto::Builder,
 };
 use tokio::{
-    io::{AsyncRead, AsyncWrite},
+    io::{AsyncRead, AsyncWrite, AsyncWriteExt},
     net::{TcpListener, TcpStream},
 };
 use tracing::{Level, instrument};
@@ -32,7 +32,7 @@ use self::{
     error::Error,
     tls::{RustlsAcceptor, RustlsConfig},
 };
-use super::{Acceptor, Connector, Context, ProxyServer, extension::Extension};
+use super::{Acceptor, Connector, Context, Server, extension::Extension};
 
 /// HTTP acceptor.
 #[derive(Clone)]
@@ -142,7 +142,7 @@ impl HttpServer {
     }
 }
 
-impl<A> ProxyServer for HttpServer<A>
+impl<A> Server for HttpServer<A>
 where
     A: Accept<TcpStream> + Clone + Send + Sync + 'static,
     A::Stream: AsyncRead + AsyncWrite + Unpin + Send,
@@ -189,7 +189,7 @@ where
 
 // ===== impl HttpServer =====
 
-impl ProxyServer for HttpsServer {
+impl Server for HttpsServer {
     #[inline]
     async fn start(self) -> std::io::Result<()> {
         self.http.start().await
@@ -302,9 +302,7 @@ impl Handler {
             }
         }
 
-        drop(server);
-
-        Ok(())
+        server.shutdown().await
     }
 }
 

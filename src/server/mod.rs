@@ -22,12 +22,12 @@ pub trait Acceptor {
     async fn accept(self, conn: (TcpStream, SocketAddr));
 }
 
-/// The [`ProxyServer`] trait defines a common interface for starting HTTP and SOCKS5 servers.
+/// The [`Server`] trait defines a common interface for starting HTTP and SOCKS5 servers.
 ///
 /// This trait is intended to be implemented by types that represent server configurations
 /// for HTTP and SOCKS5 proxy servers. The `start` method is used to start the server and
 /// handle incoming connections.
-pub trait ProxyServer {
+pub trait Server {
     /// Starts the proxy server and runs until shutdown.
     ///
     /// This method binds to the configured address, begins accepting connections,

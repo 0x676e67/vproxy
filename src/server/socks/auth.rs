@@ -41,7 +41,7 @@ impl AuthAdaptor {
 }
 
 impl Auth for AuthAdaptor {
-    type Output = std::io::Result<(bool, Extension)>;
+    type Output = std::io::Result<Extension>;
 
     #[inline]
     fn method(&self) -> Method {
@@ -64,7 +64,7 @@ impl Auth for AuthAdaptor {
 pub struct NoAuth;
 
 impl Auth for NoAuth {
-    type Output = std::io::Result<(bool, Extension)>;
+    type Output = std::io::Result<Extension>;
 
     #[inline]
     fn method(&self) -> Method {
@@ -73,7 +73,7 @@ impl Auth for NoAuth {
 
     #[inline]
     async fn execute(&self, _stream: &mut TcpStream) -> Self::Output {
-        Ok((true, Extension::None))
+        Ok(Extension::None)
     }
 }
 
@@ -92,7 +92,7 @@ impl Password {
 }
 
 impl Auth for Password {
-    type Output = std::io::Result<(bool, Extension)>;
+    type Output = std::io::Result<Extension>;
 
     #[inline]
     fn method(&self) -> Method {
@@ -113,7 +113,7 @@ impl Auth for Password {
                 .await
                 .map_err(|_| Error::other("failed to parse extension"))?;
 
-            Ok((true, extension))
+            Ok(extension)
         } else {
             Err(Error::other("username or password is incorrect"))
         }

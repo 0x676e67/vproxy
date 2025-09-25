@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use tokio::{io::ReadBuf, net::TcpListener};
 
 use super::{
-    Acceptor, Context, ProxyServer,
+    Acceptor, Context, Server,
     http::{HttpAcceptor, tls::RustlsAcceptor},
     socks::Socks5Acceptor,
 };
@@ -45,7 +45,7 @@ impl AutoDetectServer {
     }
 }
 
-impl ProxyServer for AutoDetectServer {
+impl Server for AutoDetectServer {
     async fn start(mut self) -> std::io::Result<()> {
         tracing::info!(
             "Http(s)/Socks5 proxy server listening on {}",

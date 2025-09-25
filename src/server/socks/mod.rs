@@ -24,7 +24,7 @@ use self::{
     proto::{Address, Reply, UdpHeader},
 };
 use super::{
-    Acceptor, Context, ProxyServer,
+    Acceptor, Context, Server,
     connect::{Connector, TcpConnector, UdpConnector},
     extension::Extension,
 };
@@ -92,7 +92,7 @@ impl Socks5Server {
     }
 }
 
-impl ProxyServer for Socks5Server {
+impl Server for Socks5Server {
     async fn start(mut self) -> std::io::Result<()> {
         tracing::info!(
             "Socks5 proxy server listening on {}",
@@ -112,13 +112,17 @@ async fn handle(
     socket_addr: SocketAddr,
     connector: Connector,
 ) -> std::io::Result<()> {
-    let (conn, res) = conn.authenticate().await?;
-    let (res, extension) = res?;
-
-    if !res {
-        tracing::info!("[SOCKS5] authentication failed: {}", socket_addr);
-        return Ok(());
-    }
+    let (mut conn, extension) = conn.authenticate().await?;
+    let extension = match extension {
+        Ok(extension) => extension,
+        Err(err) => {
+            tracing::trace!(
+                "[SOCKS5] authentication failed: {err}, closing connection from {socket_addr}"
+            );
+            conn.shutdown().await?;
+            return Ok(());
+        }
+    };
 
     match conn.wait_request().await? {
         ClientConnection::Connect(connect, addr) => {
@@ -168,8 +172,7 @@ async fn hanlde_connect_proxy(
                 }
             };
 
-            drop(target_stream);
-            Ok(())
+            target_stream.shutdown().await
         }
         Err(err) => {
             let mut conn = connect
