@@ -39,7 +39,6 @@ pub fn run(args: BootArgs) -> Result<()> {
     )?;
 
     let cpu_cores = std::thread::available_parallelism()?;
-    let blocking_threads = (cpu_cores.get() as f64 * 1.5).round() as usize;
 
     tracing::info!("OS: {}", std::env::consts::OS);
     tracing::info!("Arch: {}", std::env::consts::ARCH);
@@ -51,7 +50,6 @@ pub fn run(args: BootArgs) -> Result<()> {
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .worker_threads(cpu_cores.into())
-        .max_blocking_threads(blocking_threads)
         .build()?
         .block_on(async {
             #[cfg(target_os = "linux")]
