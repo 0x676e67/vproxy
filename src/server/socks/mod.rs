@@ -84,6 +84,7 @@ impl Socks5Server {
             tokio::net::TcpSocket::new_v6()?
         };
 
+        socket.set_nodelay(true)?;
         socket.bind(ctx.bind)?;
         socket.listen(ctx.concurrent).map(|listener| Socks5Server {
             listener,
