@@ -104,6 +104,12 @@ pub fn run(args: BootArgs) -> Result<()> {
                     args.fallback,
                     args.connect_timeout,
                     args.reuseaddr,
+                    #[cfg(all(
+                        unix,
+                        not(target_os = "solaris"),
+                        not(target_os = "illumos"),
+                        not(target_os = "cygwin"),
+                    ))]
                     args.reuseport,
                 ),
             };

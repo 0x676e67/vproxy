@@ -40,6 +40,12 @@ pub struct Connector {
     reuseaddr: Option<bool>,
 
     /// Enable SO_REUSEPORT for outbond connection socket
+    #[cfg(all(
+        unix,
+        not(target_os = "solaris"),
+        not(target_os = "illumos"),
+        not(target_os = "cygwin"),
+    ))]
     reuseport: Option<bool>,
 
     /// Default http connector
@@ -77,6 +83,12 @@ impl Connector {
         fallback: Option<IpAddr>,
         connect_timeout: u64,
         reuseaddr: Option<bool>,
+        #[cfg(all(
+            unix,
+            not(target_os = "solaris"),
+            not(target_os = "illumos"),
+            not(target_os = "cygwin"),
+        ))]
         reuseport: Option<bool>,
     ) -> Self {
         let connect_timeout = Duration::from_secs(connect_timeout);
@@ -92,6 +104,12 @@ impl Connector {
             connect_timeout,
             http: http_connector,
             reuseaddr,
+            #[cfg(all(
+                unix,
+                not(target_os = "solaris"),
+                not(target_os = "illumos"),
+                not(target_os = "cygwin"),
+            ))]
             reuseport,
         }
     }
@@ -334,6 +352,12 @@ impl TcpConnector<'_> {
                 if let Some(reuseaddr) = self.inner.reuseaddr {
                     socket.set_reuseaddr(reuseaddr)?;
                 }
+                #[cfg(all(
+                    unix,
+                    not(target_os = "solaris"),
+                    not(target_os = "illumos"),
+                    not(target_os = "cygwin"),
+                ))]
                 if let Some(reuseport) = self.inner.reuseport {
                     socket.set_reuseport(reuseport)?;
                 }
@@ -350,6 +374,12 @@ impl TcpConnector<'_> {
                 if let Some(reuseaddr) = self.inner.reuseaddr {
                     socket.set_reuseaddr(reuseaddr)?;
                 }
+                #[cfg(all(
+                    unix,
+                    not(target_os = "solaris"),
+                    not(target_os = "illumos"),
+                    not(target_os = "cygwin"),
+                ))]
                 if let Some(reuseport) = self.inner.reuseport {
                     socket.set_reuseport(reuseport)?;
                 }
