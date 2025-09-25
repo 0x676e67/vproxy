@@ -98,11 +98,15 @@ pub fn run(args: BootArgs) -> Result<()> {
                 bind: args.bind,
                 concurrent: args.concurrent,
                 connect_timeout: args.connect_timeout,
+                reuseaddr: args.inbound_reuseaddr,
+                reuseport: args.inbound_reuseport,
                 connector: Connector::new(
                     args.cidr,
                     args.cidr_range,
                     args.fallback,
                     args.connect_timeout,
+                    args.outbound_reuseaddr,
+                    args.outbound_reuseport,
                 ),
             };
 

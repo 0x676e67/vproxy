@@ -36,6 +36,12 @@ pub struct Connector {
     /// Connect timeout in milliseconds.
     connect_timeout: Duration,
 
+    /// Enable SO_REUSEADDR for outbond connection socket
+    reuseaddr: Option<bool>,
+
+    /// Enable SO_REUSEPORT for outbond connection socket
+    reuseport: Option<bool>,
+
     /// Default http connector
     http: connect::HttpConnector,
 }
@@ -70,16 +76,23 @@ impl Connector {
         cidr_range: Option<u8>,
         fallback: Option<IpAddr>,
         connect_timeout: u64,
+        reuseaddr: Option<bool>,
+        reuseport: Option<bool>,
     ) -> Self {
         let connect_timeout = Duration::from_secs(connect_timeout);
         let mut http_connector = connect::HttpConnector::new();
         http_connector.set_connect_timeout(Some(connect_timeout));
+        if let Some(reuseaddr) = reuseaddr {
+            http_connector.set_reuse_address(reuseaddr);
+        }
         Connector {
             cidr,
             cidr_range,
             fallback,
             connect_timeout,
             http: http_connector,
+            reuseaddr,
+            reuseport,
         }
     }
 
@@ -318,8 +331,12 @@ impl TcpConnector<'_> {
                     self.inner.cidr_range,
                     extension,
                 ));
-                socket.set_reuseport(true)?;
-                socket.set_reuseaddr(true)?;
+                if let Some(reuseaddr) = self.inner.reuseaddr {
+                    socket.set_reuseaddr(reuseaddr)?;
+                }
+                if let Some(reuseport) = self.inner.reuseport {
+                    socket.set_reuseport(reuseport)?;
+                }
                 socket.bind(SocketAddr::new(bind, 0))?;
                 Ok(socket)
             }
@@ -330,8 +347,12 @@ impl TcpConnector<'_> {
                     self.inner.cidr_range,
                     extension,
                 ));
-                socket.set_reuseport(true)?;
-                socket.set_reuseaddr(true)?;
+                if let Some(reuseaddr) = self.inner.reuseaddr {
+                    socket.set_reuseaddr(reuseaddr)?;
+                }
+                if let Some(reuseport) = self.inner.reuseport {
+                    socket.set_reuseport(reuseport)?;
+                }
                 socket.bind(SocketAddr::new(bind, 0))?;
                 Ok(socket)
             }

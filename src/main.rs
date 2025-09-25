@@ -168,6 +168,22 @@ pub struct BootArgs {
     #[clap(short, long)]
     fallback: Option<std::net::IpAddr>,
 
+    /// Enable SO_REUSEADDR for inbound listening socket
+    #[clap(long)]
+    inbound_reuseaddr: Option<bool>,
+
+    /// Enable SO_REUSEPORT for inbound listening socket
+    #[clap(long)]
+    inbound_reuseport: Option<bool>,
+
+    /// Enable SO_REUSEADDR for outbound connections
+    #[clap(long)]
+    outbound_reuseaddr: Option<bool>,
+
+    /// Enable SO_REUSEPORT for outbound connections
+    #[clap(long)]
+    outbound_reuseport: Option<bool>,
+
     #[clap(subcommand)]
     proxy: Proxy,
 }
