@@ -115,14 +115,6 @@ impl HttpServer {
             tokio::net::TcpSocket::new_v6()?
         };
 
-        if let Some(reuseaddr) = ctx.reuseaddr {
-            socket.set_reuseaddr(reuseaddr)?;
-        }
-
-        if let Some(reuseport) = ctx.reuseport {
-            socket.set_reuseport(reuseport)?;
-        }
-
         socket.bind(ctx.bind)?;
         socket.listen(ctx.concurrent).map(|listener| HttpServer {
             listener,

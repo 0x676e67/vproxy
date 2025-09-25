@@ -17,12 +17,6 @@ pub struct Context {
     /// Connection timeout in seconds
     pub connect_timeout: u64,
 
-    /// Enable SO_REUSEADDR for server listening socket
-    pub reuseaddr: Option<bool>,
-
-    /// Enable SO_REUSEPORT for server listening socket
-    pub reuseport: Option<bool>,
-
     /// Authentication mode for client connections
     pub auth: AuthMode,
 
