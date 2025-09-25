@@ -317,76 +317,60 @@ impl TcpConnector<'_> {
         }
     }
 
-    /// Creates a TCP socket and binds it to the provided IP address.
-    fn create_socket_with_addr(&self, ip: IpAddr) -> std::io::Result<TcpSocket> {
-        match ip {
+    /// Creates a [`TcpSocket`] and binds it to the provided IP address.
+    fn create_socket_with_addr(&self, bind: IpAddr) -> std::io::Result<TcpSocket> {
+        let socket = match bind {
             IpAddr::V4(_) => {
                 let socket = TcpSocket::new_v4()?;
-                let bind_addr = SocketAddr::new(ip, 0);
+                let bind_addr = SocketAddr::new(bind, 0);
                 socket.bind(bind_addr)?;
-                Ok(socket)
+                socket
             }
             IpAddr::V6(_) => {
                 let socket = TcpSocket::new_v6()?;
-                let bind_addr = SocketAddr::new(ip, 0);
+                let bind_addr = SocketAddr::new(bind, 0);
                 socket.bind(bind_addr)?;
-                Ok(socket)
+                socket
             }
+        };
+
+        if let Some(reuseaddr) = self.inner.reuseaddr {
+            socket.set_reuseaddr(reuseaddr)?;
         }
+        #[cfg(all(
+            unix,
+            not(target_os = "solaris"),
+            not(target_os = "illumos"),
+            not(target_os = "cygwin"),
+        ))]
+        if let Some(reuseport) = self.inner.reuseport {
+            socket.set_reuseport(reuseport)?;
+        }
+        socket.set_nodelay(true)?;
+
+        Ok(socket)
     }
 
-    /// Creates a TCP socket and binds it to an IP address within the provided CIDR range.
+    /// Creates a [`TcpSocket`] and binds it to an IP address within the provided CIDR range.
     async fn create_socket_with_cidr(
         &self,
         cidr: IpCidr,
         extension: Extension,
     ) -> std::io::Result<TcpSocket> {
-        match cidr {
-            IpCidr::V4(cidr) => {
-                let socket = TcpSocket::new_v4()?;
-                let bind = IpAddr::V4(assign_ipv4_from_extension(
-                    cidr,
-                    self.inner.cidr_range,
-                    extension,
-                ));
-                if let Some(reuseaddr) = self.inner.reuseaddr {
-                    socket.set_reuseaddr(reuseaddr)?;
-                }
-                #[cfg(all(
-                    unix,
-                    not(target_os = "solaris"),
-                    not(target_os = "illumos"),
-                    not(target_os = "cygwin"),
-                ))]
-                if let Some(reuseport) = self.inner.reuseport {
-                    socket.set_reuseport(reuseport)?;
-                }
-                socket.bind(SocketAddr::new(bind, 0))?;
-                Ok(socket)
-            }
-            IpCidr::V6(cidr) => {
-                let socket = TcpSocket::new_v6()?;
-                let bind = IpAddr::V6(assign_ipv6_from_extension(
-                    cidr,
-                    self.inner.cidr_range,
-                    extension,
-                ));
-                if let Some(reuseaddr) = self.inner.reuseaddr {
-                    socket.set_reuseaddr(reuseaddr)?;
-                }
-                #[cfg(all(
-                    unix,
-                    not(target_os = "solaris"),
-                    not(target_os = "illumos"),
-                    not(target_os = "cygwin"),
-                ))]
-                if let Some(reuseport) = self.inner.reuseport {
-                    socket.set_reuseport(reuseport)?;
-                }
-                socket.bind(SocketAddr::new(bind, 0))?;
-                Ok(socket)
-            }
-        }
+        let bind = match cidr {
+            IpCidr::V4(cidr) => IpAddr::V4(assign_ipv4_from_extension(
+                cidr,
+                self.inner.cidr_range,
+                extension,
+            )),
+            IpCidr::V6(cidr) => IpAddr::V6(assign_ipv6_from_extension(
+                cidr,
+                self.inner.cidr_range,
+                extension,
+            )),
+        };
+
+        self.create_socket_with_addr(bind)
     }
 }
 
@@ -439,13 +423,13 @@ impl UdpConnector<'_> {
         Err(error(last_err))
     }
 
-    /// Creates a UDP socket and binds it to the provided IP address.
+    /// Creates a [`UdpSocket`] and binds it to the provided IP address.
     #[inline]
     async fn create_socket_with_addr(&self, ip: IpAddr) -> std::io::Result<UdpSocket> {
         UdpSocket::bind(SocketAddr::new(ip, 0)).await
     }
 
-    /// Creates a UDP socket and binds it to an IP address within the provided CIDR range.
+    /// Creates a [`UdpSocket`] and binds it to an IP address within the provided CIDR range.
     async fn create_socket_with_cidr(
         &self,
         cidr: IpCidr,
@@ -471,7 +455,7 @@ impl UdpConnector<'_> {
         }
     }
 
-    /// Creates a UDP socket and binds it to an IP address within the provided CIDR
+    /// Creates a [`UdpSocket`] and binds it to an IP address within the provided CIDR
     /// range. If the binding fails, it falls back to using the provided fallback IP
     /// address.
     async fn create_socket_with_cidr_and_fallback(
