@@ -7,7 +7,7 @@ use std::{net::SocketAddr, sync::Arc};
 
 use tokio::{
     io::AsyncWriteExt,
-    net::{TcpListener, UdpSocket},
+    net::{TcpListener, TcpStream, UdpSocket},
     sync::RwLock,
 };
 use tracing::{Level, instrument};
@@ -23,26 +23,61 @@ use self::{
     error::Error,
     proto::{Address, Reply, UdpHeader},
 };
-use crate::server::{
-    Context, Serve,
+use super::{
+    Acceptor, Context, ProxyServer,
     connect::{Connector, TcpConnector, UdpConnector},
     extension::Extension,
 };
 
-pub struct Socks5Server {
-    listener: TcpListener,
+/// SOCKS5 acceptor.
+#[derive(Clone)]
+pub struct Socks5Acceptor {
     auth: Arc<AuthAdaptor>,
     connector: Connector,
 }
 
-impl Socks5Server {
-    /// Create a new [`Socks5Server`] instance.
-    pub fn new(ctx: Context) -> std::io::Result<Self> {
+/// SOCKS5 server.
+pub struct Socks5Server {
+    listener: TcpListener,
+    acceptor: Socks5Acceptor,
+}
+
+// ===== impl Socks5Acceptor =====
+
+impl Socks5Acceptor {
+    /// Create a new [`Socks5Acceptor`] instance.
+    pub fn new(ctx: Context) -> Self {
         let auth = match (ctx.auth.username, ctx.auth.password) {
             (Some(username), Some(password)) => AuthAdaptor::password(username, password),
             _ => AuthAdaptor::no(),
         };
 
+        Socks5Acceptor {
+            auth: Arc::new(auth),
+            connector: ctx.connector,
+        }
+    }
+}
+
+impl Acceptor for Socks5Acceptor {
+    async fn accept(self, (stream, socket_addr): (TcpStream, SocketAddr)) {
+        if let Err(err) = handle(
+            IncomingConnection::new(stream, self.auth),
+            socket_addr,
+            self.connector,
+        )
+        .await
+        {
+            tracing::trace!("[SOCKS5] error: {}", err);
+        }
+    }
+}
+
+// ===== impl Socks5Server =====
+
+impl Socks5Server {
+    /// Create a new [`Socks5Server`] instance.
+    pub fn new(ctx: Context) -> std::io::Result<Self> {
         let socket = if ctx.bind.is_ipv4() {
             tokio::net::TcpSocket::new_v4()?
         } else {
@@ -50,36 +85,25 @@ impl Socks5Server {
         };
         socket.set_reuseaddr(true)?;
         socket.bind(ctx.bind)?;
-
-        Ok(Self {
-            listener: socket.listen(ctx.concurrent as _)?,
-            auth: Arc::new(auth),
-            connector: ctx.connector,
+        socket.listen(ctx.concurrent).map(|listener| Socks5Server {
+            listener,
+            acceptor: Socks5Acceptor::new(ctx),
         })
     }
 }
 
-impl Serve for Socks5Server {
-    async fn run(self) -> std::io::Result<()> {
-        tracing::info!("Socks5 server listening on {}", self.listener.local_addr()?);
+impl ProxyServer for Socks5Server {
+    async fn start(mut self) -> std::io::Result<()> {
+        tracing::info!(
+            "Socks5 proxy server listening on {}",
+            self.listener.local_addr()?
+        );
 
-        while let Ok((stream, socket_addr)) = self.listener.accept().await {
-            let connector = self.connector.clone();
-            let auth = self.auth.clone();
-            tokio::spawn(async move {
-                if let Err(err) = handle(
-                    IncomingConnection::new(stream, auth),
-                    socket_addr,
-                    connector,
-                )
-                .await
-                {
-                    tracing::trace!("[SOCKS5] error: {}", err);
-                }
-            });
+        loop {
+            // Accept a new connection
+            let conn = Socks5Server::incoming(&mut self.listener).await;
+            tokio::spawn(self.acceptor.clone().accept(conn));
         }
-
-        Ok(())
     }
 }
 

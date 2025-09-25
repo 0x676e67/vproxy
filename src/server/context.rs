@@ -6,12 +6,13 @@ use super::{AuthMode, Connector};
 ///
 /// This struct holds all the necessary configuration for running a proxy server,
 /// including network settings, connection limits, timeouts, and authentication.
+#[derive(Clone)]
 pub struct Context {
     /// The socket address to bind the server to
     pub bind: SocketAddr,
 
     /// Maximum number of concurrent connections allowed
-    pub concurrent: usize,
+    pub concurrent: u32,
 
     /// Connection timeout in seconds
     pub connect_timeout: u64,

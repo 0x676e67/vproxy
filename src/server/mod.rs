@@ -1,9 +1,13 @@
+mod auto;
 mod connect;
 mod context;
 mod extension;
 mod http;
 mod socks;
 
+use std::{net::SocketAddr, time::Duration};
+
+use tokio::net::{TcpListener, TcpStream};
 use tracing_subscriber::{EnvFilter, FmtSubscriber};
 
 use self::{
@@ -12,16 +16,41 @@ use self::{
     http::{HttpServer, HttpsServer},
     socks::Socks5Server,
 };
-use crate::{AuthMode, BootArgs, Proxy, Result};
+use crate::{AuthMode, BootArgs, Proxy, Result, server::auto::AutoDetectServer};
 
-/// The `Serve` trait defines a common interface for starting HTTP and SOCKS5 servers.
+/// Trait for connection acceptors that handle incoming TCP streams.
+pub trait Acceptor {
+    /// Accepts and processes an incoming connection.
+    async fn accept(self, conn: (TcpStream, SocketAddr));
+}
+
+/// The [`ProxyServer`] trait defines a common interface for starting HTTP and SOCKS5 servers.
 ///
 /// This trait is intended to be implemented by types that represent server configurations
-/// for HTTP and SOCKS5 proxy servers. The `serve` method is used to start the server and
+/// for HTTP and SOCKS5 proxy servers. The `start` method is used to start the server and
 /// handle incoming connections.
-pub trait Serve {
-    /// Starts the server and handles incoming connections.
-    async fn run(self) -> std::io::Result<()>;
+pub trait ProxyServer {
+    /// Starts the proxy server and runs until shutdown.
+    ///
+    /// This method binds to the configured address, begins accepting connections,
+    /// and handles them according to the proxy protocol (HTTP/HTTPS/SOCKS5).
+    /// It runs indefinitely until an error occurs or a shutdown signal is received.
+    async fn start(self) -> std::io::Result<()>;
+
+    /// Accepts incoming TCP connections with retry on temporary failures.
+    ///
+    /// This method continuously attempts to accept connections from the listener.
+    /// If a temporary error occurs (e.g., resource temporarily unavailable),
+    /// it waits 50ms before retrying to avoid busy-waiting.
+    #[inline]
+    async fn incoming(listener: &mut TcpListener) -> (TcpStream, SocketAddr) {
+        loop {
+            match listener.accept().await {
+                Ok(value) => return value,
+                Err(_) => tokio::time::sleep(Duration::from_millis(50)).await,
+            }
+        }
+    }
 }
 
 /// Run the server with the provided boot arguments.
@@ -69,7 +98,7 @@ pub fn run(args: BootArgs) -> Result<()> {
             let server = Server::new(args)?;
 
             tokio::select! {
-                _ = server.run() => Ok(()),
+                _ = server.start() => Ok(()),
                 _ = shutdown_signal => {
                     Ok(())
                 }
@@ -90,10 +119,13 @@ enum Server {
 
     /// Represents a SOCKS5 server.
     Socks5(Socks5Server),
+
+    /// Represents an Auto-detecting server that handles multiple protocols.
+    Auto(AutoDetectServer),
 }
 
 impl Server {
-    /// Creates a new `Server` instance based on the provided `BootArgs`.
+    /// Creates a new [`Server`] instance based on the provided [`BootArgs`].
     ///
     /// This method initializes the appropriate server type (HTTP, HTTPS, or SOCKS5)
     /// based on the `proxy` field in the `BootArgs`. It constructs the server context
@@ -122,16 +154,22 @@ impl Server {
                 .and_then(|s| s.with_https(tls_cert, tls_key))
                 .map(Server::Https),
             Proxy::Socks5 { auth } => Socks5Server::new(context(auth)).map(Server::Socks5),
+            Proxy::Auto {
+                auth,
+                tls_cert,
+                tls_key,
+            } => AutoDetectServer::new(context(auth), tls_cert, tls_key).map(Server::Auto),
         }
     }
 }
 
-impl Serve for Server {
-    async fn run(self) -> std::io::Result<()> {
+impl ProxyServer for Server {
+    async fn start(self) -> std::io::Result<()> {
         match self {
-            Server::Http(server) => server.run().await,
-            Server::Https(server) => server.run().await,
-            Server::Socks5(server) => server.run().await,
+            Server::Http(server) => server.start().await,
+            Server::Https(server) => server.start().await,
+            Server::Socks5(server) => server.start().await,
+            Server::Auto(server) => server.start().await,
         }
     }
 }

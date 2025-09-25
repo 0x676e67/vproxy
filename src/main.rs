@@ -121,6 +121,21 @@ pub enum Proxy {
         #[clap(flatten)]
         auth: AuthMode,
     },
+
+    /// Auto detect server (SOCKS5, HTTP, HTTPS)
+    Auto {
+        /// Authentication type
+        #[clap(flatten)]
+        auth: AuthMode,
+
+        /// TLS certificate file
+        #[clap(long, requires = "tls_key")]
+        tls_cert: Option<PathBuf>,
+
+        /// TLS private key file
+        #[clap(long, requires = "tls_cert")]
+        tls_key: Option<PathBuf>,
+    },
 }
 
 #[derive(Args, Clone)]
@@ -139,7 +154,7 @@ pub struct BootArgs {
 
     /// Concurrent connections
     #[clap(short, long, default_value = "1024")]
-    concurrent: usize,
+    concurrent: u32,
 
     /// IP-CIDR, e.g. 2001:db8::/32
     #[clap(short = 'i', long)]

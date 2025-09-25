@@ -13,12 +13,12 @@ A high-performance `HTTP`/`HTTPS`/`SOCKS5` proxy server
 ## Features
 
 - Proxy extensions
-- IPv4/IPv6 priority control  
-- Configurable concurrency limits  
-- Basic authentication support
-- SOCKS5 command: `CONNECT`, `BIND`, `ASSOCIATE`  
+- Concurrency limits 
+- Basic authentication
+- Auto protocol detection
+- IPv4/IPv6 priority control 
 - Service binding to specific `CIDR` addresses
-- Specify a `CIDR` subnet range for allowed connections  
+- SOCKS5: `CONNECT`, `BIND`, `ASSOCIATE`  
 
 ## Manual
 

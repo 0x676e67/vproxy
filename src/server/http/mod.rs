@@ -1,7 +1,8 @@
 mod accept;
 mod error;
 mod genca;
-mod tls;
+
+pub mod tls;
 
 use std::{
     io::{self},
@@ -31,29 +32,33 @@ use self::{
     error::Error,
     tls::{RustlsAcceptor, RustlsConfig},
 };
-use super::{Connector, Context, Serve, extension::Extension};
+use super::{Acceptor, Connector, Context, ProxyServer, extension::Extension};
 
-/// HTTP server.
-pub struct HttpServer<A = DefaultAcceptor> {
+/// HTTP acceptor.
+#[derive(Clone)]
+pub struct HttpAcceptor<A = DefaultAcceptor> {
     acceptor: A,
-    listener: TcpListener,
     timeout: Duration,
     handler: Handler,
     builder: Builder<TokioExecutor>,
 }
 
-impl HttpServer {
-    /// Create a new [`HttpServer`] instance.
-    pub fn new(ctx: Context) -> std::io::Result<Self> {
-        let socket = if ctx.bind.is_ipv4() {
-            tokio::net::TcpSocket::new_v4()?
-        } else {
-            tokio::net::TcpSocket::new_v6()?
-        };
-        socket.set_reuseaddr(true)?;
-        socket.bind(ctx.bind)?;
+/// HTTP server.
+pub struct HttpServer<A = DefaultAcceptor> {
+    listener: TcpListener,
+    inner: HttpAcceptor<A>,
+}
 
-        let listener = socket.listen(ctx.concurrent as u32)?;
+/// HTTPS server.
+pub struct HttpsServer<A = RustlsAcceptor> {
+    http: HttpServer<A>,
+}
+
+// ===== impl HttpAcceptor =====
+
+impl HttpAcceptor {
+    /// Create a new [`HttpAcceptor`] instance.
+    pub fn new(ctx: Context) -> HttpAcceptor {
         let acceptor = DefaultAcceptor::new();
         let timeout = Duration::from_secs(ctx.connect_timeout);
         let handler = Handler::from(ctx);
@@ -64,13 +69,12 @@ impl HttpServer {
             .title_case_headers(true)
             .preserve_header_case(true);
 
-        Ok(Self {
+        HttpAcceptor {
             acceptor,
-            listener,
             timeout,
             handler,
             builder,
-        })
+        }
     }
 
     /// Enable HTTPS with TLS certificate and private key files.
@@ -78,7 +82,7 @@ impl HttpServer {
         self,
         tls_cert: P,
         tls_key: P,
-    ) -> std::io::Result<HttpsServer<RustlsAcceptor>>
+    ) -> std::io::Result<HttpAcceptor<RustlsAcceptor>>
     where
         P: Into<Option<PathBuf>>,
     {
@@ -91,83 +95,104 @@ impl HttpServer {
         }?;
 
         let acceptor = RustlsAcceptor::new(config, self.timeout);
-        Ok(HttpsServer {
-            http: HttpServer {
-                acceptor,
-                listener: self.listener,
-                timeout: self.timeout,
-                handler: self.handler,
-                builder: self.builder,
-            },
+        Ok(HttpAcceptor {
+            acceptor,
+            timeout: self.timeout,
+            handler: self.handler,
+            builder: self.builder,
         })
     }
 }
 
-/// HTTPS server.
-pub struct HttpsServer<A = RustlsAcceptor> {
-    http: HttpServer<A>,
+// ===== impl HttpServer =====
+
+impl HttpServer {
+    /// Create a new [`HttpServer`] instance.
+    pub fn new(ctx: Context) -> std::io::Result<HttpServer<DefaultAcceptor>> {
+        let socket = if ctx.bind.is_ipv4() {
+            tokio::net::TcpSocket::new_v4()?
+        } else {
+            tokio::net::TcpSocket::new_v6()?
+        };
+        socket.set_reuseaddr(true)?;
+        socket.bind(ctx.bind)?;
+        socket.listen(ctx.concurrent).map(|listener| HttpServer {
+            listener,
+            inner: HttpAcceptor::new(ctx),
+        })
+    }
+
+    /// Enable HTTPS with TLS certificate and private key files.
+    pub fn with_https<P>(
+        self,
+        tls_cert: P,
+        tls_key: P,
+    ) -> std::io::Result<HttpsServer<RustlsAcceptor>>
+    where
+        P: Into<Option<PathBuf>>,
+    {
+        self.inner
+            .with_https(tls_cert, tls_key)
+            .map(|inner| HttpsServer {
+                http: HttpServer {
+                    listener: self.listener,
+                    inner,
+                },
+            })
+    }
 }
 
-impl<A> Serve for HttpServer<A>
+impl<A> ProxyServer for HttpServer<A>
 where
     A: Accept<TcpStream> + Clone + Send + Sync + 'static,
     A::Stream: AsyncRead + AsyncWrite + Unpin + Send,
     A::Future: Send,
 {
-    async fn run(self) -> std::io::Result<()> {
+    async fn start(mut self) -> std::io::Result<()> {
         tracing::info!(
             "Http(s) proxy server listening on {}",
             self.listener.local_addr()?
         );
 
-        let mut incoming = self.listener;
-        let acceptor = self.acceptor;
-        let builder = self.builder;
-        let proxy = self.handler;
-
         loop {
-            let (tcp_stream, socket_addr) = tokio::select! {
-                biased;
-                result = accept(&mut incoming) => result,
-            };
-
-            let proxy = proxy.clone();
-            let acceptor = acceptor.clone();
-            let builder = builder.clone();
-
-            tokio::spawn(async move {
-                if let Ok(stream) = acceptor.accept(tcp_stream).await {
-                    if let Err(err) = builder
-                        .serve_connection_with_upgrades(
-                            TokioIo::new(stream),
-                            service_fn(|req| {
-                                <Handler as Clone>::clone(&proxy).proxy(socket_addr, req)
-                            }),
-                        )
-                        .await
-                    {
-                        tracing::debug!("Failed to serve connection: {:?}", err);
-                    }
-                }
-            });
+            // Accept a new connection
+            let conn = HttpServer::<A>::incoming(&mut self.listener).await;
+            tokio::spawn(self.inner.clone().accept(conn));
         }
     }
 }
 
-impl Serve for HttpsServer {
+impl<A> Acceptor for HttpAcceptor<A>
+where
+    A: Accept<TcpStream> + Clone + Send + Sync + 'static,
+    A::Stream: AsyncRead + AsyncWrite + Unpin + Send,
+    A::Future: Send,
+{
+    async fn accept(self, (stream, socket_addr): (TcpStream, SocketAddr)) {
+        let acceptor = self.acceptor.clone();
+        let builder = self.builder.clone();
+        let proxy = self.handler.clone();
+
+        if let Ok(stream) = acceptor.accept(stream).await {
+            if let Err(err) = builder
+                .serve_connection_with_upgrades(
+                    TokioIo::new(stream),
+                    service_fn(|req| <Handler as Clone>::clone(&proxy).proxy(socket_addr, req)),
+                )
+                .await
+            {
+                tracing::debug!("Failed to serve connection: {:?}", err);
+            }
+        }
+    }
+}
+
+// ===== impl HttpServer =====
+
+impl ProxyServer for HttpsServer {
     #[inline]
-    async fn run(self) -> std::io::Result<()> {
-        self.http.run().await
-    }
-}
-
-#[inline]
-async fn accept(listener: &mut TcpListener) -> (TcpStream, SocketAddr) {
-    loop {
-        match listener.accept().await {
-            Ok(value) => return value,
-            Err(_) => tokio::time::sleep(Duration::from_millis(50)).await,
-        }
+    async fn start(self) -> std::io::Result<()> {
+        self.http.start().await
     }
 }
 
