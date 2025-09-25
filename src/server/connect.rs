@@ -530,11 +530,16 @@ fn assign_ipv4_from_extension(
     if let Some(combined) = extract_value_from_extension(extension) {
         match extension {
             Extension::TTL(_) | Extension::Session(_) => {
+                let network_length = cidr.network_length();
+                if network_length >= 32 {
+                    return cidr.first_address();
+                }
+
                 // Calculate the subnet mask and apply it to ensure the base_ip is preserved in
                 // the non-variable part
-                let subnet_mask = !((1u32 << (32 - cidr.network_length())) - 1);
+                let subnet_mask = !((1u32 << (32 - network_length)) - 1);
                 let base_ip_bits = u32::from(cidr.first_address()) & subnet_mask;
-                let capacity = 2u32.pow(32 - cidr.network_length() as u32) - 1;
+                let capacity = 2u32.pow(32 - network_length as u32) - 1;
                 let ip_num = base_ip_bits | ((combined as u32) % capacity);
                 return Ipv4Addr::from(ip_num);
             }
@@ -566,6 +571,10 @@ fn assign_ipv6_from_extension(
         match extension {
             Extension::TTL(_) | Extension::Session(_) => {
                 let network_length = cidr.network_length();
+                if network_length >= 128 {
+                    return cidr.first_address();
+                }
+
                 // Calculate the subnet mask and apply it to ensure the base_ip is preserved in
                 // the non-variable part
                 let subnet_mask = !((1u128 << (128 - network_length)) - 1);
@@ -732,5 +741,17 @@ mod tests {
             ipv6_address,
             std::net::Ipv6Addr::from([0x2001, 0x470, 0xe953, 0, 0, 0, 1, 0x2345])
         );
+    }
+
+    #[test]
+    fn test_assign_ip_from_extension_with_full_cidr() {
+        let cidr_v4 = "192.168.0.1/32".parse::<Ipv4Cidr>().unwrap();
+        let extension = Extension::Session(0x12345);
+        let ipv4_address = assign_ipv4_from_extension(cidr_v4, None, extension);
+        assert_eq!(ipv4_address, "192.168.0.1".parse::<Ipv4Addr>().unwrap());
+
+        let cidr_v6 = "2001:db8::1/128".parse::<Ipv6Cidr>().unwrap();
+        let ipv6_address = assign_ipv6_from_extension(cidr_v6, None, extension);
+        assert_eq!(ipv6_address, "2001:db8::1".parse::<Ipv6Addr>().unwrap());
     }
 }
