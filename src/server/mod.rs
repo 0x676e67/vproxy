@@ -11,12 +11,10 @@ use tokio::net::{TcpListener, TcpStream};
 use tracing_subscriber::{EnvFilter, FmtSubscriber};
 
 use self::{
-    connect::Connector,
-    context::Context,
-    http::{HttpServer, HttpsServer},
+    auto::AutoDetectServer, connect::Connector, context::Context, http::HttpServer,
     socks::Socks5Server,
 };
-use crate::{AuthMode, BootArgs, Proxy, Result, server::auto::AutoDetectServer};
+use crate::{AuthMode, BootArgs, Proxy, Result};
 
 /// Trait for connection acceptors that handle incoming TCP streams.
 pub trait Acceptor {
@@ -76,7 +74,7 @@ pub fn run(args: BootArgs) -> Result<()> {
     tracing::info!("Concurrent: {}", args.concurrent);
     tracing::info!("Connect timeout: {:?}s", args.connect_timeout);
 
-    tokio::runtime::Builder::new_multi_thread()
+    Ok(tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .worker_threads(cpu_cores.into())
         .build()?
@@ -95,81 +93,42 @@ pub fn run(args: BootArgs) -> Result<()> {
                 tracing::info!("Shutdown signal received, shutting down gracefully...");
             };
 
-            let server = Server::new(args)?;
+            let context = move |auth: AuthMode| Context {
+                auth,
+                bind: args.bind,
+                concurrent: args.concurrent,
+                connect_timeout: args.connect_timeout,
+                connector: Connector::new(
+                    args.cidr,
+                    args.cidr_range,
+                    args.fallback,
+                    args.connect_timeout,
+                ),
+            };
 
             tokio::select! {
-                _ = server.start() => Ok(()),
-                _ = shutdown_signal => {
-                    Ok(())
-                }
+                result = async {
+                     match args.proxy {
+                        Proxy::Http { auth } => {
+                            HttpServer::new(context(auth))?.start().await
+                        }
+                        Proxy::Https { auth, tls_cert, tls_key } => {
+                            HttpServer::new(context(auth))?
+                                .with_https(tls_cert, tls_key)?
+                                .start()
+                                .await
+                        }
+                        Proxy::Socks5 { auth } => {
+                            Socks5Server::new(context(auth))?.start().await
+                        }
+                        Proxy::Auto { auth, tls_cert, tls_key } => {
+                            AutoDetectServer::new(context(auth), tls_cert, tls_key)?
+                                .start()
+                                .await
+                        }
+                    }
+                } => result,
+                _ = shutdown_signal => Ok(()),
             }
-        })
-}
-
-/// The `Server` enum represents different types of servers that can be created and run.
-///
-/// This enum includes variants for HTTP, HTTPS, and SOCKS5 servers. Each variant holds
-/// an instance of the corresponding server type.
-enum Server {
-    /// Represents an HTTP server.
-    Http(HttpServer),
-
-    /// Represents an HTTPS server.
-    Https(HttpsServer),
-
-    /// Represents a SOCKS5 server.
-    Socks5(Socks5Server),
-
-    /// Represents an Auto-detecting server that handles multiple protocols.
-    Auto(AutoDetectServer),
-}
-
-impl Server {
-    /// Creates a new [`Server`] instance based on the provided [`BootArgs`].
-    ///
-    /// This method initializes the appropriate server type (HTTP, HTTPS, or SOCKS5)
-    /// based on the `proxy` field in the `BootArgs`. It constructs the server context
-    /// using the provided authentication mode and other configuration parameters.
-    fn new(args: BootArgs) -> std::io::Result<Server> {
-        let context = move |auth: AuthMode| Context {
-            auth,
-            bind: args.bind,
-            concurrent: args.concurrent,
-            connect_timeout: args.connect_timeout,
-            connector: Connector::new(
-                args.cidr,
-                args.cidr_range,
-                args.fallback,
-                args.connect_timeout,
-            ),
-        };
-
-        match args.proxy {
-            Proxy::Http { auth } => HttpServer::new(context(auth)).map(Server::Http),
-            Proxy::Https {
-                auth,
-                tls_cert,
-                tls_key,
-            } => HttpServer::new(context(auth))
-                .and_then(|s| s.with_https(tls_cert, tls_key))
-                .map(Server::Https),
-            Proxy::Socks5 { auth } => Socks5Server::new(context(auth)).map(Server::Socks5),
-            Proxy::Auto {
-                auth,
-                tls_cert,
-                tls_key,
-            } => AutoDetectServer::new(context(auth), tls_cert, tls_key).map(Server::Auto),
-        }
-    }
-}
-
-impl ProxyServer for Server {
-    async fn start(self) -> std::io::Result<()> {
-        match self {
-            Server::Http(server) => server.start().await,
-            Server::Https(server) => server.start().await,
-            Server::Socks5(server) => server.start().await,
-            Server::Auto(server) => server.start().await,
-        }
-    }
+        })?)
 }
