@@ -531,7 +531,7 @@ fn assign_ipv4_from_extension(
         match extension {
             Extension::TTL(_) | Extension::Session(_) => {
                 let network_length = cidr.network_length();
-                if network_length >= 32 {
+                if u32::from(network_length) >= Ipv4Addr::BITS {
                     return cidr.first_address();
                 }
 
@@ -571,7 +571,7 @@ fn assign_ipv6_from_extension(
         match extension {
             Extension::TTL(_) | Extension::Session(_) => {
                 let network_length = cidr.network_length();
-                if network_length >= 128 {
+                if u32::from(network_length) >= Ipv6Addr::BITS {
                     return cidr.first_address();
                 }
 
