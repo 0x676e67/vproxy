@@ -191,7 +191,7 @@ const MAX_UDP_RELAY_PACKET_SIZE: usize = 1500;
 async fn handle_udp_proxy(
     connector: UdpConnector<'_>,
     associate: UdpAssociate<associate::NeedReply>,
-    _: Address,
+    address: Address,
     extension: Extension,
 ) -> std::io::Result<()> {
     const BUF_SIZE: usize = MAX_UDP_RELAY_PACKET_SIZE - UdpHeader::max_serialized_len();
