@@ -23,7 +23,7 @@ use hyper_util::{
 };
 use tokio::{
     io::{AsyncRead, AsyncWrite, AsyncWriteExt},
-    net::{TcpListener, TcpStream},
+    net::{TcpListener, TcpSocket, TcpStream},
 };
 use tracing::{Level, instrument};
 
@@ -105,9 +105,9 @@ impl HttpServer {
     /// Create a new [`HttpServer`] instance.
     pub fn new(ctx: Context) -> std::io::Result<HttpServer<DefaultAcceptor>> {
         let socket = if ctx.bind.is_ipv4() {
-            tokio::net::TcpSocket::new_v4()?
+            TcpSocket::new_v4()?
         } else {
-            tokio::net::TcpSocket::new_v6()?
+            TcpSocket::new_v6()?
         };
 
         socket.set_nodelay(true)?;

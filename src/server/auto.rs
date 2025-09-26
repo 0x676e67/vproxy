@@ -1,6 +1,9 @@
 use std::path::PathBuf;
 
-use tokio::{io::ReadBuf, net::TcpListener};
+use tokio::{
+    io::ReadBuf,
+    net::{TcpListener, TcpSocket},
+};
 
 use super::{
     Acceptor, Context, Server,
@@ -24,10 +27,11 @@ impl AutoDetectServer {
         P: Into<Option<PathBuf>>,
     {
         let socket = if ctx.bind.is_ipv4() {
-            tokio::net::TcpSocket::new_v4()?
+            TcpSocket::new_v4()?
         } else {
-            tokio::net::TcpSocket::new_v6()?
+            TcpSocket::new_v6()?
         };
+
         socket.set_nodelay(true)?;
         socket.set_reuseaddr(true)?;
         socket.bind(ctx.bind)?;
@@ -71,13 +75,13 @@ impl Server for AutoDetectServer {
                 {
                     if protocol[0] == 0x05 {
                         // assuming socks5
-                        tokio::spawn(acceptor.0.accept(conn));
+                        acceptor.0.accept(conn).await;
                     } else if protocol[0] <= 0x40 {
                         // ASCII < 'A', assuming https
-                        tokio::spawn(acceptor.2.accept(conn));
+                        acceptor.2.accept(conn).await;
                     } else {
                         // ASCII >= 'A', assuming http
-                        tokio::spawn(acceptor.1.accept(conn));
+                        acceptor.1.accept(conn).await;
                     }
                 }
             });
