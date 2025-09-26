@@ -126,48 +126,48 @@ async fn handle(
 
     match conn.wait_request().await? {
         ClientConnection::UdpAssociate(associate, addr) => {
-            handle_udp_proxy(associate, addr, connector.udp(extension)).await
+            handle_udp(associate, addr, connector.udp(extension)).await
         }
         ClientConnection::Connect(connect, addr) => {
-            hanlde_connect_proxy(connect, addr, connector.tcp(extension)).await
+            hanlde_connect(connect, addr, connector.tcp(extension)).await
         }
         ClientConnection::Bind(bind, addr) => {
-            hanlde_bind_proxy(bind, addr, connector.tcp(extension)).await
+            hanlde_bind(bind, addr, connector.tcp(extension)).await
         }
     }
 }
 
 #[instrument(skip(connect, connector), level = Level::DEBUG)]
-async fn hanlde_connect_proxy(
+async fn hanlde_connect(
     connect: Connect<connect::NeedReply>,
     address: Address,
     connector: TcpConnector<'_>,
 ) -> std::io::Result<()> {
-    let target_stream = match address {
-        Address::SocketAddress(socket_addr) => connector.connect(socket_addr).await,
+    let outbound = match address {
+        Address::SocketAddress(addr) => connector.connect(addr).await,
         Address::DomainAddress(domain, port) => connector.connect_with_domain((domain, port)).await,
     };
 
-    match target_stream {
-        Ok(mut target_stream) => {
-            let mut conn = connect
+    match outbound {
+        Ok(mut outbound) => {
+            let mut inbound = connect
                 .reply(Reply::Succeeded, Address::unspecified())
                 .await?;
 
-            match tokio::io::copy_bidirectional(&mut target_stream, &mut conn).await {
+            match tokio::io::copy_bidirectional(&mut inbound, &mut outbound).await {
                 Ok((from_client, from_server)) => {
                     tracing::info!(
-                        "[SOCKS5] client wrote {} bytes and received {} bytes",
+                        "[SOCKS5][CONNECT] client wrote {} bytes and received {} bytes",
                         from_client,
                         from_server
                     );
                 }
                 Err(err) => {
-                    tracing::trace!("[SOCKS5] tunnel error: {}", err);
+                    tracing::trace!("[SOCKS5][CONNECT] tunnel error: {}", err);
                 }
             };
 
-            target_stream.shutdown().await
+            outbound.shutdown().await
         }
         Err(err) => {
             let mut conn = connect
@@ -182,7 +182,7 @@ async fn hanlde_connect_proxy(
 const MAX_UDP_RELAY_PACKET_SIZE: usize = 1500;
 
 #[instrument(skip(associate, connector), level = Level::DEBUG)]
-async fn handle_udp_proxy(
+async fn handle_udp(
     associate: UdpAssociate<associate::NeedReply>,
     address: Address,
     connector: UdpConnector<'_>,
@@ -191,8 +191,7 @@ async fn handle_udp_proxy(
 
     let socket = UdpSocket::bind(SocketAddr::from((associate.local_addr()?.ip(), 0))).await?;
     let listen_addr = socket.local_addr()?;
-
-    tracing::info!("[UDP] listen on: {listen_addr}");
+    tracing::info!("[SOCKS5][UDP] listening on: {listen_addr}");
 
     let mut reply_listener = associate
         .reply(Reply::Succeeded, Address::from(listen_addr))
@@ -209,11 +208,11 @@ async fn handle_udp_proxy(
                 inbound.connect(src_addr).await?;
 
                 if frag != 0 {
-                    return Err(Error::from("[UDP] packet fragment is not supported"));
+                    return Err(Error::from("[SOCKS5][UDP] packet fragment is not supported"));
                 }
 
                 tracing::debug!(
-                    "[UDP] {src_addr} -> {dst_addr} incoming packet size {}",
+                    "[SOCKS5][UDP] {src_addr} -> {dst_addr} incoming packet size {}",
                     pkt.len()
                 );
 
@@ -237,7 +236,7 @@ async fn handle_udp_proxy(
                 let mut buf = [0u8; MAX_UDP_RELAY_PACKET_SIZE];
                 let (len, remote_addr) = outbound.recv_from(&mut buf).await?;
 
-                tracing::debug!("[UDP] {listen_addr} <- {remote_addr} feedback to client, packet size {len}");
+                tracing::debug!("[SOCKS5][UDP] {listen_addr} <- {remote_addr} feedback to client, packet size {len}");
 
                 inbound
                     .send(&buf[..len], 0, remote_addr.into())
@@ -247,13 +246,13 @@ async fn handle_udp_proxy(
             } => resp,
 
             _ = reply_listener.wait_until_closed() => {
-                tracing::info!("[UDP] {listen_addr} listener closed");
+                tracing::info!("[SOCKS5][UDP] {listen_addr} listener closed");
                 break;
             }
         };
 
         if let Err(err) = result {
-            tracing::error!("[UDP] proxy error: {err}");
+            tracing::error!("[SOCKS5][UDP] proxy error: {err}");
             reply_listener.shutdown().await?;
             return Err(err.into());
         }
@@ -318,36 +317,41 @@ async fn handle_udp_proxy(
 ///   |                        |                        |
 /// ```
 #[instrument(skip(bind, _address, connector), level = Level::DEBUG)]
-async fn hanlde_bind_proxy(
+async fn hanlde_bind(
     bind: Bind<bind::NeedFirstReply>,
     _address: Address,
     connector: TcpConnector<'_>,
 ) -> std::io::Result<()> {
     let listen_ip = connector.socket_addr(|| bind.local_addr().map(|socket| socket.ip()))?;
     let listener = TcpListener::bind(listen_ip).await?;
+    tracing::info!("[SOCKS5][BIND] listening on {}", listener.local_addr()?);
 
-    let conn = bind
+    let inbound = bind
         .reply(Reply::Succeeded, Address::from(listener.local_addr()?))
         .await?;
 
-    let (mut inbound, inbound_addr) = listener.accept().await?;
-    tracing::info!("[BIND] accepted connection from {}", inbound_addr);
+    let (mut outbound, outbound_addr) = listener.accept().await?;
+    tracing::info!("[SOCKS5][BIND] accepted connection from {}", outbound_addr);
 
-    match conn
-        .reply(Reply::Succeeded, Address::from(inbound_addr))
+    match inbound
+        .reply(Reply::Succeeded, Address::from(outbound_addr))
         .await
     {
-        Ok(mut conn) => {
-            match tokio::io::copy_bidirectional(&mut inbound, &mut conn).await {
-                Ok((a, b)) => {
-                    tracing::trace!("[BIND] client wrote {} bytes and received {} bytes", a, b);
+        Ok(mut inbound) => {
+            match tokio::io::copy_bidirectional(&mut inbound, &mut outbound).await {
+                Ok((from_client, from_server)) => {
+                    tracing::info!(
+                        "[SOCKS5][BIND] client wrote {} bytes and received {} bytes",
+                        from_client,
+                        from_server
+                    );
                 }
                 Err(err) => {
-                    tracing::trace!("[BIND] tunnel error: {}", err);
+                    tracing::trace!("[SOCKS5][BIND] tunnel error: {}", err);
                 }
             }
-            conn.shutdown().await?;
             inbound.shutdown().await?;
+            outbound.shutdown().await?;
             Ok(())
         }
         Err((err, mut tcp)) => {
