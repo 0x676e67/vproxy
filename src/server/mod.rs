@@ -93,7 +93,7 @@ pub fn run(args: ServerArgs) -> Result<()> {
                 tracing::info!("Shutdown signal received, shutting down gracefully...");
             };
 
-            let context = move || Context {
+            let context = Context {
                 auth: args.auth,
                 bind: args.bind,
                 concurrent: args.concurrent,
@@ -118,19 +118,19 @@ pub fn run(args: ServerArgs) -> Result<()> {
                 result = async {
                      match args.proxy {
                         Proxy::Http => {
-                            HttpServer::new(context())?.start().await
+                            HttpServer::new(context)?.start().await
                         }
                         Proxy::Https {  tls_cert, tls_key } => {
-                            HttpServer::new(context())?
+                            HttpServer::new(context)?
                                 .with_https(tls_cert, tls_key)?
                                 .start()
                                 .await
                         }
                         Proxy::Socks5  => {
-                            Socks5Server::new(context())?.start().await
+                            Socks5Server::new(context)?.start().await
                         }
                         Proxy::Auto { tls_cert, tls_key } => {
-                            AutoDetectServer::new(context(), tls_cert, tls_key)?
+                            AutoDetectServer::new(context, tls_cert, tls_key)?
                                 .start()
                                 .await
                         }
