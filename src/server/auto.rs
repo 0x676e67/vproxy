@@ -63,9 +63,6 @@ impl Server for AutoDetectServer {
             let acceptor = self.acceptor.clone();
 
             tokio::spawn(async move {
-                const SOCKS5_VERSION: u8 = 0x05;
-                const ASCII_UPPER_A: u8 = 0x41;
-
                 // Peek the first byte to determine the protocol
                 // SOCKS5 always starts with version byte 0x05
                 // TLS/HTTPS starts with binary data (< 0x41)
@@ -77,11 +74,11 @@ impl Server for AutoDetectServer {
                     .is_ok()
                 {
                     match protocol[0] {
-                        SOCKS5_VERSION => {
+                        0x05 => {
                             // ASCII '5', assuming socks5
                             acceptor.0.accept(conn).await;
                         }
-                        0x00..ASCII_UPPER_A => {
+                        0x00..0x41 => {
                             // ASCII < 'A', assuming https
                             acceptor.2.accept(conn).await;
                         }
