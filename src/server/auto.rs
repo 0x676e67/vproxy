@@ -29,6 +29,7 @@ impl AutoDetectServer {
             tokio::net::TcpSocket::new_v6()?
         };
         socket.set_nodelay(true)?;
+        socket.set_reuseaddr(true)?;
         socket.bind(ctx.bind)?;
         socket.listen(ctx.concurrent).and_then(|listener| {
             HttpAcceptor::new(ctx.clone())

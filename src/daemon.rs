@@ -1,10 +1,16 @@
 use std::{
-    fs::{File, Permissions},
+    fs::{self, File, Permissions},
+    io::{self, BufRead, Write},
     os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
+    time::Duration,
 };
 
 use daemonize::Daemonize;
+use nix::{
+    sys::signal,
+    unistd::{Pid, Uid},
+};
 
 use crate::{BootArgs, server};
 
@@ -30,31 +36,14 @@ impl Default for Daemon {
 }
 
 impl Daemon {
-    /// Get the pid of the daemon
-    fn get_pid(&self) -> crate::Result<Option<String>> {
-        if let Ok(data) = std::fs::read(&self.pid_file) {
-            let binding = String::from_utf8(data)?;
-            return Ok(Some(binding.trim().to_string()));
-        }
-        Ok(None)
-    }
-
-    /// Check if the current user is root
-    fn check_root(&self) {
-        if !nix::unistd::Uid::effective().is_root() {
-            println!("You must run this executable with root permissions");
-            std::process::exit(-1)
-        }
-    }
-
     /// Start the daemon
     pub fn start(&self, config: BootArgs) -> crate::Result<()> {
-        if let Some(pid) = self.get_pid()? {
+        if let Some(pid) = self.pid()? {
             println!("{BIN_NAME} is already running with pid: {pid}");
             return Ok(());
         }
 
-        self.check_root();
+        Daemon::root();
 
         let pid_file = File::create(&self.pid_file)?;
         pid_file.set_permissions(Permissions::from_mode(0o755))?;
@@ -91,34 +80,47 @@ impl Daemon {
 
     /// Stop the daemon
     pub fn stop(&self) -> crate::Result<()> {
-        use nix::{sys::signal, unistd::Pid};
+        Daemon::root();
 
-        self.check_root();
-
-        if let Some(pid) = self.get_pid()? {
+        if let Some(pid) = self.pid()? {
             let pid = pid.parse::<i32>()?;
             for _ in 0..360 {
                 if signal::kill(Pid::from_raw(pid), signal::SIGINT).is_err() {
                     break;
                 }
-                std::thread::sleep(std::time::Duration::from_secs(1))
+                std::thread::sleep(Duration::from_secs(1))
             }
         }
 
-        std::fs::remove_file(&self.pid_file)?;
+        if let Some(err) = fs::remove_file(&self.pid_file).err() {
+            if !matches!(err.kind(), io::ErrorKind::NotFound) {
+                println!("failed to remove pid file: {err}");
+            }
+        }
 
         Ok(())
     }
-
     /// Restart the daemon
     pub fn restart(&self, config: BootArgs) -> crate::Result<()> {
         self.stop()?;
+
+        const SPINNER: [char; 4] = ['|', '/', '-', '\\'];
+
+        for i in 0..30 {
+            print!("\r{}", SPINNER[i % 4]);
+            io::stdout().flush()?;
+            std::thread::sleep(Duration::from_millis(100));
+        }
+
+        print!("\r \r");
+        io::stdout().flush()?;
+
         self.start(config)
     }
 
     /// Show the status of the daemon
     pub fn status(&self) -> crate::Result<()> {
-        match self.get_pid()? {
+        match self.pid()? {
             None => println!("{BIN_NAME} is not running"),
             Some(pid) => {
                 let mut sys = sysinfo::System::new();
@@ -147,16 +149,14 @@ impl Daemon {
                 return Ok(());
             }
 
-            let metadata = std::fs::metadata(file_path)?;
+            let metadata = fs::metadata(file_path)?;
             if metadata.len() == 0 {
                 return Ok(());
             }
 
             let file = File::open(file_path)?;
-            let reader = std::io::BufReader::new(file);
+            let reader = io::BufReader::new(file);
             let mut start = true;
-
-            use std::io::BufRead;
 
             for line in reader.lines() {
                 if let Ok(content) = line {
@@ -177,5 +177,20 @@ impl Daemon {
         read_and_print_file(&self.stderr_file, "STDERR>")?;
 
         Ok(())
+    }
+
+    fn pid(&self) -> crate::Result<Option<String>> {
+        if let Ok(data) = fs::read(&self.pid_file) {
+            let binding = String::from_utf8(data)?;
+            return Ok(Some(binding.trim().to_string()));
+        }
+        Ok(None)
+    }
+
+    fn root() {
+        if !Uid::effective().is_root() {
+            println!("You must run this executable with root permissions");
+            std::process::exit(-1)
+        }
     }
 }

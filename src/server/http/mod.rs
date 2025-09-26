@@ -116,6 +116,7 @@ impl HttpServer {
         };
 
         socket.set_nodelay(true)?;
+        socket.set_reuseaddr(true)?;
         socket.bind(ctx.bind)?;
         socket.listen(ctx.concurrent).map(|listener| HttpServer {
             listener,
