@@ -39,25 +39,25 @@ static ALLOC: rpmalloc::RpMalloc = rpmalloc::RpMalloc;
 type Result<T, E = error::Error> = std::result::Result<T, E>;
 
 #[derive(Parser)]
-#[clap(author, version, about, arg_required_else_help = true)]
+#[command(author, version, about, arg_required_else_help = true)]
 #[command(args_conflicts_with_subcommands = true)]
 struct Opt {
-    #[clap(subcommand)]
+    #[command(subcommand)]
     commands: Commands,
 }
 
 #[derive(Subcommand)]
 pub enum Commands {
     /// Run server
-    Run(BootArgs),
+    Run(ServerArgs),
 
     /// Start server daemon
     #[cfg(target_family = "unix")]
-    Start(BootArgs),
+    Start(ServerArgs),
 
     /// Restart server daemon
     #[cfg(target_family = "unix")]
-    Restart(BootArgs),
+    Restart(ServerArgs),
 
     /// Stop server daemon
     #[cfg(target_family = "unix")]
@@ -72,9 +72,9 @@ pub enum Commands {
     Log,
 
     /// Modify server installation
-    #[clap(name = "self")]
+    #[command(name = "self")]
     Oneself {
-        #[clap(subcommand)]
+        #[command(subcommand)]
         command: Oneself,
     },
 }
@@ -83,93 +83,65 @@ pub enum Commands {
 #[derive(Args, Clone)]
 pub struct AuthMode {
     /// Authentication username
-    #[clap(short, long, requires = "password")]
+    #[arg(short, long, requires = "password", global = true)]
     pub username: Option<String>,
 
     /// Authentication password
-    #[clap(short, long, requires = "username")]
+    #[arg(short, long, requires = "username", global = true)]
     pub password: Option<String>,
 }
 
 #[derive(Subcommand, Clone)]
 pub enum Proxy {
     /// Http server
-    Http {
-        /// Authentication type
-        #[clap(flatten)]
-        auth: AuthMode,
-    },
+    Http,
 
     /// Https server
     Https {
-        /// Authentication type
-        #[clap(flatten)]
-        auth: AuthMode,
-
         /// TLS certificate file
-        #[clap(long, requires = "tls_key")]
+        #[arg(long, requires = "tls_key")]
         tls_cert: Option<PathBuf>,
 
         /// TLS private key file
-        #[clap(long, requires = "tls_cert")]
+        #[arg(long, requires = "tls_cert")]
         tls_key: Option<PathBuf>,
     },
 
     /// Socks5 server
-    Socks5 {
-        /// Authentication type
-        #[clap(flatten)]
-        auth: AuthMode,
-    },
+    Socks5,
 
     /// Auto detect server (SOCKS5, HTTP, HTTPS)
     Auto {
-        /// Authentication type
-        #[clap(flatten)]
-        auth: AuthMode,
-
         /// TLS certificate file
-        #[clap(long, requires = "tls_key")]
+        #[arg(long, requires = "tls_key")]
         tls_cert: Option<PathBuf>,
 
         /// TLS private key file
-        #[clap(long, requires = "tls_cert")]
+        #[arg(long, requires = "tls_cert")]
         tls_key: Option<PathBuf>,
     },
 }
 
 #[derive(Args, Clone)]
-pub struct BootArgs {
+pub struct ServerArgs {
     /// Log level e.g. trace, debug, info, warn, error
-    #[clap(long, env = "VPROXY_LOG", default_value = "info", global = true)]
+    #[arg(long, env = "VPROXY_LOG", default_value = "info", global = true)]
     log: tracing::Level,
 
     /// Bind address
-    #[clap(short, long, default_value = "127.0.0.1:1080")]
+    #[arg(short, long, default_value = "127.0.0.1:1080")]
     bind: SocketAddr,
 
     /// Connection timeout in seconds
-    #[clap(short = 'T', long, default_value = "10")]
+    #[arg(short = 'T', long, default_value = "10")]
     connect_timeout: u64,
 
     /// Concurrent connections
-    #[clap(short, long, default_value = "1024")]
+    #[arg(short, long, default_value = "1024")]
     concurrent: u32,
 
-    /// IP-CIDR, e.g. 2001:db8::/32
-    #[clap(short = 'i', long)]
-    cidr: Option<cidr::IpCidr>,
-
-    /// IP-CIDR-Range, e.g. 64
-    #[clap(short = 'r', long)]
-    cidr_range: Option<u8>,
-
-    /// Fallback address
-    #[clap(short, long)]
-    fallback: Option<std::net::IpAddr>,
-
     /// Enable SO_REUSEADDR for outbound connections
-    #[clap(long)]
+    #[arg(long)]
     reuseaddr: Option<bool>,
 
     /// Enable SO_REUSEPORT for outbound connections
@@ -179,10 +151,25 @@ pub struct BootArgs {
         not(target_os = "illumos"),
         not(target_os = "cygwin"),
     ))]
-    #[clap(long)]
+    #[arg(long)]
     reuseport: Option<bool>,
 
-    #[clap(subcommand)]
+    /// IP-CIDR, e.g. 2001:db8::/32
+    #[arg(short = 'i', long)]
+    cidr: Option<cidr::IpCidr>,
+
+    /// IP-CIDR-Range, e.g. 64
+    #[arg(short = 'r', long)]
+    cidr_range: Option<u8>,
+
+    /// Fallback address
+    #[arg(short, long)]
+    fallback: Option<std::net::IpAddr>,
+
+    #[clap(flatten)]
+    auth: AuthMode,
+
+    #[command(subcommand)]
     proxy: Proxy,
 }
 

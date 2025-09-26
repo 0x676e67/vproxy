@@ -12,7 +12,7 @@ use nix::{
     unistd::{Pid, Uid},
 };
 
-use crate::{BootArgs, server};
+use crate::{ServerArgs, server};
 
 const BIN_NAME: &str = env!("CARGO_PKG_NAME");
 const DEFAULT_PID_PATH: &str = concat!("/var/run/", env!("CARGO_PKG_NAME"), ".pid");
@@ -37,7 +37,7 @@ impl Default for Daemon {
 
 impl Daemon {
     /// Start the daemon
-    pub fn start(&self, config: BootArgs) -> crate::Result<()> {
+    pub fn start(&self, config: ServerArgs) -> crate::Result<()> {
         if let Some(pid) = self.pid()? {
             println!("{BIN_NAME} is already running with pid: {pid}");
             return Ok(());
@@ -101,7 +101,7 @@ impl Daemon {
         Ok(())
     }
     /// Restart the daemon
-    pub fn restart(&self, config: BootArgs) -> crate::Result<()> {
+    pub fn restart(&self, config: ServerArgs) -> crate::Result<()> {
         self.stop()?;
 
         const SPINNER: [char; 4] = ['|', '/', '-', '\\'];

@@ -14,7 +14,7 @@ use self::{
     auto::AutoDetectServer, connect::Connector, context::Context, http::HttpServer,
     socks::Socks5Server,
 };
-use crate::{AuthMode, BootArgs, Proxy, Result};
+use crate::{AuthMode, Proxy, Result, ServerArgs};
 
 /// Trait for connection acceptors that handle incoming TCP streams.
 pub trait Acceptor {
@@ -52,7 +52,7 @@ pub trait Server {
 }
 
 /// Run the server with the provided boot arguments.
-pub fn run(args: BootArgs) -> Result<()> {
+pub fn run(args: ServerArgs) -> Result<()> {
     // Initialize the logger with a filter that ignores WARN level logs for netlink_proto
     let filter = EnvFilter::from_default_env()
         .add_directive(args.log.into())
@@ -93,8 +93,8 @@ pub fn run(args: BootArgs) -> Result<()> {
                 tracing::info!("Shutdown signal received, shutting down gracefully...");
             };
 
-            let context = move |auth: AuthMode| Context {
-                auth,
+            let context = move || Context {
+                auth: args.auth,
                 bind: args.bind,
                 concurrent: args.concurrent,
                 connect_timeout: args.connect_timeout,
@@ -117,20 +117,20 @@ pub fn run(args: BootArgs) -> Result<()> {
             tokio::select! {
                 result = async {
                      match args.proxy {
-                        Proxy::Http { auth } => {
-                            HttpServer::new(context(auth))?.start().await
+                        Proxy::Http => {
+                            HttpServer::new(context())?.start().await
                         }
-                        Proxy::Https { auth, tls_cert, tls_key } => {
-                            HttpServer::new(context(auth))?
+                        Proxy::Https {  tls_cert, tls_key } => {
+                            HttpServer::new(context())?
                                 .with_https(tls_cert, tls_key)?
                                 .start()
                                 .await
                         }
-                        Proxy::Socks5 { auth } => {
-                            Socks5Server::new(context(auth))?.start().await
+                        Proxy::Socks5  => {
+                            Socks5Server::new(context())?.start().await
                         }
-                        Proxy::Auto { auth, tls_cert, tls_key } => {
-                            AutoDetectServer::new(context(auth), tls_cert, tls_key)?
+                        Proxy::Auto { tls_cert, tls_key } => {
+                            AutoDetectServer::new(context(), tls_cert, tls_key)?
                                 .start()
                                 .await
                         }
