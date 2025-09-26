@@ -25,7 +25,6 @@ use self::{
 use super::{
     Acceptor, Context, Server,
     connect::{Connector, TcpConnector, UdpConnector},
-    extension::Extension,
 };
 
 /// SOCKS5 acceptor.
@@ -126,32 +125,27 @@ async fn handle(
     };
 
     match conn.wait_request().await? {
-        ClientConnection::Connect(connect, addr) => {
-            hanlde_connect_proxy(connector.tcp_connector(), connect, addr, extension).await
-        }
         ClientConnection::UdpAssociate(associate, addr) => {
-            handle_udp_proxy(connector.udp_connector(), associate, addr, extension).await
+            handle_udp_proxy(associate, addr, connector.udp(extension)).await
+        }
+        ClientConnection::Connect(connect, addr) => {
+            hanlde_connect_proxy(connect, addr, connector.tcp(extension)).await
         }
         ClientConnection::Bind(bind, addr) => {
-            hanlde_bind_proxy(connector.tcp_connector(), bind, addr, extension).await
+            hanlde_bind_proxy(bind, addr, connector.tcp(extension)).await
         }
     }
 }
 
-#[instrument(skip(connector, connect), level = Level::DEBUG)]
+#[instrument(skip(connect, connector), level = Level::DEBUG)]
 async fn hanlde_connect_proxy(
-    connector: TcpConnector<'_>,
     connect: Connect<connect::NeedReply>,
-    addr: Address,
-    extension: Extension,
+    address: Address,
+    connector: TcpConnector<'_>,
 ) -> std::io::Result<()> {
-    let target_stream = match addr {
-        Address::DomainAddress(domain, port) => {
-            connector
-                .connect_with_domain((domain, port), extension)
-                .await
-        }
-        Address::SocketAddress(socket_addr) => connector.connect(socket_addr, extension).await,
+    let target_stream = match address {
+        Address::SocketAddress(socket_addr) => connector.connect(socket_addr).await,
+        Address::DomainAddress(domain, port) => connector.connect_with_domain((domain, port)).await,
     };
 
     match target_stream {
@@ -187,18 +181,16 @@ async fn hanlde_connect_proxy(
 
 const MAX_UDP_RELAY_PACKET_SIZE: usize = 1500;
 
-#[instrument(skip(connector, associate), level = Level::DEBUG)]
+#[instrument(skip(associate, connector), level = Level::DEBUG)]
 async fn handle_udp_proxy(
-    connector: UdpConnector<'_>,
     associate: UdpAssociate<associate::NeedReply>,
     address: Address,
-    extension: Extension,
+    connector: UdpConnector<'_>,
 ) -> std::io::Result<()> {
     const BUF_SIZE: usize = MAX_UDP_RELAY_PACKET_SIZE - UdpHeader::max_serialized_len();
 
-    let listen_ip = associate.local_addr()?.ip();
-    let udp_socket = UdpSocket::bind(SocketAddr::from((listen_ip, 0))).await?;
-    let listen_addr = udp_socket.local_addr()?;
+    let socket = UdpSocket::bind(SocketAddr::from((associate.local_addr()?.ip(), 0))).await?;
+    let listen_addr = socket.local_addr()?;
 
     tracing::info!("[UDP] listen on: {listen_addr}");
 
@@ -206,8 +198,8 @@ async fn handle_udp_proxy(
         .reply(Reply::Succeeded, Address::from(listen_addr))
         .await?;
 
-    let inbound = AssociatedUdpSocket::from((udp_socket, BUF_SIZE));
-    let outbound = connector.bind_socket(extension).await?;
+    let inbound = AssociatedUdpSocket::from((socket, BUF_SIZE));
+    let outbound = connector.bind_socket().await?;
 
     loop {
         let result = tokio::select! {
@@ -325,26 +317,13 @@ async fn handle_udp_proxy(
 ///   |<---Data transfer-------|<---Forward data--------|
 ///   |                        |                        |
 /// ```
-///
-/// # Arguments
-///
-/// * `connector` - The connector instance.
-/// * `bind` - The BIND request details.
-/// * `addr` - The address to bind to.
-/// * `extension` - Additional extensions.
-///
-/// # Returns
-///
-/// A `Result` indicating success or failure.
-#[instrument(skip(connector, bind, _addr), level = Level::DEBUG)]
+#[instrument(skip(bind, _address, connector), level = Level::DEBUG)]
 async fn hanlde_bind_proxy(
-    connector: TcpConnector<'_>,
     bind: Bind<bind::NeedFirstReply>,
-    _addr: Address,
-    extension: Extension,
+    _address: Address,
+    connector: TcpConnector<'_>,
 ) -> std::io::Result<()> {
-    let listen_ip =
-        connector.bind_socket_addr(|| bind.local_addr().map(|socket| socket.ip()), extension)?;
+    let listen_ip = connector.socket_addr(|| bind.local_addr().map(|socket| socket.ip()))?;
     let listener = TcpListener::bind(listen_ip).await?;
 
     let conn = bind
@@ -367,13 +346,12 @@ async fn hanlde_bind_proxy(
                     tracing::trace!("[BIND] tunnel error: {}", err);
                 }
             }
-
-            drop(inbound);
-
-            conn.shutdown().await
+            conn.shutdown().await?;
+            inbound.shutdown().await?;
+            Ok(())
         }
-        Err((err, tcp)) => {
-            drop(tcp);
+        Err((err, mut tcp)) => {
+            tcp.shutdown().await?;
             return Err(err);
         }
     }

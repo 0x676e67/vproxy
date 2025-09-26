@@ -252,8 +252,8 @@ impl Handler {
             }
         } else {
             self.connector
-                .http_connector()
-                .send_request(req, extension)
+                .http(extension)
+                .send_request(req)
                 .await
                 .map(|res| res.map(|b| b.boxed()))
                 .map_err(Into::into)
@@ -270,8 +270,8 @@ impl Handler {
     ) -> std::io::Result<()> {
         let mut server = self
             .connector
-            .tcp_connector()
-            .connect_with_authority(authority, extension)
+            .tcp(extension)
+            .connect_with_authority(authority)
             .await?;
 
         match tokio::io::copy_bidirectional(&mut TokioIo::new(upgraded), &mut server).await {

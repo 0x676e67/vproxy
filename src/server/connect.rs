@@ -57,12 +57,14 @@ pub struct Connector {
 /// `Connector`.
 pub struct TcpConnector<'a> {
     inner: &'a Connector,
+    extension: Extension,
 }
 
 /// `UdpConnector` is a lightweight wrapper for UDP connection settings.
 /// It provides methods to create and manage UDP sockets using the configuration from `Connector`.
 pub struct UdpConnector<'a> {
     inner: &'a Connector,
+    extension: Extension,
 }
 
 /// `HttpConnector` is a lightweight wrapper for HTTP connection settings.
@@ -70,6 +72,7 @@ pub struct UdpConnector<'a> {
 /// `Connector`.
 pub struct HttpConnector<'a> {
     inner: &'a Connector,
+    extension: Extension,
 }
 
 // ==== impl Connector ====
@@ -114,34 +117,39 @@ impl Connector {
         }
     }
 
-    /// Creates a new [`HttpConnector`] using the current configuration.
+    /// Creates a new [`HttpConnector`] instance.
     #[inline]
-    pub fn http_connector(&self) -> HttpConnector<'_> {
-        HttpConnector { inner: self }
+    pub fn http(&self, extension: Extension) -> HttpConnector<'_> {
+        HttpConnector {
+            inner: self,
+            extension,
+        }
     }
 
-    /// Creates a new [`TcpConnector`] using the current configuration.
+    /// Creates a new [`TcpConnector`] instance.
     #[inline]
-    pub fn tcp_connector(&self) -> TcpConnector<'_> {
-        TcpConnector { inner: self }
+    pub fn tcp(&self, extension: Extension) -> TcpConnector<'_> {
+        TcpConnector {
+            inner: self,
+            extension,
+        }
     }
 
-    /// Creates a new [`UdpConnector`] using the current configuration.
+    /// Creates a new [`UdpConnector`] instance.
     #[inline]
-    pub fn udp_connector(&self) -> UdpConnector<'_> {
-        UdpConnector { inner: self }
+    pub fn udp(&self, extension: Extension) -> UdpConnector<'_> {
+        UdpConnector {
+            inner: self,
+            extension,
+        }
     }
 }
 
 // ==== impl TcpConnector ====
 
 impl TcpConnector<'_> {
-    /// Binds a socket to an IP address based on the provided CIDR, fallback IP, and extensions.
-    pub fn bind_socket_addr<F>(
-        &self,
-        default: F,
-        extension: Extension,
-    ) -> std::io::Result<SocketAddr>
+    /// Returns a SocketAddr for binding (port 0). Uses CIDR, fallback IP, or default function.
+    pub fn socket_addr<F>(&self, default: F) -> std::io::Result<SocketAddr>
     where
         F: FnOnce() -> std::io::Result<IpAddr>,
     {
@@ -151,7 +159,7 @@ impl TcpConnector<'_> {
                     let ip = IpAddr::V4(assign_ipv4_from_extension(
                         cidr,
                         self.inner.cidr_range,
-                        extension,
+                        self.extension,
                     ));
                     Ok(SocketAddr::new(ip, 0))
                 }
@@ -159,7 +167,7 @@ impl TcpConnector<'_> {
                     let ip = IpAddr::V6(assign_ipv6_from_extension(
                         cidr,
                         self.inner.cidr_range,
-                        extension,
+                        self.extension,
                     ));
                     Ok(SocketAddr::new(ip, 0))
                 }
@@ -174,12 +182,11 @@ impl TcpConnector<'_> {
     pub async fn connect_with_addrs(
         &self,
         addrs: impl IntoIterator<Item = SocketAddr>,
-        extension: Extension,
     ) -> std::io::Result<TcpStream> {
         let mut last_err = None;
 
         for target_addr in addrs {
-            match self.connect(target_addr, extension).await {
+            match self.connect(target_addr).await {
                 Ok(stream) => return Ok(stream),
                 Err(e) => last_err = Some(e),
             };
@@ -191,34 +198,22 @@ impl TcpConnector<'_> {
     /// Attempts to establish a TCP connection to each of the target addresses
     /// resolved from the provided authority.
     #[inline]
-    pub async fn connect_with_authority(
-        &self,
-        authority: Authority,
-        extension: Extension,
-    ) -> std::io::Result<TcpStream> {
+    pub async fn connect_with_authority(&self, authority: Authority) -> std::io::Result<TcpStream> {
         let addrs = lookup_host(authority.as_str()).await?;
-        self.connect_with_addrs(addrs, extension).await
+        self.connect_with_addrs(addrs).await
     }
 
     /// Attempts to establish a TCP connection to the target domain using the
     /// provided extensions.
     #[inline]
-    pub async fn connect_with_domain(
-        &self,
-        host: (String, u16),
-        extension: Extension,
-    ) -> std::io::Result<TcpStream> {
+    pub async fn connect_with_domain(&self, host: (String, u16)) -> std::io::Result<TcpStream> {
         let addrs = lookup_host(host).await?;
-        self.connect_with_addrs(addrs, extension).await
+        self.connect_with_addrs(addrs).await
     }
 
     /// Attempts to establish a TCP connection to the target address using the
     /// provided extensions, CIDR range, and fallback IP address.
-    pub async fn connect(
-        &self,
-        target_addr: SocketAddr,
-        extension: Extension,
-    ) -> std::io::Result<TcpStream> {
+    pub async fn connect(&self, target_addr: SocketAddr) -> std::io::Result<TcpStream> {
         match (self.inner.cidr, self.inner.fallback) {
             (None, Some(fallback)) => {
                 timeout(
@@ -230,14 +225,14 @@ impl TcpConnector<'_> {
             (Some(cidr), None) => {
                 timeout(
                     self.inner.connect_timeout,
-                    self.connect_with_cidr(target_addr, cidr, extension),
+                    self.connect_with_cidr(target_addr, cidr),
                 )
                 .await?
             }
             (Some(cidr), Some(fallback)) => {
                 timeout(
                     self.inner.connect_timeout,
-                    self.connect_with_cidr_and_fallback(target_addr, cidr, fallback, extension),
+                    self.connect_with_cidr_fallback(target_addr, cidr, fallback),
                 )
                 .await?
             }
@@ -258,9 +253,8 @@ impl TcpConnector<'_> {
         &self,
         target_addr: SocketAddr,
         cidr: IpCidr,
-        extension: Extension,
     ) -> std::io::Result<TcpStream> {
-        let socket = self.create_socket_with_cidr(cidr, extension).await?;
+        let socket = self.create_socket_with_cidr(cidr).await?;
         socket.connect(target_addr).await
     }
 
@@ -279,14 +273,13 @@ impl TcpConnector<'_> {
     /// Attempts to establish a TCP connection to the target address using an IP
     /// address from the provided CIDR range. If the connection attempt fails, it
     /// falls back to using the provided fallback IP address.
-    async fn connect_with_cidr_and_fallback(
+    async fn connect_with_cidr_fallback(
         &self,
         target_addr: SocketAddr,
         cidr: IpCidr,
         fallback: IpAddr,
-        extension: Extension,
     ) -> std::io::Result<TcpStream> {
-        let preferred_fut = self.connect_with_cidr(target_addr, cidr, extension);
+        let preferred_fut = self.connect_with_cidr(target_addr, cidr);
         futures_util::pin_mut!(preferred_fut);
 
         let fallback_fut = self.connect_with_addr(target_addr, fallback);
@@ -352,21 +345,17 @@ impl TcpConnector<'_> {
     }
 
     /// Creates a [`TcpSocket`] and binds it to an IP address within the provided CIDR range.
-    async fn create_socket_with_cidr(
-        &self,
-        cidr: IpCidr,
-        extension: Extension,
-    ) -> std::io::Result<TcpSocket> {
+    async fn create_socket_with_cidr(&self, cidr: IpCidr) -> std::io::Result<TcpSocket> {
         let bind = match cidr {
             IpCidr::V4(cidr) => IpAddr::V4(assign_ipv4_from_extension(
                 cidr,
                 self.inner.cidr_range,
-                extension,
+                self.extension,
             )),
             IpCidr::V6(cidr) => IpAddr::V6(assign_ipv6_from_extension(
                 cidr,
                 self.inner.cidr_range,
-                extension,
+                self.extension,
             )),
         };
 
@@ -379,12 +368,12 @@ impl TcpConnector<'_> {
 impl UdpConnector<'_> {
     /// Binds a UDP socket to an IP address based on the provided CIDR, fallback IP, and extensions.
     #[inline]
-    pub async fn bind_socket(&self, extension: Extension) -> std::io::Result<UdpSocket> {
+    pub async fn bind_socket(&self) -> std::io::Result<UdpSocket> {
         match (self.inner.cidr, self.inner.fallback) {
             (None, Some(fallback)) => self.create_socket_with_addr(fallback).await,
-            (Some(cidr), None) => self.create_socket_with_cidr(cidr, extension).await,
+            (Some(cidr), None) => self.create_socket_with_cidr(cidr).await,
             (Some(cidr), Some(fallback)) => {
-                self.create_socket_with_cidr_and_fallback(cidr, fallback, extension)
+                self.create_socket_with_cidr_and_fallback(cidr, fallback)
                     .await
             }
             (None, None) => UdpSocket::bind(SocketAddr::from(([0, 0, 0, 0], 0))).await,
@@ -412,7 +401,7 @@ impl UdpConnector<'_> {
         let mut last_err = None;
         let addrs = lookup_host(dst_domain).await?;
         for addr in addrs {
-            match self.send_packet_with_addr(dispatch_socket, pkt, addr).await {
+            match dispatch_socket.send_to(pkt, addr).await {
                 Ok(s) => return Ok(s),
                 Err(e) => {
                     last_err = Some(e);
@@ -430,17 +419,13 @@ impl UdpConnector<'_> {
     }
 
     /// Creates a [`UdpSocket`] and binds it to an IP address within the provided CIDR range.
-    async fn create_socket_with_cidr(
-        &self,
-        cidr: IpCidr,
-        extension: Extension,
-    ) -> std::io::Result<UdpSocket> {
+    async fn create_socket_with_cidr(&self, cidr: IpCidr) -> std::io::Result<UdpSocket> {
         match cidr {
             IpCidr::V4(cidr) => {
                 let bind = IpAddr::V4(assign_ipv4_from_extension(
                     cidr,
                     self.inner.cidr_range,
-                    extension,
+                    self.extension,
                 ));
                 UdpSocket::bind(SocketAddr::new(bind, 0)).await
             }
@@ -448,7 +433,7 @@ impl UdpConnector<'_> {
                 let bind = IpAddr::V6(assign_ipv6_from_extension(
                     cidr,
                     self.inner.cidr_range,
-                    extension,
+                    self.extension,
                 ));
                 UdpSocket::bind(SocketAddr::new(bind, 0)).await
             }
@@ -462,9 +447,8 @@ impl UdpConnector<'_> {
         &self,
         cidr: IpCidr,
         fallback: IpAddr,
-        extension: Extension,
     ) -> std::io::Result<UdpSocket> {
-        match self.create_socket_with_cidr(cidr, extension).await {
+        match self.create_socket_with_cidr(cidr).await {
             Ok(first) => Ok(first),
             Err(err) => {
                 tracing::debug!("create socket with cidr failed: {}", err);
@@ -481,24 +465,23 @@ impl HttpConnector<'_> {
     pub async fn send_request(
         self,
         req: Request<Incoming>,
-        extension: Extension,
     ) -> Result<Response<Incoming>, hyper_util::client::legacy::Error> {
         let mut connector = self.inner.http.clone();
         match (self.inner.cidr, self.inner.fallback) {
             (Some(IpCidr::V4(cidr)), Some(IpAddr::V6(v6))) => {
-                let v4 = assign_ipv4_from_extension(cidr, self.inner.cidr_range, extension);
+                let v4 = assign_ipv4_from_extension(cidr, self.inner.cidr_range, self.extension);
                 connector.set_local_addresses(v4, v6);
             }
             (Some(IpCidr::V4(cidr)), None) => {
-                let v4 = assign_ipv4_from_extension(cidr, self.inner.cidr_range, extension);
+                let v4 = assign_ipv4_from_extension(cidr, self.inner.cidr_range, self.extension);
                 connector.set_local_address(Some(v4.into()));
             }
             (Some(IpCidr::V6(cidr)), Some(IpAddr::V4(v4))) => {
-                let v6 = assign_ipv6_from_extension(cidr, self.inner.cidr_range, extension);
+                let v6 = assign_ipv6_from_extension(cidr, self.inner.cidr_range, self.extension);
                 connector.set_local_addresses(v4, v6);
             }
             (Some(IpCidr::V6(cidr)), None) => {
-                let v6 = assign_ipv6_from_extension(cidr, self.inner.cidr_range, extension);
+                let v6 = assign_ipv6_from_extension(cidr, self.inner.cidr_range, self.extension);
                 connector.set_local_address(Some(v6.into()));
             }
             (None, addr) => connector.set_local_address(addr),
