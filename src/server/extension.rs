@@ -3,6 +3,8 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
+use crate::rand;
+
 /// Enum representing different types of extensions.
 #[allow(clippy::upper_case_acronyms)]
 #[derive(Clone, Copy, Debug, Default)]
@@ -143,7 +145,7 @@ fn parse_ttl_extension(s: &str) -> Extension {
         let timestamp = start
             .duration_since(UNIX_EPOCH)
             .map(|d| d.as_secs())
-            .unwrap_or(rand::random());
+            .unwrap_or(rand::random_u64());
 
         let time = timestamp - (timestamp % ttl.get());
         let hash = fxhash::hash64(&time.to_be_bytes());

@@ -11,13 +11,13 @@ use hyper_util::{
     client::legacy::{Client, connect},
     rt::{TokioExecutor, TokioTimer},
 };
-use rand::random;
 use tokio::{
     net::{TcpSocket, TcpStream, UdpSocket, lookup_host},
     time::timeout,
 };
 
 use super::extension::Extension;
+use crate::rand;
 
 /// `Connector` struct is used to create HTTP connectors, optionally configured
 /// with an IPv6 CIDR and a fallback IP address.
@@ -605,7 +605,7 @@ fn assign_ipv6_from_extension(
 fn assign_rand_ipv4(cidr: Ipv4Cidr) -> Ipv4Addr {
     let mut ipv4 = u32::from(cidr.first_address());
     let prefix_len = cidr.network_length();
-    let rand: u32 = random();
+    let rand: u32 = rand::random_u32();
     let net_part = (ipv4 >> (32 - prefix_len)) << (32 - prefix_len);
     let host_part = (rand << prefix_len) >> prefix_len;
     ipv4 = net_part | host_part;
@@ -619,7 +619,7 @@ fn assign_rand_ipv4(cidr: Ipv4Cidr) -> Ipv4Addr {
 fn assign_rand_ipv6(cidr: Ipv6Cidr) -> Ipv6Addr {
     let mut ipv6 = u128::from(cidr.first_address());
     let prefix_len = cidr.network_length();
-    let rand: u128 = random();
+    let rand: u128 = rand::random_u128();
     let net_part = (ipv6 >> (128 - prefix_len)) << (128 - prefix_len);
     let host_part = (rand << prefix_len) >> prefix_len;
     ipv6 = net_part | host_part;
@@ -647,7 +647,7 @@ fn assign_ipv4_with_range(cidr: Ipv4Cidr, range: u8, combined: u32) -> Ipv4Addr 
 
     // Generate a mask for the host part and a random host part value.
     let host_mask = (1u32 << (32 - range)) - 1;
-    let host_part: u32 = random::<u32>() & host_mask;
+    let host_part: u32 = rand::random_u32() & host_mask;
 
     // Combine the fixed subnet part and the random host part to form the final IP address.
     Ipv4Addr::from(subnet_with_fixed | host_part)
@@ -674,7 +674,7 @@ fn assign_ipv6_with_range(cidr: Ipv6Cidr, range: u8, combined: u128) -> Ipv6Addr
 
     // Generate a mask for the host part and a random host part value.
     let host_mask = (1u128 << (128 - range)) - 1;
-    let host_part: u128 = (random::<u64>() as u128) & host_mask;
+    let host_part: u128 = (rand::random_u64() as u128) & host_mask;
 
     // Combine the fixed subnet part and the random host part to form the final IP address.
     Ipv6Addr::from(subnet_with_fixed | host_part)

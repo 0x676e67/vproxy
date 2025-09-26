@@ -8,6 +8,7 @@
 mod daemon;
 mod error;
 mod oneself;
+mod rand;
 #[cfg(target_os = "linux")]
 mod route;
 mod server;
