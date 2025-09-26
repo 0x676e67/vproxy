@@ -16,8 +16,7 @@ use tokio::{
     time::timeout,
 };
 
-use super::extension::Extension;
-use crate::rand;
+use super::{extension::Extension, rand};
 
 /// `Connector` struct is used to create HTTP connectors, optionally configured
 /// with an IPv6 CIDR and a fallback IP address.

@@ -3,7 +3,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use crate::rand;
+use super::rand;
 
 /// Enum representing different types of extensions.
 #[allow(clippy::upper_case_acronyms)]

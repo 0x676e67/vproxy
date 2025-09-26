@@ -3,6 +3,7 @@ mod connect;
 mod context;
 mod extension;
 mod http;
+mod rand;
 mod socks;
 
 use std::{net::SocketAddr, time::Duration};
