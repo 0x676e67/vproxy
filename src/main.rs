@@ -8,14 +8,18 @@
 mod daemon;
 mod error;
 mod oneself;
-
 #[cfg(target_os = "linux")]
 mod route;
 mod server;
 
-use std::{net::SocketAddr, path::PathBuf};
+use std::{
+    net::{IpAddr, SocketAddr},
+    path::PathBuf,
+};
 
+use cidr::IpCidr;
 use clap::{Args, Parser, Subcommand};
+use tracing::Level;
 
 #[cfg(feature = "jemalloc")]
 #[global_allocator]
@@ -143,23 +147,15 @@ pub enum Proxy {
 pub struct BootArgs {
     /// Log level e.g. trace, debug, info, warn, error
     #[clap(long, env = "VPROXY_LOG", default_value = "info", global = true)]
-    log: tracing::Level,
+    log: Level,
 
     /// Bind address
     #[clap(short, long, default_value = "127.0.0.1:1080")]
     bind: SocketAddr,
 
-    /// Connection timeout in seconds
-    #[clap(short = 'T', long, default_value = "10")]
-    connect_timeout: u64,
-
-    /// Concurrent connections
-    #[clap(short, long, default_value = "1024")]
-    concurrent: u32,
-
     /// IP-CIDR, e.g. 2001:db8::/32
     #[clap(short = 'i', long)]
-    cidr: Option<cidr::IpCidr>,
+    cidr: Option<IpCidr>,
 
     /// IP-CIDR-Range, e.g. 64
     #[clap(short = 'r', long)]
@@ -167,10 +163,18 @@ pub struct BootArgs {
 
     /// Fallback address
     #[clap(short, long)]
-    fallback: Option<std::net::IpAddr>,
+    fallback: Option<IpAddr>,
+
+    /// Connection timeout in seconds
+    #[clap(short = 'T', long, default_value = "10")]
+    connect_timeout: u64,
+
+    /// Maximum concurrent connections in socket queue
+    #[clap(short, long, default_value = "1024")]
+    concurrent: u32,
 
     /// Enable SO_REUSEADDR for outbound connections
-    #[clap(long)]
+    #[clap(long, default_value = "true")]
     reuseaddr: Option<bool>,
 
     /// Enable SO_REUSEPORT for outbound connections

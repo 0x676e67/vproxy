@@ -257,15 +257,15 @@ impl TcpConnector<'_> {
         socket.connect(target_addr).await
     }
 
-    /// Attempts to establish a TCP connection to the target address using the
-    /// provided fallback IP address.
+    // Attempts to establish a TCP connection to the target address using the
+    // provided IP address.
     #[inline]
     async fn connect_with_addr(
         &self,
         target_addr: SocketAddr,
-        fallback: IpAddr,
+        addr: IpAddr,
     ) -> std::io::Result<TcpStream> {
-        let socket = self.create_socket_with_addr(fallback)?;
+        let socket = self.create_socket_with_addr(addr)?;
         socket.connect(target_addr).await
     }
 

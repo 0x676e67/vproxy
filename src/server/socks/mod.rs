@@ -129,16 +129,16 @@ async fn handle(
             handle_udp(associate, addr, connector.udp(extension)).await
         }
         ClientConnection::Connect(connect, addr) => {
-            hanlde_connect(connect, addr, connector.tcp(extension)).await
+            handle_connect(connect, addr, connector.tcp(extension)).await
         }
         ClientConnection::Bind(bind, addr) => {
-            hanlde_bind(bind, addr, connector.tcp(extension)).await
+            handle_bind(bind, addr, connector.tcp(extension)).await
         }
     }
 }
 
 #[instrument(skip(connect, connector), level = Level::DEBUG)]
-async fn hanlde_connect(
+async fn handle_connect(
     connect: Connect<connect::NeedReply>,
     address: Address,
     connector: TcpConnector<'_>,
@@ -317,7 +317,7 @@ async fn handle_udp(
 ///   |                        |                        |
 /// ```
 #[instrument(skip(bind, _address, connector), level = Level::DEBUG)]
-async fn hanlde_bind(
+async fn handle_bind(
     bind: Bind<bind::NeedFirstReply>,
     _address: Address,
     connector: TcpConnector<'_>,
