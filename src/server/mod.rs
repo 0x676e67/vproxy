@@ -45,7 +45,7 @@ pub trait Server {
     async fn incoming(listener: &mut TcpListener) -> (TcpStream, SocketAddr) {
         loop {
             match listener.accept().await {
-                Ok(value) => return value,
+                Ok(conn) => return conn,
                 Err(err) => {
                     tracing::trace!("Failed to accept connection: {err}");
                     // If the error is temporary, wait before retrying
