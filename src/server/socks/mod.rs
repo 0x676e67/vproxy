@@ -208,15 +208,9 @@ async fn handle_udp(
     // default to limiting access to the same source IP as the TCP.
     let allowed_ip = match address {
         Address::SocketAddress(addr) if !addr.ip().is_unspecified() => addr.ip(),
-        Address::DomainAddress(ref domain, _)
-            if domain != "0" && domain != "0.0.0.0" && domain != "::" =>
-        {
-            // Optionally: try to resolve domain to IP here if you want to support it
-            // For safety, the default behavior is to use tcp_ip as the allowed IP address.
-            // This ensures that only the client that established the TCP connection can send UDP packets,
-            // unless an explicit and valid IP is specified in the UDP association request.
-            tcp_ip
-        }
+        // For all other cases (including unspecified IPs, domain names, or invalid addresses),
+        // default to only allowing the IP address of the TCP control connection.
+        // See: RFC 1928 Section 7 - https://datatracker.ietf.org/doc/html/rfc1928#section-7
         _ => tcp_ip,
     };
 
