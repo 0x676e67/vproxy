@@ -236,7 +236,12 @@ async fn handle_udp(
                         src_addr.ip(),
                         allowed_ip
                     );
-                    return Ok(());
+
+                    return Err(Error::from(format!(
+                        "[SOCKS5][UDP] unauthorized IP: {}, expected: {}",
+                        src_addr.ip(),
+                        allowed_ip
+                    )));
                 }
 
                 tracing::debug!(
