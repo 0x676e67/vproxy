@@ -73,11 +73,11 @@ impl<const TLS: bool> HttpAcceptor<DefaultAcceptor, TLS> {
     }
 
     /// Enable HTTPS with TLS certificate and private key files.
-    pub fn with_https<P>(
+    pub fn with_https<P, const HTTPS: bool>(
         self,
         tls_cert: P,
         tls_key: P,
-    ) -> std::io::Result<HttpAcceptor<RustlsAcceptor, true>>
+    ) -> std::io::Result<HttpAcceptor<RustlsAcceptor, HTTPS>>
     where
         P: Into<Option<PathBuf>>,
     {
@@ -103,7 +103,7 @@ impl<const TLS: bool> HttpAcceptor<DefaultAcceptor, TLS> {
 
 impl HttpServer {
     /// Create a new [`HttpServer`] instance.
-    pub fn new(ctx: Context) -> std::io::Result<HttpServer<DefaultAcceptor>> {
+    pub fn new(ctx: Context) -> std::io::Result<HttpServer<DefaultAcceptor, false>> {
         let socket = if ctx.bind.is_ipv4() {
             TcpSocket::new_v4()?
         } else {

@@ -1,11 +1,9 @@
-use realm_io::AsyncRawIO;
-use tokio::io::{AsyncRead, AsyncWrite};
+use tokio::net::TcpStream;
 
-pub async fn copy_bidirectional<A, B>(a: &mut A, b: &mut B) -> std::io::Result<(u64, u64)>
-where
-    A: AsyncRead + AsyncWrite + AsyncRawIO + Unpin,
-    B: AsyncRead + AsyncWrite + AsyncRawIO + Unpin,
-{
+pub async fn copy_bidirectional(
+    a: &mut TcpStream,
+    b: &mut TcpStream,
+) -> std::io::Result<(u64, u64)> {
     #[cfg(target_os = "linux")]
     {
         realm_io::bidi_zero_copy(a, b).await
