@@ -40,13 +40,13 @@ impl AutoDetectServer {
         socket.set_reuseaddr(true)?;
         socket.bind(ctx.bind)?;
         socket.listen(ctx.concurrent).and_then(|listener| {
-            HttpAcceptor::<DefaultAcceptor, false>::new(ctx.clone())
+            HttpAcceptor::<DefaultAcceptor, HTTP>::new(ctx.clone())
                 .with_https(tls_cert, tls_key)
                 .map(|https_acceptor| AutoDetectServer {
                     listener,
                     acceptor: (
                         Socks5Acceptor::new(ctx.clone()),
-                        HttpAcceptor::new(ctx.clone()),
+                        HttpAcceptor::new(ctx),
                         https_acceptor,
                     ),
                 })
