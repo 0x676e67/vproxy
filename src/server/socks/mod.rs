@@ -212,7 +212,9 @@ async fn handle_udp(
             if domain != "0" && domain != "0.0.0.0" && domain != "::" =>
         {
             // Optionally: try to resolve domain to IP here if you want to support it
-            // For safety, still default to tcp_ip unless you have a strong reason
+            // For safety, the default behavior is to use tcp_ip as the allowed IP address.
+            // This ensures that only the client that established the TCP connection can send UDP packets,
+            // unless an explicit and valid IP is specified in the UDP association request.
             tcp_ip
         }
         _ => tcp_ip,
