@@ -7,7 +7,7 @@ use tokio::{
 
 use super::{
     Acceptor, Context, Server,
-    http::{HttpAcceptor, accept::DefaultAcceptor, tls::RustlsAcceptor},
+    http::{HTTP, HTTPS, HttpAcceptor, accept::DefaultAcceptor, tls::RustlsAcceptor},
     socks::Socks5Acceptor,
 };
 
@@ -19,8 +19,8 @@ pub struct AutoDetectServer {
     listener: TcpListener,
     acceptor: (
         Socks5Acceptor,
-        HttpAcceptor<DefaultAcceptor, false>,
-        HttpAcceptor<RustlsAcceptor, true>,
+        HttpAcceptor<DefaultAcceptor, HTTP>,
+        HttpAcceptor<RustlsAcceptor, HTTPS>,
     ),
 }
 

@@ -34,6 +34,9 @@ use self::{
 };
 use super::{Acceptor, Connector, Context, Server, extension::Extension};
 
+pub const HTTP: bool = false;
+pub const HTTPS: bool = true;
+
 /// HTTP acceptor.
 #[derive(Clone)]
 pub struct HttpAcceptor<A, const TLS: bool> {
@@ -73,7 +76,7 @@ impl<const TLS: bool> HttpAcceptor<DefaultAcceptor, TLS> {
     }
 
     /// Enable HTTPS with TLS certificate and private key files.
-    pub fn with_https<P, const HTTPS: bool>(
+    pub fn with_https<P>(
         self,
         tls_cert: P,
         tls_key: P,
@@ -103,7 +106,7 @@ impl<const TLS: bool> HttpAcceptor<DefaultAcceptor, TLS> {
 
 impl HttpServer {
     /// Create a new [`HttpServer`] instance.
-    pub fn new(ctx: Context) -> std::io::Result<HttpServer<DefaultAcceptor, false>> {
+    pub fn new(ctx: Context) -> std::io::Result<HttpServer<DefaultAcceptor, HTTP>> {
         let socket = if ctx.bind.is_ipv4() {
             TcpSocket::new_v4()?
         } else {
@@ -124,7 +127,7 @@ impl HttpServer {
         self,
         tls_cert: P,
         tls_key: P,
-    ) -> std::io::Result<HttpServer<RustlsAcceptor, true>>
+    ) -> std::io::Result<HttpServer<RustlsAcceptor, HTTPS>>
     where
         P: Into<Option<PathBuf>>,
     {

@@ -1,5 +1,8 @@
 use tokio::net::TcpStream;
 
+/// A bidirectional copy between two `TcpStream`s, using zero-copy on Linux if available.
+/// This function falls back to the standard `tokio::io::copy_bidirectional` on non-Linux platforms.
+#[inline(always)]
 pub async fn copy_bidirectional(
     a: &mut TcpStream,
     b: &mut TcpStream,
