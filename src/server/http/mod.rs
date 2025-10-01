@@ -1,8 +1,8 @@
 pub mod accept;
+pub mod tls;
+
 mod error;
 mod genca;
-
-pub mod tls;
 
 use std::{
     io::{self},
