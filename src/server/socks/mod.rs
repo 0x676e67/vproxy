@@ -155,13 +155,7 @@ async fn handle_connect(
                 .await?
                 .into();
 
-            #[cfg(target_os = "linux")]
-            let res = realm_io::bidi_zero_copy(&mut inbound, &mut outbound).await;
-
-            #[cfg(not(target_os = "linux"))]
-            let res = tokio::io::copy_bidirectional(&mut inbound, &mut outbound).await;
-
-            match res {
+            match crate::io::copy_bidirectional(&mut inbound, &mut outbound).await {
                 Ok((from_client, from_server)) => {
                     tracing::info!(
                         "[SOCKS5][CONNECT] client wrote {} bytes and received {} bytes",
@@ -373,8 +367,9 @@ async fn handle_bind(
         .reply(Reply::Succeeded, Address::from(outbound_addr))
         .await
     {
-        Ok(mut inbound) => {
-            match tokio::io::copy_bidirectional(&mut inbound, &mut outbound).await {
+        Ok(inbound) => {
+            let mut inbound: TcpStream = inbound.into();
+            match crate::io::copy_bidirectional(&mut inbound, &mut outbound).await {
                 Ok((from_client, from_server)) => {
                     tracing::info!(
                         "[SOCKS5][BIND] client wrote {} bytes and received {} bytes",

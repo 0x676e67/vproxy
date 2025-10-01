@@ -7,6 +7,7 @@
 #[cfg(target_family = "unix")]
 mod daemon;
 mod error;
+mod io;
 mod oneself;
 #[cfg(target_os = "linux")]
 mod route;

@@ -1,4 +1,4 @@
-mod accept;
+pub mod accept;
 mod error;
 mod genca;
 
@@ -19,7 +19,7 @@ use http_body_util::{BodyExt, Empty, Full, combinators::BoxBody};
 use hyper::{Method, Request, Response, body::Incoming, service::service_fn, upgrade::Upgraded};
 use hyper_util::{
     rt::{TokioExecutor, TokioIo},
-    server::conn::auto::Builder,
+    server::conn::auto::{Builder, upgrade},
 };
 use tokio::{
     io::{AsyncRead, AsyncWrite, AsyncWriteExt},
@@ -36,7 +36,7 @@ use super::{Acceptor, Connector, Context, Server, extension::Extension};
 
 /// HTTP acceptor.
 #[derive(Clone)]
-pub struct HttpAcceptor<A = DefaultAcceptor> {
+pub struct HttpAcceptor<A, const TLS: bool> {
     acceptor: A,
     timeout: Duration,
     handler: Handler,
@@ -44,16 +44,16 @@ pub struct HttpAcceptor<A = DefaultAcceptor> {
 }
 
 /// HTTP server.
-pub struct HttpServer<A = DefaultAcceptor> {
+pub struct HttpServer<A = DefaultAcceptor, const TLS: bool = false> {
     listener: TcpListener,
-    inner: HttpAcceptor<A>,
+    inner: HttpAcceptor<A, TLS>,
 }
 
 // ===== impl HttpAcceptor =====
 
-impl HttpAcceptor {
+impl<const TLS: bool> HttpAcceptor<DefaultAcceptor, TLS> {
     /// Create a new [`HttpAcceptor`] instance.
-    pub fn new(ctx: Context) -> HttpAcceptor {
+    pub fn new(ctx: Context) -> HttpAcceptor<DefaultAcceptor, TLS> {
         let acceptor = DefaultAcceptor::new();
         let timeout = Duration::from_secs(ctx.connect_timeout);
         let handler = Handler::from(ctx);
@@ -77,7 +77,7 @@ impl HttpAcceptor {
         self,
         tls_cert: P,
         tls_key: P,
-    ) -> std::io::Result<HttpAcceptor<RustlsAcceptor>>
+    ) -> std::io::Result<HttpAcceptor<RustlsAcceptor, true>>
     where
         P: Into<Option<PathBuf>>,
     {
@@ -124,7 +124,7 @@ impl HttpServer {
         self,
         tls_cert: P,
         tls_key: P,
-    ) -> std::io::Result<HttpServer<RustlsAcceptor>>
+    ) -> std::io::Result<HttpServer<RustlsAcceptor, true>>
     where
         P: Into<Option<PathBuf>>,
     {
@@ -137,7 +137,7 @@ impl HttpServer {
     }
 }
 
-impl<A> Server for HttpServer<A>
+impl<A, const TLS: bool> Server for HttpServer<A, TLS>
 where
     A: Accept<TcpStream> + Clone + Send + Sync + 'static,
     A::Stream: AsyncRead + AsyncWrite + Unpin + Send,
@@ -157,7 +157,7 @@ where
     }
 }
 
-impl<A> Acceptor for HttpAcceptor<A>
+impl<A, const TLS: bool> Acceptor for HttpAcceptor<A, TLS>
 where
     A: Accept<TcpStream> + Clone + Send + Sync + 'static,
     A::Stream: AsyncRead + AsyncWrite + Unpin + Send,
@@ -172,7 +172,9 @@ where
             if let Err(err) = builder
                 .serve_connection_with_upgrades(
                     TokioIo::new(stream),
-                    service_fn(|req| <Handler as Clone>::clone(&handler).proxy(socket_addr, req)),
+                    service_fn(|req| {
+                        <Handler as Clone>::clone(&handler).proxy(TLS, socket_addr, req)
+                    }),
                 )
                 .await
             {
@@ -206,6 +208,7 @@ impl Handler {
     #[instrument(skip(self), level = Level::DEBUG)]
     async fn proxy(
         self,
+        tls: bool,
         socket: SocketAddr,
         req: Request<Incoming>,
     ) -> Result<Response<BoxBody<Bytes, hyper::Error>>, Error> {
@@ -234,7 +237,7 @@ impl Handler {
                 tokio::task::spawn(async move {
                     match hyper::upgrade::on(req).await {
                         Ok(upgraded) => {
-                            if let Err(e) = self.tunnel(upgraded, authority, extension).await {
+                            if let Err(e) = self.tunnel(tls, upgraded, authority, extension).await {
                                 tracing::debug!("[HTTP] server io error: {}", e);
                             };
                         }
@@ -264,6 +267,7 @@ impl Handler {
     // and the upgraded connection
     async fn tunnel(
         &self,
+        tls: bool,
         upgraded: Upgraded,
         authority: Authority,
         extension: Extension,
@@ -274,7 +278,17 @@ impl Handler {
             .connect_with_authority(authority)
             .await?;
 
-        match tokio::io::copy_bidirectional(&mut TokioIo::new(upgraded), &mut server).await {
+        let res = if tls {
+            tokio::io::copy_bidirectional(&mut TokioIo::new(upgraded), &mut server).await
+        } else {
+            let mut client = upgrade::downcast::<TokioIo<TcpStream>>(upgraded)
+                .expect("upgrade should be a TokioIo<TcpStream>")
+                .io
+                .into_inner();
+            crate::io::copy_bidirectional(&mut client, &mut server).await
+        };
+
+        match res {
             Ok((from_client, from_server)) => {
                 tracing::info!(
                     "[HTTP] client wrote {} bytes and received {} bytes",
