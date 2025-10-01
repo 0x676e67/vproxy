@@ -125,14 +125,14 @@ async fn handle(
     };
 
     match conn.wait_request().await? {
-        ClientConnection::UdpAssociate(associate, addr) => {
-            handle_udp(associate, addr, connector.udp(extension)).await
+        ClientConnection::UdpAssociate(associate, address) => {
+            handle_udp(associate, address, connector.udp(extension)).await
         }
-        ClientConnection::Connect(connect, addr) => {
-            handle_connect(connect, addr, connector.tcp(extension)).await
+        ClientConnection::Connect(connect, address) => {
+            handle_connect(connect, address, connector.tcp(extension)).await
         }
-        ClientConnection::Bind(bind, addr) => {
-            handle_bind(bind, addr, connector.tcp(extension)).await
+        ClientConnection::Bind(bind, address) => {
+            handle_bind(bind, address, connector.tcp(extension)).await
         }
     }
 }
@@ -200,6 +200,24 @@ async fn handle_udp(
     let inbound = AssociatedUdpSocket::from((socket, BUF_SIZE));
     let outbound = connector.bind_socket().await?;
 
+    // Get the IP address of the TCP control connection (the client)
+    let tcp_ip = reply_listener.peer_addr()?.ip();
+
+    // Determine the allowed IP for UDP packets:
+    // If the client does not explicitly specify IP limits in the UDP association request,
+    // default to limiting access to the same source IP as the TCP.
+    let allowed_ip = match address {
+        Address::SocketAddress(addr) if !addr.ip().is_unspecified() => addr.ip(),
+        Address::DomainAddress(ref domain, _)
+            if domain != "0" && domain != "0.0.0.0" && domain != "::" =>
+        {
+            // Optionally: try to resolve domain to IP here if you want to support it
+            // For safety, still default to tcp_ip unless you have a strong reason
+            tcp_ip
+        }
+        _ => tcp_ip,
+    };
+
     loop {
         let result = tokio::select! {
             req = async {
@@ -209,6 +227,16 @@ async fn handle_udp(
 
                 if frag != 0 {
                     return Err(Error::from("[SOCKS5][UDP] packet fragment is not supported"));
+                }
+
+                // Only allow UDP packets from the allowed IP
+                if src_addr.ip() != allowed_ip {
+                    tracing::warn!(
+                        "[SOCKS5][UDP] packet from unauthorized IP: {}, expected: {}. Dropped.",
+                        src_addr.ip(),
+                        allowed_ip
+                    );
+                    return Ok(());
                 }
 
                 tracing::debug!(
