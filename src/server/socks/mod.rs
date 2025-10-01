@@ -150,11 +150,18 @@ async fn handle_connect(
 
     match outbound {
         Ok(mut outbound) => {
-            let mut inbound = connect
+            let mut inbound: TcpStream = connect
                 .reply(Reply::Succeeded, Address::unspecified())
-                .await?;
+                .await?
+                .into();
 
-            match tokio::io::copy_bidirectional(&mut inbound, &mut outbound).await {
+            #[cfg(target_os = "linux")]
+            let res = realm_io::bidi_zero_copy(&mut inbound, &mut outbound).await;
+
+            #[cfg(not(target_os = "linux"))]
+            let res = tokio::io::copy_bidirectional(&mut inbound, &mut outbound).await;
+
+            match res {
                 Ok((from_client, from_server)) => {
                     tracing::info!(
                         "[SOCKS5][CONNECT] client wrote {} bytes and received {} bytes",
