@@ -277,7 +277,9 @@ impl Handler {
         let res = match upgrade::downcast::<TokioIo<TcpStream>>(upgraded) {
             Ok(io) => {
                 let mut client = io.io.into_inner();
-                crate::io::copy_bidirectional(&mut client, &mut server).await
+                let res = crate::io::copy_bidirectional(&mut client, &mut server).await;
+                client.shutdown().await?;
+                res
             }
             Err(upgraded) => {
                 tokio::io::copy_bidirectional(&mut TokioIo::new(upgraded), &mut server).await
