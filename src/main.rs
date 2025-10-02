@@ -150,6 +150,10 @@ pub struct BootArgs {
     #[clap(long, env = "VPROXY_LOG", default_value = "info", global = true)]
     log: Level,
 
+    /// Worker threads, default to number of CPU cores
+    #[clap(long, short = 'w')]
+    workers: Option<usize>,
+
     /// Bind address
     #[clap(short, long, default_value = "127.0.0.1:1080")]
     bind: SocketAddr,
@@ -167,7 +171,7 @@ pub struct BootArgs {
     fallback: Option<IpAddr>,
 
     /// Connection timeout in seconds
-    #[clap(short = 'T', long, default_value = "10")]
+    #[clap(short = 't', long, default_value = "10")]
     connect_timeout: u64,
 
     /// Maximum concurrent connections in socket queue

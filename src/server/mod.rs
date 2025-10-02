@@ -70,18 +70,20 @@ pub fn run(args: BootArgs) -> Result<()> {
             .finish(),
     )?;
 
-    let cpu_cores = std::thread::available_parallelism()?;
+    let workers = args
+        .workers
+        .unwrap_or(std::thread::available_parallelism()?.get());
 
     tracing::info!("OS: {}", std::env::consts::OS);
     tracing::info!("Arch: {}", std::env::consts::ARCH);
-    tracing::info!("CPU cores: {}", cpu_cores);
     tracing::info!("Version: {}", env!("CARGO_PKG_VERSION"));
     tracing::info!("Concurrent: {}", args.concurrent);
+    tracing::info!("Worker threads: {}", args.workers.unwrap_or(workers.into()));
     tracing::info!("Connect timeout: {:?}s", args.connect_timeout);
 
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
-        .worker_threads(cpu_cores.into())
+        .worker_threads(workers)
         .build()?
         .block_on(async {
             #[cfg(target_os = "linux")]
