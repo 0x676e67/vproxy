@@ -78,7 +78,7 @@ pub fn run(args: BootArgs) -> Result<()> {
     tracing::info!("Arch: {}", std::env::consts::ARCH);
     tracing::info!("Version: {}", env!("CARGO_PKG_VERSION"));
     tracing::info!("Concurrent: {}", args.concurrent);
-    tracing::info!("Worker threads: {}", args.workers.unwrap_or(workers.into()));
+    tracing::info!("Worker threads: {}", workers);
     tracing::info!("Connect timeout: {:?}s", args.connect_timeout);
 
     tokio::runtime::Builder::new_multi_thread()
