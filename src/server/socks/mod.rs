@@ -269,11 +269,13 @@ async fn handle_udp(
 
                 match dst_addr {
                     Address::SocketAddress(target_addr) => {
+                        tracing::info!("[SOCKS5][UDP] forwarding to {target_addr} via preferred socket {}", preferred_outbound.local_addr()?);
                         connector
                             .send_packet(&pkt, target_addr, &preferred_outbound, fallback_outbound.as_ref())
                             .await?;
                     }
                     Address::DomainAddress(domain, port) => {
+                        tracing::info!("[SOCKS5][UDP] forwarding to {domain}:{port} via preferred socket {}", preferred_outbound.local_addr()?);
                         connector
                             .send_packet(&pkt, (domain, port), &preferred_outbound, fallback_outbound.as_ref())
                             .await?;
