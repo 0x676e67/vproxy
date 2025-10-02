@@ -317,19 +317,17 @@ async fn handle_udp(
             } => resp_secondary,
 
             _ = reply_listener.wait_until_closed() => {
-                tracing::info!("[SOCKS5][UDP] {listen_addr} listener closed");
                 break;
             }
         };
 
         if let Err(err) = result {
-            tracing::error!("[SOCKS5][UDP] proxy error: {err}");
-            reply_listener.shutdown().await?;
-            return Err(err.into());
+            tracing::trace!("[SOCKS5][UDP] proxy error: {err}");
         }
     }
 
     reply_listener.shutdown().await?;
+    tracing::info!("[SOCKS5][UDP] {listen_addr} listener closed");
     Ok(())
 }
 
