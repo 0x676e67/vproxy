@@ -302,6 +302,8 @@ async fn tunnel(
     tracing::info!("[HTTP] {source} -> {target} forwarding connection");
 
     let mut server = connector.connect(target).await?;
+
+    #[cfg(target_os = "linux")]
     let res = match upgrade::downcast::<TokioIo<TcpStream>>(upgraded) {
         Ok(io) => {
             let mut client = io.io.into_inner();
@@ -313,6 +315,9 @@ async fn tunnel(
             tokio::io::copy_bidirectional(&mut TokioIo::new(upgraded), &mut server).await
         }
     };
+
+    #[cfg(not(target_os = "linux"))]
+    let res = tokio::io::copy_bidirectional(&mut TokioIo::new(upgraded), &mut server).await;
 
     match res {
         Ok((from_client, from_server)) => {
