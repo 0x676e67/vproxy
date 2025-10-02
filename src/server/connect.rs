@@ -264,6 +264,18 @@ impl TcpConnector<'_> {
         self.create_socket_with_addr(bind)
     }
 
+    // Attempts to establish a TCP connection to the target address using the
+    // provided IP address.
+    #[inline]
+    async fn connect_with_addr(
+        &self,
+        target_addr: SocketAddr,
+        addr: IpAddr,
+    ) -> std::io::Result<TcpStream> {
+        let socket = self.create_socket_with_addr(addr)?;
+        socket.connect(target_addr).await
+    }
+
     /// Attempts to establish a TCP connection to each of the target addresses
     /// in the provided iterator using the provided extensions.
     async fn connect_with_addrs(
@@ -323,18 +335,6 @@ impl TcpConnector<'_> {
         cidr: IpCidr,
     ) -> std::io::Result<TcpStream> {
         let socket = self.create_socket_with_cidr(cidr).await?;
-        socket.connect(target_addr).await
-    }
-
-    // Attempts to establish a TCP connection to the target address using the
-    // provided IP address.
-    #[inline]
-    async fn connect_with_addr(
-        &self,
-        target_addr: SocketAddr,
-        addr: IpAddr,
-    ) -> std::io::Result<TcpStream> {
-        let socket = self.create_socket_with_addr(addr)?;
         socket.connect(target_addr).await
     }
 
@@ -408,52 +408,6 @@ impl TcpConnector<'_> {
 // ==== impl UdpConnector ====
 
 impl UdpConnector<'_> {
-    /// Binds a UDP socket to an IP address based on the provided CIDR, fallback IP, and extensions.
-    #[inline]
-    pub async fn bind_socket(&self) -> std::io::Result<UdpSocket> {
-        match (self.inner.cidr, self.inner.fallback) {
-            (None, Some(fallback)) => self.create_socket_with_addr(fallback).await,
-            (Some(cidr), None) => self.create_socket_with_cidr(cidr).await,
-            (Some(cidr), Some(fallback)) => {
-                self.create_socket_with_cidr_and_fallback(cidr, fallback)
-                    .await
-            }
-            (None, None) => UdpSocket::bind(SocketAddr::from(([0, 0, 0, 0], 0))).await,
-        }
-    }
-
-    /// Sends a UDP packet to the specified address using the provided UDP socket.
-    #[inline]
-    pub async fn send_packet_with_addr(
-        &self,
-        dispatch_socket: &UdpSocket,
-        pkt: &[u8],
-        target_addr: SocketAddr,
-    ) -> std::io::Result<usize> {
-        dispatch_socket.send_to(pkt, target_addr).await
-    }
-
-    /// Sends a UDP packet to the specified domain and port using the provided UDP socket.
-    pub async fn send_packet_with_domain(
-        &self,
-        dispatch_socket: &UdpSocket,
-        pkt: &[u8],
-        target_addr: (String, u16),
-    ) -> std::io::Result<usize> {
-        let mut last_err = None;
-        let addrs = lookup_host(target_addr).await?;
-        for addr in addrs {
-            match dispatch_socket.send_to(pkt, addr).await {
-                Ok(s) => return Ok(s),
-                Err(e) => {
-                    last_err = Some(e);
-                }
-            }
-        }
-
-        Err(error(last_err))
-    }
-
     /// Creates a [`UdpSocket`] and binds it to the provided IP address.
     #[inline]
     async fn create_socket_with_addr(&self, ip: IpAddr) -> std::io::Result<UdpSocket> {
@@ -482,20 +436,161 @@ impl UdpConnector<'_> {
         }
     }
 
-    /// Creates a [`UdpSocket`] and binds it to an IP address within the provided CIDR
-    /// range. If the binding fails, it falls back to using the provided fallback IP
-    /// address.
-    async fn create_socket_with_cidr_and_fallback(
+    /// Binds UDP sockets based on the configured CIDR and fallback IP address.
+    /// If both CIDR and fallback are provided and belong to different IP families,
+    /// it creates two sockets for dual-stack support. Otherwise, it creates a single
+    /// socket based on the available configuration.
+    pub async fn create_socket_dual_stack(
         &self,
-        cidr: IpCidr,
-        fallback: IpAddr,
-    ) -> std::io::Result<UdpSocket> {
-        match self.create_socket_with_cidr(cidr).await {
-            Ok(first) => Ok(first),
-            Err(err) => {
-                tracing::debug!("create socket with cidr failed: {}", err);
-                self.create_socket_with_addr(fallback).await
+    ) -> std::io::Result<(UdpSocket, Option<UdpSocket>)> {
+        match (self.inner.cidr, self.inner.fallback) {
+            (Some(cidr), Some(fallback)) => {
+                // Different IP families - create dual-stack sockets
+                let preferred_socket = self.create_socket_with_cidr(cidr).await?;
+                let fallback_socket = self.create_socket_with_addr(fallback).await?;
+                Ok((preferred_socket, Some(fallback_socket)))
             }
+            (None, Some(fallback)) => {
+                let fallback_socket = self.create_socket_with_addr(fallback).await?;
+                Ok((fallback_socket, None))
+            }
+            (Some(cidr), None) => {
+                let fallback_socket = self.create_socket_with_cidr(cidr).await?;
+                Ok((fallback_socket, None))
+            }
+            (None, None) => {
+                // Create dual-stack sockets when no specific configuration is provided
+                let preferred_socket = UdpSocket::bind("0.0.0.0:0").await?;
+                let fallback_socket = UdpSocket::bind("[::]:0").await;
+                Ok((preferred_socket, fallback_socket.ok()))
+            }
+        }
+    }
+
+    /// Sends a UDP packet to a single target address using the provided UDP sockets.
+    /// It tries preferred socket first, then falls back to fallback socket with delay if needed.
+    async fn send_packet_with_addr(
+        &self,
+        pkt: &[u8],
+        addr: SocketAddr,
+        preferred_outbound: &UdpSocket,
+        fallback_outbound: Option<&UdpSocket>,
+    ) -> std::io::Result<usize> {
+        let preferred_fut = self.try_send_to_addr(pkt, addr, preferred_outbound);
+        futures_util::pin_mut!(preferred_fut);
+
+        // If we have a fallback socket, prepare the fallback future
+        if let Some(fallback_socket) = fallback_outbound {
+            let fallback_fut = self.try_send_to_addr(pkt, addr, fallback_socket);
+            futures_util::pin_mut!(fallback_fut);
+
+            let fallback_delay = tokio::time::sleep(self.inner.connect_timeout);
+            futures_util::pin_mut!(fallback_delay);
+
+            let (result, future) = match futures_util::future::select(preferred_fut, fallback_delay)
+                .await
+            {
+                Either::Left((result, _fallback_delay)) => (result, Either::Right(fallback_fut)),
+                Either::Right(((), preferred_fut)) => {
+                    // Delay is done, start polling both the preferred and the fallback
+                    match futures_util::future::select(preferred_fut, fallback_fut).await {
+                        Either::Left((result, fallback_fut)) => {
+                            (result, Either::Right(fallback_fut))
+                        }
+                        Either::Right((result, preferred_fut)) => {
+                            (result, Either::Left(preferred_fut))
+                        }
+                    }
+                }
+            };
+
+            if result.is_err() {
+                // Fallback to the remaining future (could be preferred or fallback)
+                // if we get an error
+                future.await
+            } else {
+                result
+            }
+        } else {
+            // No fallback socket available, just use preferred
+            preferred_fut.await
+        }
+    }
+
+    /// Sends a UDP packet to multiple target addresses using the provided UDP sockets.
+    /// Tries each address in order until one succeeds or all fail.
+    async fn send_packet_with_addrs(
+        &self,
+        pkt: &[u8],
+        addrs: impl IntoIterator<Item = SocketAddr>,
+        preferred_outbound: &UdpSocket,
+        fallback_outbound: Option<&UdpSocket>,
+    ) -> std::io::Result<usize> {
+        let mut last_err = None;
+
+        for addr in addrs {
+            match self
+                .send_packet_with_addr(pkt, addr, preferred_outbound, fallback_outbound)
+                .await
+            {
+                Ok(size) => return Ok(size),
+                Err(e) => {
+                    last_err = Some(e);
+                }
+            }
+        }
+
+        Err(error(last_err))
+    }
+
+    /// Helper method to try sending UDP packet to a single address using a single socket
+    async fn try_send_to_addr(
+        &self,
+        pkt: &[u8],
+        addr: SocketAddr,
+        socket: &UdpSocket,
+    ) -> std::io::Result<usize> {
+        socket.send_to(pkt, addr).await.and_then(|size| {
+            tracing::info!(
+                "UDP packet sent to {} via {}, size: {}",
+                addr,
+                socket
+                    .local_addr()
+                    .unwrap_or_else(|_| "unknown".parse().unwrap()),
+                size
+            );
+            Ok(size)
+        })
+    }
+
+    /// Sends a UDP packet to the specified target address using dual-stack UDP sockets.
+    pub async fn send_packet<T: Into<TargetAddr>>(
+        &self,
+        pkt: &[u8],
+        target_addr: T,
+        preferred_outbound: &UdpSocket,
+        fallback_outbound: Option<&UdpSocket>,
+    ) -> std::io::Result<usize> {
+        match target_addr.into() {
+            TargetAddr::SocketAddress(addr) => {
+                timeout(
+                    self.inner.connect_timeout,
+                    self.send_packet_with_addr(pkt, addr, preferred_outbound, fallback_outbound),
+                )
+                .await?
+            }
+            TargetAddr::DomainAddress(domain, port) => {
+                let addrs = lookup_host((domain, port)).await?;
+                timeout(
+                    self.inner.connect_timeout,
+                    self.send_packet_with_addrs(pkt, addrs, preferred_outbound, fallback_outbound),
+                )
+                .await?
+            }
+            _ => Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "Authority is not supported for UDP",
+            )),
         }
     }
 }

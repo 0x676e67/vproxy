@@ -204,22 +204,19 @@ async fn handle_udp(
         .await?;
 
     let inbound = AssociatedUdpSocket::from((socket, BUF_SIZE));
-    let outbound = connector.bind_socket().await?;
+    let (preferred_outbound, fallback_outbound) = connector.create_socket_dual_stack().await?;
 
-    // Get the IP address of the TCP control connection (the client)
-    let tcp_ip = reply_listener.peer_addr()?.ip();
-
-    // Determine the allowed IP for UDP packets:
+    // Determine the source IP for UDP packets:
     // If the client does not explicitly specify IP limits in the UDP association request,
     // default to limiting access to the same source IP as the TCP.
-    let allowed_ip = match address {
+    let src_ip = match address {
         Address::SocketAddress(addr) if !addr.ip().is_unspecified() => addr.ip(),
         // For all other cases (including unspecified IPs, domain names, or invalid addresses),
         // default to only allowing the IP address of the TCP control connection.
         // See: RFC 1928 Section 7 - https://datatracker.ietf.org/doc/html/rfc1928#section-7
-        _ => tcp_ip,
+        _ => reply_listener.peer_addr()?.ip(),
     };
-    let allowed_port = AtomicU16::new(0);
+    let src_port = AtomicU16::new(0);
 
     loop {
         let result = tokio::select! {
@@ -231,22 +228,39 @@ async fn handle_udp(
                     return Err(Error::from("[SOCKS5][UDP] packet fragment is not supported"));
                 }
 
-                // Only allow UDP packets from the allowed IP
-                if src_addr.ip() != allowed_ip {
-                    tracing::warn!(
+                // Check if the source IP matches, considering IPv4-mapped IPv6 addresses
+                let is_authorized = match (src_addr.ip(), src_ip) {
+                    // Direct match
+                    (src, expected) if src == expected => true,
+
+                    // IPv4-mapped IPv6 to IPv4 match
+                    (std::net::IpAddr::V4(src_v4), std::net::IpAddr::V6(expected_v6)) => {
+                        expected_v6.to_ipv4_mapped() == Some(src_v4)
+                    }
+
+                    // IPv4 to IPv4-mapped IPv6 match
+                    (std::net::IpAddr::V6(src_v6), std::net::IpAddr::V4(expected_v4)) => {
+                        src_v6.to_ipv4_mapped() == Some(expected_v4)
+                    }
+
+                    _ => false,
+                };
+
+                if !is_authorized {
+                    tracing::trace!(
                         "[SOCKS5][UDP] packet from unauthorized IP: {}, expected: {}. Dropped.",
                         src_addr.ip(),
-                        allowed_ip
+                        src_ip
                     );
 
                     return Err(Error::from(format!(
                         "[SOCKS5][UDP] unauthorized IP: {}, expected: {}",
                         src_addr.ip(),
-                        allowed_ip
+                        src_ip
                     )));
                 }
 
-                allowed_port.store(src_addr.port(), Ordering::Relaxed);
+                src_port.store(src_addr.port(), Ordering::Relaxed);
 
                 tracing::info!(
                     "[SOCKS5][UDP] {src_addr} -> {dst_addr} incoming packet size {}",
@@ -256,12 +270,12 @@ async fn handle_udp(
                 match dst_addr {
                     Address::SocketAddress(target_addr) => {
                         connector
-                            .send_packet_with_addr(&outbound, &pkt, target_addr)
+                            .send_packet(&pkt, target_addr, &preferred_outbound, fallback_outbound.as_ref())
                             .await?;
                     }
                     Address::DomainAddress(domain, port) => {
                         connector
-                            .send_packet_with_domain(&outbound, &pkt, (domain, port))
+                            .send_packet(&pkt, (domain, port), &preferred_outbound, fallback_outbound.as_ref())
                             .await?;
                     }
                 }
@@ -269,10 +283,10 @@ async fn handle_udp(
                 Ok(())
             } => req,
 
-            resp = async {
+            resp_primary = async {
                 let mut buf = [0u8; MAX_UDP_RELAY_PACKET_SIZE];
-                let (len, remote_addr) = outbound.recv_from(&mut buf).await?;
-                let src_addr = SocketAddr::new(allowed_ip, allowed_port.load(Ordering::Relaxed));
+            let (len, remote_addr) = preferred_outbound.recv_from(&mut buf).await?;
+                let src_addr = SocketAddr::new(src_ip, src_port.load(Ordering::Relaxed));
 
                 tracing::info!("[SOCKS5][UDP] {src_addr} <- {remote_addr}feedback to incoming, packet size {len}");
 
@@ -281,7 +295,26 @@ async fn handle_udp(
                     .await
                     .map(|_| ())
                     .map_err(Error::from)
-            } => resp,
+            } => resp_primary,
+
+            resp_secondary = async {
+                if let Some(secondary) = &fallback_outbound {
+                    let mut buf = [0u8; MAX_UDP_RELAY_PACKET_SIZE];
+                    let (len, remote_addr) = secondary.recv_from(&mut buf).await?;
+                    let src_addr = SocketAddr::new(src_ip, src_port.load(Ordering::Relaxed));
+
+                    tracing::info!("[SOCKS5][UDP] {src_addr} <- {remote_addr}feedback to incoming, packet size {len}");
+
+                    inbound
+                        .send_to(&buf[..len], 0, remote_addr.into(), src_addr)
+                        .await
+                        .map(|_| ())
+                        .map_err(Error::from)
+                } else {
+                    // If there's no secondary socket, just await forever.
+                    futures_util::future::pending().await
+                }
+            } => resp_secondary,
 
             _ = reply_listener.wait_until_closed() => {
                 tracing::info!("[SOCKS5][UDP] {listen_addr} listener closed");
