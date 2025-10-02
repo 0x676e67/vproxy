@@ -312,6 +312,7 @@ async fn handle_udp(
                         .map_err(Error::from)
                 } else {
                     // If there's no secondary socket, just await forever.
+                    tokio::task::yield_now().await;
                     futures_util::future::pending().await
                 }
             } => fallback_resp,
