@@ -269,13 +269,11 @@ async fn handle_udp(
 
                 match dst_addr {
                     Address::SocketAddress(target_addr) => {
-                        tracing::info!("[SOCKS5][UDP] forwarding to {target_addr} via preferred socket {}", preferred_outbound.local_addr()?);
                         connector
                             .send_packet(&pkt, target_addr, &preferred_outbound, fallback_outbound.as_ref())
                             .await?;
                     }
                     Address::DomainAddress(domain, port) => {
-                        tracing::info!("[SOCKS5][UDP] forwarding to {domain}:{port} via preferred socket {}", preferred_outbound.local_addr()?);
                         connector
                             .send_packet(&pkt, (domain, port), &preferred_outbound, fallback_outbound.as_ref())
                             .await?;
@@ -290,7 +288,7 @@ async fn handle_udp(
             let (len, remote_addr) = preferred_outbound.recv_from(&mut buf).await?;
                 let src_addr = SocketAddr::new(src_ip, src_port.load(Ordering::Relaxed));
 
-                tracing::info!("[SOCKS5][UDP] {src_addr} <- {remote_addr}feedback to incoming, packet size {len}");
+                tracing::info!("[SOCKS5][UDP] {src_addr} <- {remote_addr} feedback to incoming, packet size {len}");
 
                 inbound
                     .send_to(&buf[..len], 0, remote_addr.into(), src_addr)
@@ -305,7 +303,7 @@ async fn handle_udp(
                     let (len, remote_addr) = secondary.recv_from(&mut buf).await?;
                     let src_addr = SocketAddr::new(src_ip, src_port.load(Ordering::Relaxed));
 
-                    tracing::info!("[SOCKS5][UDP] {src_addr} <- {remote_addr}feedback to incoming, packet size {len}");
+                    tracing::info!("[SOCKS5][UDP] {src_addr} <- {remote_addr} feedback to incoming, packet size {len}");
 
                     inbound
                         .send_to(&buf[..len], 0, remote_addr.into(), src_addr)
