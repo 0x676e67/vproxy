@@ -48,7 +48,7 @@ type Result<T, E = error::Error> = std::result::Result<T, E>;
 #[clap(author, version, about, arg_required_else_help = true)]
 #[command(args_conflicts_with_subcommands = true)]
 struct Opt {
-    #[clap(subcommand)]
+    #[command(subcommand)]
     commands: Commands,
 }
 
@@ -80,7 +80,7 @@ pub enum Commands {
     /// Modify server installation
     #[clap(name = "self")]
     Oneself {
-        #[clap(subcommand)]
+        #[command(subcommand)]
         command: Oneself,
     },
 }
@@ -89,11 +89,11 @@ pub enum Commands {
 #[derive(Args, Clone)]
 pub struct AuthMode {
     /// Authentication username
-    #[clap(short, long, requires = "password")]
+    #[arg(short, long, requires = "password")]
     pub username: Option<String>,
 
     /// Authentication password
-    #[clap(short, long, requires = "username")]
+    #[arg(short, long, requires = "username")]
     pub password: Option<String>,
 }
 
@@ -102,44 +102,44 @@ pub enum Proxy {
     /// Http server
     Http {
         /// Authentication type
-        #[clap(flatten)]
+        #[command(flatten)]
         auth: AuthMode,
     },
 
     /// Https server
     Https {
         /// Authentication type
-        #[clap(flatten)]
+        #[command(flatten)]
         auth: AuthMode,
 
         /// TLS certificate file
-        #[clap(long, requires = "tls_key")]
+        #[arg(long, requires = "tls_key")]
         tls_cert: Option<PathBuf>,
 
         /// TLS private key file
-        #[clap(long, requires = "tls_cert")]
+        #[arg(long, requires = "tls_cert")]
         tls_key: Option<PathBuf>,
     },
 
     /// Socks5 server
     Socks5 {
         /// Authentication type
-        #[clap(flatten)]
+        #[command(flatten)]
         auth: AuthMode,
     },
 
     /// Auto detect server (SOCKS5, HTTP, HTTPS)
     Auto {
         /// Authentication type
-        #[clap(flatten)]
+        #[command(flatten)]
         auth: AuthMode,
 
         /// TLS certificate file
-        #[clap(long, requires = "tls_key")]
+        #[arg(long, requires = "tls_key")]
         tls_cert: Option<PathBuf>,
 
         /// TLS private key file
-        #[clap(long, requires = "tls_cert")]
+        #[arg(long, requires = "tls_cert")]
         tls_key: Option<PathBuf>,
     },
 }
@@ -147,39 +147,45 @@ pub enum Proxy {
 #[derive(Args, Clone)]
 pub struct BootArgs {
     /// Log level e.g. trace, debug, info, warn, error
-    #[clap(long, env = "VPROXY_LOG", default_value = "info", global = true)]
+    #[arg(
+        long,
+        short = 'L',
+        env = "VPROXY_LOG",
+        default_value = "info",
+        global = true
+    )]
     log: Level,
 
     /// Worker threads, default to number of CPU cores
-    #[clap(long, short = 'w')]
+    #[arg(long, short = 'w')]
     workers: Option<usize>,
 
     /// Bind address
-    #[clap(short, long, default_value = "127.0.0.1:1080")]
+    #[arg(long, short = 'b', default_value = "127.0.0.1:1080")]
     bind: SocketAddr,
 
     /// IP-CIDR, e.g. 2001:db8::/32
-    #[clap(short = 'i', long)]
+    #[arg(long, short = 'i')]
     cidr: Option<IpCidr>,
 
     /// IP-CIDR-Range, e.g. 64
-    #[clap(short = 'r', long)]
+    #[arg(long, short = 'r')]
     cidr_range: Option<u8>,
 
     /// Fallback address
-    #[clap(short, long)]
+    #[arg(long, short)]
     fallback: Option<IpAddr>,
 
     /// Connection timeout in seconds
-    #[clap(short = 't', long, default_value = "10")]
+    #[arg(long, short = 't', default_value = "10")]
     connect_timeout: u64,
 
     /// Maximum concurrent connections in socket queue
-    #[clap(short, long, default_value = "1024")]
+    #[arg(long, short = 'c', default_value = "1024")]
     concurrent: u32,
 
     /// Enable SO_REUSEADDR for outbound connections
-    #[clap(long, default_value = "true")]
+    #[arg(long, default_value = "true")]
     reuseaddr: Option<bool>,
 
     /// Enable SO_REUSEPORT for outbound connections
@@ -189,10 +195,10 @@ pub struct BootArgs {
         not(target_os = "illumos"),
         not(target_os = "cygwin"),
     ))]
-    #[clap(long)]
+    #[arg(long)]
     reuseport: Option<bool>,
 
-    #[clap(subcommand)]
+    #[command(subcommand)]
     proxy: Proxy,
 }
 
