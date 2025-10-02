@@ -550,7 +550,7 @@ impl UdpConnector<'_> {
         addr: SocketAddr,
         socket: &UdpSocket,
     ) -> std::io::Result<usize> {
-        socket.send_to(pkt, addr).await.and_then(|size| {
+        socket.send_to(pkt, addr).await.inspect(|&size| {
             tracing::info!(
                 "UDP packet sent to {} via {}, size: {}",
                 addr,
@@ -559,7 +559,6 @@ impl UdpConnector<'_> {
                     .unwrap_or_else(|_| "unknown".parse().unwrap()),
                 size
             );
-            Ok(size)
         })
     }
 
