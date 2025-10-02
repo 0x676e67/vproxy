@@ -34,6 +34,7 @@ use self::{
     tls::{RustlsAcceptor, RustlsConfig},
 };
 use super::{Acceptor, Connector, Context, Server, extension::Extension};
+use crate::server::connect::TcpConnector;
 
 /// HTTP acceptor.
 #[derive(Clone)]
@@ -250,7 +251,8 @@ impl Handler {
                 tokio::spawn(async move {
                     match hyper::upgrade::on(req).await {
                         Ok(upgraded) => {
-                            if let Err(e) = self.tunnel(upgraded, authority, extension).await {
+                            let connector = self.connector.tcp(extension);
+                            if let Err(e) = tunnel(socket, authority, upgraded, connector).await {
                                 tracing::debug!("[HTTP] server io error: {}", e);
                             };
                         }
@@ -275,44 +277,6 @@ impl Handler {
                 .map_err(Into::into)
         }
     }
-
-    // Create a TCP connection to host:port, build a tunnel between the connection
-    // and the upgraded connection
-    async fn tunnel(
-        &self,
-        upgraded: Upgraded,
-        authority: Authority,
-        extension: Extension,
-    ) -> std::io::Result<()> {
-        let mut server = self.connector.tcp(extension).connect(authority).await?;
-
-        let res = match upgrade::downcast::<TokioIo<TcpStream>>(upgraded) {
-            Ok(io) => {
-                let mut client = io.io.into_inner();
-                let res = crate::io::copy_bidirectional(&mut client, &mut server).await;
-                client.shutdown().await?;
-                res
-            }
-            Err(upgraded) => {
-                tokio::io::copy_bidirectional(&mut TokioIo::new(upgraded), &mut server).await
-            }
-        };
-
-        match res {
-            Ok((from_client, from_server)) => {
-                tracing::info!(
-                    "[HTTP] client wrote {} bytes and received {} bytes",
-                    from_client,
-                    from_server
-                );
-            }
-            Err(err) => {
-                tracing::trace!("[HTTP] tunnel error: {}", err);
-            }
-        }
-
-        server.shutdown().await
-    }
 }
 
 fn empty() -> BoxBody<Bytes, hyper::Error> {
@@ -325,4 +289,43 @@ fn full<T: Into<Bytes>>(chunk: T) -> BoxBody<Bytes, hyper::Error> {
     Full::new(chunk.into())
         .map_err(|never| match never {})
         .boxed()
+}
+
+// Create a TCP connection to host:port, build a tunnel between the connection
+// and the upgraded connection
+async fn tunnel(
+    source: SocketAddr,
+    target: Authority,
+    upgraded: Upgraded,
+    connector: TcpConnector<'_>,
+) -> std::io::Result<()> {
+    tracing::info!("[HTTP] {source} -> {target} forwarding connection");
+
+    let mut server = connector.connect(target).await?;
+    let res = match upgrade::downcast::<TokioIo<TcpStream>>(upgraded) {
+        Ok(io) => {
+            let mut client = io.io.into_inner();
+            let res = crate::io::copy_bidirectional(&mut client, &mut server).await;
+            client.shutdown().await?;
+            res
+        }
+        Err(upgraded) => {
+            tokio::io::copy_bidirectional(&mut TokioIo::new(upgraded), &mut server).await
+        }
+    };
+
+    match res {
+        Ok((from_client, from_server)) => {
+            tracing::info!(
+                "[HTTP] client wrote {} bytes and received {} bytes",
+                from_client,
+                from_server
+            );
+        }
+        Err(err) => {
+            tracing::trace!("[HTTP] tunnel error: {}", err);
+        }
+    }
+
+    server.shutdown().await
 }

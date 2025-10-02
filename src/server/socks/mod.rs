@@ -150,8 +150,23 @@ async fn handle_connect(
     connector: TcpConnector<'_>,
 ) -> std::io::Result<()> {
     let outbound = match address {
-        Address::SocketAddress(addr) => connector.connect(addr).await,
-        Address::DomainAddress(domain, port) => connector.connect((domain, port)).await,
+        Address::SocketAddress(addr) => {
+            tracing::info!(
+                "[SOCKS5][CONNECT] {} -> {} forwarding connection",
+                connect.peer_addr()?,
+                addr
+            );
+            connector.connect(addr).await
+        }
+        Address::DomainAddress(domain, port) => {
+            tracing::info!(
+                "[SOCKS5][CONNECT] {} -> {}:{} forwarding connection",
+                connect.peer_addr()?,
+                domain,
+                port
+            );
+            connector.connect((domain, port)).await
+        }
     };
 
     match outbound {
@@ -262,18 +277,15 @@ async fn handle_udp(
 
                 src_port.store(src_addr.port(), Ordering::Relaxed);
 
-                tracing::info!(
-                    "[SOCKS5][UDP] {src_addr} -> {dst_addr} incoming packet size {}",
-                    pkt.len()
-                );
-
                 match dst_addr {
                     Address::SocketAddress(target_addr) => {
+                        tracing::info!("[SOCKS5][UDP] {src_addr} -> {target_addr} forwarding packet, size {}", pkt.len());
                         connector
                             .send_packet(&pkt, target_addr, &preferred_outbound, fallback_outbound.as_ref())
                             .await?;
                     }
                     Address::DomainAddress(domain, port) => {
+                        tracing::info!("[SOCKS5][UDP] {src_addr} -> {domain}:{port} forwarding packet, size {}", pkt.len());
                         connector
                             .send_packet(&pkt, (domain, port), &preferred_outbound, fallback_outbound.as_ref())
                             .await?;

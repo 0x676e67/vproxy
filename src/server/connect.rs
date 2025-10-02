@@ -311,7 +311,7 @@ impl TcpConnector<'_> {
                 }
             }
             .and_then(|stream| {
-                tracing::info!("connect {} via {}", target_addr, stream.local_addr()?);
+                tracing::info!("[TCP] connect {} via {}", target_addr, stream.local_addr()?);
                 Ok(stream)
             });
 
@@ -550,15 +550,15 @@ impl UdpConnector<'_> {
         addr: SocketAddr,
         socket: &UdpSocket,
     ) -> std::io::Result<usize> {
-        socket.send_to(pkt, addr).await.inspect(|&size| {
+        socket.send_to(pkt, addr).await.and_then(|size| {
             tracing::info!(
-                "UDP packet sent to {} via {}, size: {}",
+                "[UDP] UDP packet sent to {} via {}, size: {}",
                 addr,
-                socket
-                    .local_addr()
-                    .unwrap_or_else(|_| "unknown".parse().unwrap()),
+                socket.local_addr()?,
                 size
             );
+
+            Ok(size)
         })
     }
 
