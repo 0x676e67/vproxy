@@ -18,6 +18,19 @@ use tokio::{
 
 use super::{extension::Extension, rand};
 
+/// Represents a target address for outbound connections.
+///
+/// This enum supports three types of addresses:
+/// - `SocketAddress`: An IP address and port (IPv4 or IPv6).
+/// - `DomainAddress`: A domain name and port.
+/// - `Authority`: An HTTP authority (host[:port]) as used in HTTP requests.
+#[non_exhaustive]
+pub enum TargetAddr {
+    SocketAddress(SocketAddr),
+    DomainAddress(String, u16),
+    Authority(Authority),
+}
+
 /// `Connector` struct is used to create HTTP connectors, optionally configured
 /// with an IPv6 CIDR and a fallback IP address.
 #[derive(Clone)]
@@ -72,6 +85,29 @@ pub struct UdpConnector<'a> {
 pub struct HttpConnector<'a> {
     inner: &'a Connector,
     extension: Extension,
+}
+
+// ==== impl TargetAddr ====
+
+impl From<SocketAddr> for TargetAddr {
+    #[inline]
+    fn from(addr: SocketAddr) -> Self {
+        TargetAddr::SocketAddress(addr)
+    }
+}
+
+impl From<(String, u16)> for TargetAddr {
+    #[inline]
+    fn from(addr: (String, u16)) -> Self {
+        TargetAddr::DomainAddress(addr.0, addr.1)
+    }
+}
+
+impl From<Authority> for TargetAddr {
+    #[inline]
+    fn from(addr: Authority) -> Self {
+        TargetAddr::Authority(addr)
+    }
 }
 
 // ==== impl Connector ====
@@ -176,73 +212,106 @@ impl TcpConnector<'_> {
         }
     }
 
+    /// Creates a [`TcpSocket`] and binds it to the provided IP address.
+    fn create_socket_with_addr(&self, bind: IpAddr) -> std::io::Result<TcpSocket> {
+        let socket = match bind {
+            IpAddr::V4(_) => {
+                let socket = TcpSocket::new_v4()?;
+                let bind_addr = SocketAddr::new(bind, 0);
+                socket.bind(bind_addr)?;
+                socket
+            }
+            IpAddr::V6(_) => {
+                let socket = TcpSocket::new_v6()?;
+                let bind_addr = SocketAddr::new(bind, 0);
+                socket.bind(bind_addr)?;
+                socket
+            }
+        };
+
+        socket.set_nodelay(true)?;
+        if let Some(reuseaddr) = self.inner.reuseaddr {
+            socket.set_reuseaddr(reuseaddr)?;
+        }
+        #[cfg(all(
+            unix,
+            not(target_os = "solaris"),
+            not(target_os = "illumos"),
+            not(target_os = "cygwin"),
+        ))]
+        if let Some(reuseport) = self.inner.reuseport {
+            socket.set_reuseport(reuseport)?;
+        }
+
+        Ok(socket)
+    }
+
+    /// Creates a [`TcpSocket`] and binds it to an IP address within the provided CIDR range.
+    async fn create_socket_with_cidr(&self, cidr: IpCidr) -> std::io::Result<TcpSocket> {
+        let bind = match cidr {
+            IpCidr::V4(cidr) => IpAddr::V4(assign_ipv4_from_extension(
+                cidr,
+                self.inner.cidr_range,
+                self.extension,
+            )),
+            IpCidr::V6(cidr) => IpAddr::V6(assign_ipv6_from_extension(
+                cidr,
+                self.inner.cidr_range,
+                self.extension,
+            )),
+        };
+
+        self.create_socket_with_addr(bind)
+    }
+
     /// Attempts to establish a TCP connection to each of the target addresses
     /// in the provided iterator using the provided extensions.
-    pub async fn connect_with_addrs(
+    async fn connect_with_addrs(
         &self,
         addrs: impl IntoIterator<Item = SocketAddr>,
     ) -> std::io::Result<TcpStream> {
         let mut last_err = None;
-
         for target_addr in addrs {
-            match self.connect(target_addr).await {
-                Ok(stream) => return Ok(stream),
-                Err(e) => last_err = Some(e),
-            };
+            let res = match (self.inner.cidr, self.inner.fallback) {
+                (None, Some(fallback)) => {
+                    timeout(
+                        self.inner.connect_timeout,
+                        self.connect_with_addr(target_addr, fallback),
+                    )
+                    .await?
+                }
+                (Some(cidr), None) => {
+                    timeout(
+                        self.inner.connect_timeout,
+                        self.connect_with_cidr(target_addr, cidr),
+                    )
+                    .await?
+                }
+                (Some(cidr), Some(fallback)) => {
+                    timeout(
+                        self.inner.connect_timeout,
+                        self.connect_with_cidr_fallback(target_addr, cidr, fallback),
+                    )
+                    .await?
+                }
+                (None, None) => {
+                    timeout(self.inner.connect_timeout, TcpStream::connect(target_addr)).await?
+                }
+            }
+            .and_then(|stream| {
+                tracing::info!("connect {} via {}", target_addr, stream.local_addr()?);
+                Ok(stream)
+            });
+
+            match res {
+                Ok(s) => return Ok(s),
+                Err(e) => {
+                    last_err = Some(e);
+                }
+            }
         }
 
         Err(error(last_err))
-    }
-
-    /// Attempts to establish a TCP connection to each of the target addresses
-    /// resolved from the provided authority.
-    #[inline]
-    pub async fn connect_with_authority(&self, authority: Authority) -> std::io::Result<TcpStream> {
-        let addrs = lookup_host(authority.as_str()).await?;
-        self.connect_with_addrs(addrs).await
-    }
-
-    /// Attempts to establish a TCP connection to the target domain using the
-    /// provided extensions.
-    #[inline]
-    pub async fn connect_with_domain(&self, host: (String, u16)) -> std::io::Result<TcpStream> {
-        let addrs = lookup_host(host).await?;
-        self.connect_with_addrs(addrs).await
-    }
-
-    /// Attempts to establish a TCP connection to the target address using the
-    /// provided extensions, CIDR range, and fallback IP address.
-    pub async fn connect(&self, target_addr: SocketAddr) -> std::io::Result<TcpStream> {
-        match (self.inner.cidr, self.inner.fallback) {
-            (None, Some(fallback)) => {
-                timeout(
-                    self.inner.connect_timeout,
-                    self.connect_with_addr(target_addr, fallback),
-                )
-                .await?
-            }
-            (Some(cidr), None) => {
-                timeout(
-                    self.inner.connect_timeout,
-                    self.connect_with_cidr(target_addr, cidr),
-                )
-                .await?
-            }
-            (Some(cidr), Some(fallback)) => {
-                timeout(
-                    self.inner.connect_timeout,
-                    self.connect_with_cidr_fallback(target_addr, cidr, fallback),
-                )
-                .await?
-            }
-            (None, None) => {
-                timeout(self.inner.connect_timeout, TcpStream::connect(target_addr)).await?
-            }
-        }
-        .and_then(|stream| {
-            tracing::info!("connect {} via {}", target_addr, stream.local_addr()?);
-            Ok(stream)
-        })
     }
 
     /// Attempts to establish a TCP connection to the target address using an IP
@@ -309,56 +378,30 @@ impl TcpConnector<'_> {
         }
     }
 
-    /// Creates a [`TcpSocket`] and binds it to the provided IP address.
-    fn create_socket_with_addr(&self, bind: IpAddr) -> std::io::Result<TcpSocket> {
-        let socket = match bind {
-            IpAddr::V4(_) => {
-                let socket = TcpSocket::new_v4()?;
-                let bind_addr = SocketAddr::new(bind, 0);
-                socket.bind(bind_addr)?;
-                socket
+    /// Attempts to establish a TCP connection to the given target address.
+    ///
+    /// This method supports three types of target addresses:
+    /// - `SocketAddress`: Connects directly to the specified IP and port.
+    /// - `DomainAddress`: Resolves the domain to one or more IP addresses and tries each in order.
+    /// - `Authority`: Resolves the authority (host[:port]) and tries each resolved address.
+    ///
+    /// The connection will use the configured CIDR, fallback IP, and connection timeout as needed.
+    /// If multiple addresses are resolved, it will attempt each until one succeeds or all fail.
+    pub async fn connect<T: Into<TargetAddr>>(&self, target_addr: T) -> std::io::Result<TcpStream> {
+        match target_addr.into() {
+            TargetAddr::SocketAddress(addr) => {
+                let addrs = std::iter::once(addr);
+                self.connect_with_addrs(addrs).await
             }
-            IpAddr::V6(_) => {
-                let socket = TcpSocket::new_v6()?;
-                let bind_addr = SocketAddr::new(bind, 0);
-                socket.bind(bind_addr)?;
-                socket
+            TargetAddr::DomainAddress(domain, port) => {
+                let addrs = lookup_host((domain, port)).await?;
+                self.connect_with_addrs(addrs).await
             }
-        };
-
-        socket.set_nodelay(true)?;
-        if let Some(reuseaddr) = self.inner.reuseaddr {
-            socket.set_reuseaddr(reuseaddr)?;
+            TargetAddr::Authority(authority) => {
+                let addrs = lookup_host(authority.as_str()).await?;
+                self.connect_with_addrs(addrs).await
+            }
         }
-        #[cfg(all(
-            unix,
-            not(target_os = "solaris"),
-            not(target_os = "illumos"),
-            not(target_os = "cygwin"),
-        ))]
-        if let Some(reuseport) = self.inner.reuseport {
-            socket.set_reuseport(reuseport)?;
-        }
-
-        Ok(socket)
-    }
-
-    /// Creates a [`TcpSocket`] and binds it to an IP address within the provided CIDR range.
-    async fn create_socket_with_cidr(&self, cidr: IpCidr) -> std::io::Result<TcpSocket> {
-        let bind = match cidr {
-            IpCidr::V4(cidr) => IpAddr::V4(assign_ipv4_from_extension(
-                cidr,
-                self.inner.cidr_range,
-                self.extension,
-            )),
-            IpCidr::V6(cidr) => IpAddr::V6(assign_ipv6_from_extension(
-                cidr,
-                self.inner.cidr_range,
-                self.extension,
-            )),
-        };
-
-        self.create_socket_with_addr(bind)
     }
 }
 
@@ -385,9 +428,9 @@ impl UdpConnector<'_> {
         &self,
         dispatch_socket: &UdpSocket,
         pkt: &[u8],
-        dst_addr: SocketAddr,
+        target_addr: SocketAddr,
     ) -> std::io::Result<usize> {
-        dispatch_socket.send_to(pkt, dst_addr).await
+        dispatch_socket.send_to(pkt, target_addr).await
     }
 
     /// Sends a UDP packet to the specified domain and port using the provided UDP socket.
@@ -395,10 +438,10 @@ impl UdpConnector<'_> {
         &self,
         dispatch_socket: &UdpSocket,
         pkt: &[u8],
-        dst_domain: (String, u16),
+        target_addr: (String, u16),
     ) -> std::io::Result<usize> {
         let mut last_err = None;
-        let addrs = lookup_host(dst_domain).await?;
+        let addrs = lookup_host(target_addr).await?;
         for addr in addrs {
             match dispatch_socket.send_to(pkt, addr).await {
                 Ok(s) => return Ok(s),

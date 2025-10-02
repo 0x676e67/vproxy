@@ -3,7 +3,13 @@ mod conn;
 mod error;
 mod proto;
 
-use std::{net::SocketAddr, sync::Arc};
+use std::{
+    net::SocketAddr,
+    sync::{
+        Arc,
+        atomic::{AtomicU16, Ordering},
+    },
+};
 
 use tokio::{
     io::AsyncWriteExt,
@@ -145,7 +151,7 @@ async fn handle_connect(
 ) -> std::io::Result<()> {
     let outbound = match address {
         Address::SocketAddress(addr) => connector.connect(addr).await,
-        Address::DomainAddress(domain, port) => connector.connect_with_domain((domain, port)).await,
+        Address::DomainAddress(domain, port) => connector.connect((domain, port)).await,
     };
 
     match outbound {
@@ -213,13 +219,13 @@ async fn handle_udp(
         // See: RFC 1928 Section 7 - https://datatracker.ietf.org/doc/html/rfc1928#section-7
         _ => tcp_ip,
     };
+    let allowed_port = AtomicU16::new(0);
 
     loop {
         let result = tokio::select! {
             req = async {
                 inbound.set_max_packet_size(BUF_SIZE);
                 let (pkt, frag, dst_addr, src_addr) = inbound.recv_from().await?;
-                inbound.connect(src_addr).await?;
 
                 if frag != 0 {
                     return Err(Error::from("[SOCKS5][UDP] packet fragment is not supported"));
@@ -240,15 +246,17 @@ async fn handle_udp(
                     )));
                 }
 
-                tracing::debug!(
+                allowed_port.store(src_addr.port(), Ordering::Relaxed);
+
+                tracing::info!(
                     "[SOCKS5][UDP] {src_addr} -> {dst_addr} incoming packet size {}",
                     pkt.len()
                 );
 
                 match dst_addr {
-                    Address::SocketAddress(dst_addr) => {
+                    Address::SocketAddress(target_addr) => {
                         connector
-                            .send_packet_with_addr(&outbound, &pkt, dst_addr)
+                            .send_packet_with_addr(&outbound, &pkt, target_addr)
                             .await?;
                     }
                     Address::DomainAddress(domain, port) => {
@@ -264,11 +272,12 @@ async fn handle_udp(
             resp = async {
                 let mut buf = [0u8; MAX_UDP_RELAY_PACKET_SIZE];
                 let (len, remote_addr) = outbound.recv_from(&mut buf).await?;
+                let src_addr = SocketAddr::new(allowed_ip, allowed_port.load(Ordering::Relaxed));
 
-                tracing::debug!("[SOCKS5][UDP] {listen_addr} <- {remote_addr} feedback to client, packet size {len}");
+                tracing::info!("[SOCKS5][UDP] {src_addr} <- {remote_addr}feedback to incoming, packet size {len}");
 
                 inbound
-                    .send(&buf[..len], 0, remote_addr.into())
+                    .send_to(&buf[..len], 0, remote_addr.into(), src_addr)
                     .await
                     .map(|_| ())
                     .map_err(Error::from)

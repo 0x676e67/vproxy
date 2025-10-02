@@ -283,11 +283,7 @@ impl Handler {
         authority: Authority,
         extension: Extension,
     ) -> std::io::Result<()> {
-        let mut server = self
-            .connector
-            .tcp(extension)
-            .connect_with_authority(authority)
-            .await?;
+        let mut server = self.connector.tcp(extension).connect(authority).await?;
 
         let res = match upgrade::downcast::<TokioIo<TcpStream>>(upgraded) {
             Ok(io) => {
