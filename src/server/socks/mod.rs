@@ -283,7 +283,7 @@ async fn handle_udp(
                 Ok(())
             } => req,
 
-            resp_primary = async {
+            preferred_resp = async {
                 let mut buf = [0u8; MAX_UDP_RELAY_PACKET_SIZE];
             let (len, remote_addr) = preferred_outbound.recv_from(&mut buf).await?;
                 let src_addr = SocketAddr::new(src_ip, src_port.load(Ordering::Relaxed));
@@ -295,12 +295,12 @@ async fn handle_udp(
                     .await
                     .map(|_| ())
                     .map_err(Error::from)
-            } => resp_primary,
+            } => preferred_resp,
 
-            resp_secondary = async {
-                if let Some(secondary) = &fallback_outbound {
+            fallback_resp = async {
+                if let Some(ref fallback_outbound) = fallback_outbound {
                     let mut buf = [0u8; MAX_UDP_RELAY_PACKET_SIZE];
-                    let (len, remote_addr) = secondary.recv_from(&mut buf).await?;
+                    let (len, remote_addr) = fallback_outbound.recv_from(&mut buf).await?;
                     let src_addr = SocketAddr::new(src_ip, src_port.load(Ordering::Relaxed));
 
                     tracing::info!("[SOCKS5][UDP] {src_addr} <- {remote_addr} feedback to incoming, packet size {len}");
@@ -314,7 +314,7 @@ async fn handle_udp(
                     // If there's no secondary socket, just await forever.
                     futures_util::future::pending().await
                 }
-            } => resp_secondary,
+            } => fallback_resp,
 
             _ = reply_listener.wait_until_closed() => {
                 break;
