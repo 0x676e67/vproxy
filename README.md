@@ -17,7 +17,7 @@ A high-performance `HTTP`/`HTTPS`/`SOCKS5` proxy server
 - Basic authentication
 - Auto protocol detection
 - Kernel-space zero-copy
-- IPv4/IPv6 priority control 
+- `IPv4`/`IPv6` dual-stack
 - Service binding to specific `CIDR` addresses
 - SOCKS5: `CONNECT`, `BIND`, `ASSOCIATE`  
 
