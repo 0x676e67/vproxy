@@ -83,9 +83,8 @@ impl Daemon {
         Daemon::root();
 
         if let Some(pid) = self.pid()? {
-            let pid = pid.parse::<i32>()?;
             for _ in 0..360 {
-                if signal::kill(Pid::from_raw(pid), signal::SIGINT).is_err() {
+                if signal::kill(Pid::from_raw(pid as _), signal::SIGINT).is_err() {
                     break;
                 }
                 std::thread::sleep(Duration::from_secs(1))
@@ -100,6 +99,7 @@ impl Daemon {
 
         Ok(())
     }
+
     /// Restart the daemon
     pub fn restart(&self, config: BootArgs) -> crate::Result<()> {
         self.stop()?;
@@ -127,7 +127,7 @@ impl Daemon {
                 sys.refresh_all();
 
                 for (raw_pid, process) in sys.processes().iter() {
-                    if raw_pid.as_u32().eq(&(pid.parse::<u32>()?)) {
+                    if raw_pid.as_u32().eq(&pid) {
                         println!("{:<6} {:<6}  {:<6}", "PID", "CPU(%)", "MEM(MB)");
                         println!(
                             "{:<6}   {:<6.1}  {:<6.1}",
@@ -179,11 +179,28 @@ impl Daemon {
         Ok(())
     }
 
-    fn pid(&self) -> crate::Result<Option<String>> {
-        if let Ok(data) = fs::read(&self.pid_file) {
-            let binding = String::from_utf8(data)?;
-            return Ok(Some(binding.trim().to_string()));
+    fn pid(&self) -> crate::Result<Option<u32>> {
+        if let Ok(data) = fs::read_to_string(&self.pid_file) {
+            let pid = data.trim().parse::<u32>()?;
+
+            let mut sys = sysinfo::System::new();
+            sys.refresh_all();
+
+            let sys_pid = sysinfo::Pid::from_u32(pid);
+            if let Some(process) = sys.process(sys_pid) {
+                if process.name() == BIN_NAME {
+                    return Ok(Some(pid));
+                } else {
+                    println!(
+                        "PID {pid} exists but belongs to different process: {:?}",
+                        process.name()
+                    );
+                }
+            }
+
+            let _ = fs::remove_file(&self.pid_file);
         }
+
         Ok(None)
     }
 
