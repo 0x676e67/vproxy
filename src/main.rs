@@ -121,6 +121,21 @@ pub enum Proxy {
         tls_key: Option<PathBuf>,
     },
 
+    /// Http/3 server (QUIC)
+    Http3 {
+        /// Authentication type
+        #[command(flatten)]
+        auth: AuthMode,
+
+        /// TLS certificate file
+        #[arg(long, requires = "tls_key")]
+        tls_cert: Option<PathBuf>,
+
+        /// TLS private key file
+        #[arg(long, requires = "tls_cert")]
+        tls_key: Option<PathBuf>,
+    },
+
     /// Socks5 server
     Socks5 {
         /// Authentication type

@@ -8,10 +8,12 @@
 
 > 🚀 Help me work seamlessly with open source sharing by [sponsoring me on GitHub](https://github.com/0x676e67/0x676e67/blob/main/SPONSOR.md)
 
-A high-performance `HTTP`/`HTTPS`/`SOCKS5` proxy server
+A high-performance `HTTP`/`HTTPS`/`HTTP/3`/`SOCKS5` proxy server
 
 ## Features
 
+- HTTP/3 support (QUIC)
+- HTTP/2 and HTTP/1.1 support
 - Proxy extensions
 - Concurrency limits 
 - Basic authentication
@@ -131,9 +133,9 @@ while true; do curl -x http://127.0.0.1:8100 -s https://api.ip.sb/ip -A Mozilla;
 
 ### Multi-Protocol Support
 
-vproxy supports multiple types of proxy servers with flexible configuration options. HTTP, HTTPS, and SOCKS5 proxies can run independently, or use the auto-detection mode to handle all protocols on a single port. Each server type supports authentication, custom binding addresses, and advanced socket configurations.
+vproxy supports multiple types of proxy servers with flexible configuration options. HTTP, HTTPS, HTTP/3, and SOCKS5 proxies can run independently, or use the auto-detection mode to handle all protocols on a single port. Each server type supports authentication, custom binding addresses, and advanced socket configurations.
 
-1. HTTP Proxy
+1. HTTP Proxy (HTTP/1.1)
 
 ```bash
 # Basic HTTP proxy
@@ -146,10 +148,12 @@ vproxy run http -u username -p password
 vproxy run --bind 0.0.0.0:8080 http
 ```
 
-2. HTTPS Proxy
+2. HTTPS Proxy (HTTP/1.1, HTTP/2, HTTP/3)
+
+The HTTPS proxy automatically supports **HTTP/1.1, HTTP/2, and HTTP/3** simultaneously! It listens on TCP for HTTP/1.1 and HTTP/2, and UDP for HTTP/3 on the same port.
 
 ```bash
-# HTTPS proxy with TLS certificates
+# HTTPS proxy with TLS certificates - automatically supports HTTP/3!
 vproxy run https --tls-cert cert.pem --tls-key key.pem
 
 # HTTPS proxy with authentication
@@ -158,7 +162,17 @@ vproxy run https --tls-cert cert.pem --tls-key key.pem -u username -p password
 
 If no TLS certificate is provided, vproxy will automatically generate a self-signed certificate for HTTPS connections.
 
-3. SOCKS5 Proxy
+3. HTTP/3 Only (QUIC)
+
+```bash
+# HTTP/3 only proxy (runs over QUIC/UDP)
+vproxy run http3 --tls-cert cert.pem --tls-key key.pem
+
+# HTTP/3 with authentication
+vproxy run http3 --tls-cert cert.pem --tls-key key.pem -u username -p password
+```
+
+4. SOCKS5 Proxy
 
 ```bash
 # Basic SOCKS5 proxy
@@ -171,13 +185,13 @@ vproxy run socks5 -u username -p password
 vproxy run --bind 0.0.0.0:1080 socks5
 ```
 
-4. Auto Protocol Detection
+5. Auto Protocol Detection
 
 ```bash
 # Auto-detect HTTP/HTTPS/SOCKS5 protocols on single port
 vproxy run auto
 
-# Auto-detect with HTTPS support
+# Auto-detect with HTTPS support (includes HTTP/3)
 vproxy run auto --tls-cert cert.pem --tls-key key.pem
 
 # Auto-detect with authentication
@@ -185,6 +199,17 @@ vproxy run auto -u username -p password --tls-cert cert.pem --tls-key key.pem
 ```
 
 The auto-detection server automatically identifies the protocol type and routes connections to the appropriate handler.
+
+### HTTP Version Support
+
+| Mode | HTTP/1.1 | HTTP/2 | HTTP/3 | Transport |
+|------|----------|---------|---------|-----------|
+| `http` | ✅ | ❌ | ❌ | TCP |
+| `https` | ✅ | ✅ | ✅ | TCP + UDP |
+| `http3` | ❌ | ❌ | ✅ | UDP (QUIC) |
+| `auto` | ✅ | ✅ | ✅ | TCP + UDP |
+
+**Note:** HTTP/3 uses QUIC protocol over UDP, while HTTP/1.1 and HTTP/2 use TCP. The `https` and `auto` modes run both TCP and UDP listeners on the same port to support all versions simultaneously.
 
 
 - TTL Extension
