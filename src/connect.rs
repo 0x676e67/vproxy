@@ -206,14 +206,14 @@ impl TcpConnector<'_> {
     async fn create_socket_with_cidr(&self, cidr: IpCidr) -> std::io::Result<TcpSocket> {
         match cidr {
             IpCidr::V4(cidr) => {
-                let addr = assign_ipv4_from_extension(cidr, self.inner.cidr_range, self.extension);
                 let socket = TcpSocket::new_v4()?;
+                let addr = assign_ipv4_from_extension(cidr, self.inner.cidr_range, self.extension);
                 socket.bind(SocketAddr::new(IpAddr::V4(addr), 0))?;
                 Ok(socket)
             }
             IpCidr::V6(cidr) => {
-                let addr = assign_ipv6_from_extension(cidr, self.inner.cidr_range, self.extension);
                 let socket = TcpSocket::new_v6()?;
+                let addr = assign_ipv6_from_extension(cidr, self.inner.cidr_range, self.extension);
                 socket.bind(SocketAddr::new(IpAddr::V6(addr), 0))?;
                 Ok(socket)
             }
@@ -223,7 +223,7 @@ impl TcpConnector<'_> {
     /// Creates a [`TcpSocket`] and binds it to the fallback address.
     fn create_socket_with_fallback(
         &self,
-        target_addr: SocketAddr,
+        #[allow(unused)] target_addr: SocketAddr,
         fallback: &Fallback,
     ) -> std::io::Result<TcpSocket> {
         let socket = match fallback {

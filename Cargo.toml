@@ -22,7 +22,7 @@ tokio = { version = "1.48.0", features = [
     "io-util",
     "signal",
 ] }
-clap = { version = "4.5.48", features = ["derive", "env"] }
+clap = { version = "4.5.51", features = ["derive", "env"] }
 self_update = { version = "0.42.0", default-features = false, features = [
     "rustls",
     "archive-tar",
