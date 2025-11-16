@@ -223,7 +223,7 @@ impl TcpConnector<'_> {
     /// Creates a [`TcpSocket`] and binds it to the fallback address.
     fn create_socket_with_fallback(
         &self,
-        #[allow(unused)] target_addr: SocketAddr,
+        #[cfg_attr(windows, allow(unused))] target_addr: SocketAddr,
         fallback: &Fallback,
     ) -> std::io::Result<TcpSocket> {
         let socket = match fallback {
