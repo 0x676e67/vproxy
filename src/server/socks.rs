@@ -28,10 +28,8 @@ use self::{
     error::Error,
     proto::{Address, Reply, UdpHeader},
 };
-use super::{
-    Acceptor, Context, Server,
-    connect::{Connector, TcpConnector, UdpConnector},
-};
+use super::{Acceptor, Context, Server};
+use crate::connect::{Connector, TcpConnector, UdpConnector};
 
 /// SOCKS5 acceptor.
 #[derive(Clone)]

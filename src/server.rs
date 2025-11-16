@@ -1,9 +1,6 @@
 mod auto;
-mod connect;
 mod context;
-mod extension;
 mod http;
-mod rand;
 mod socks;
 
 use std::{net::SocketAddr, time::Duration};
@@ -11,11 +8,8 @@ use std::{net::SocketAddr, time::Duration};
 use tokio::net::{TcpListener, TcpStream};
 use tracing_subscriber::{EnvFilter, FmtSubscriber};
 
-use self::{
-    auto::AutoDetectServer, connect::Connector, context::Context, http::HttpServer,
-    socks::Socks5Server,
-};
-use crate::{AuthMode, BootArgs, Proxy, Result};
+use self::{auto::AutoDetectServer, context::Context, http::HttpServer, socks::Socks5Server};
+use crate::{AuthMode, BootArgs, Proxy, Result, connect::Connector};
 
 /// Trait for connection acceptors that handle incoming TCP streams.
 pub trait Acceptor {

@@ -4,23 +4,25 @@
 #![cfg_attr(test, deny(warnings))]
 #![cfg_attr(not(test), warn(unused_crate_dependencies))]
 
+mod connect;
 #[cfg(target_family = "unix")]
 mod daemon;
 mod error;
+mod ext;
 mod io;
 mod oneself;
+mod rand;
 #[cfg(target_os = "linux")]
 mod route;
 mod server;
 
-use std::{
-    net::{IpAddr, SocketAddr},
-    path::PathBuf,
-};
+use std::{net::SocketAddr, path::PathBuf};
 
 use cidr::IpCidr;
 use clap::{Args, Parser, Subcommand};
 use tracing::Level;
+
+use crate::connect::Fallback;
 
 #[cfg(feature = "jemalloc")]
 #[global_allocator]
@@ -90,11 +92,11 @@ pub enum Commands {
 pub struct AuthMode {
     /// Authentication username
     #[arg(short, long, requires = "password")]
-    pub username: Option<String>,
+    username: Option<String>,
 
     /// Authentication password
     #[arg(short, long, requires = "username")]
-    pub password: Option<String>,
+    password: Option<String>,
 }
 
 #[derive(Subcommand, Clone)]
@@ -146,46 +148,68 @@ pub enum Proxy {
 
 #[derive(Args, Clone)]
 pub struct BootArgs {
-    /// Log level e.g. trace, debug, info, warn, error
+    /// Log level (trace / debug / info / warn / error). Default: info.
+    /// Can be overridden by environment variable VPROXY_LOG.
     #[arg(
         long,
         short = 'L',
         env = "VPROXY_LOG",
         default_value = "info",
-        global = true
+        global = true,
+        verbatim_doc_comment
     )]
     log: Level,
 
-    /// Worker threads, default to number of CPU cores
-    #[arg(long, short = 'w')]
+    /// Worker thread count. Default: number of logical CPU cores.
+    /// Too small limits concurrency; too large wastes context switches.
+    #[arg(long, short = 'w', verbatim_doc_comment)]
     workers: Option<usize>,
 
-    /// Bind address
-    #[arg(long, short = 'b', default_value = "127.0.0.1:1080")]
+    /// Bind address (listen endpoint).
+    /// e.g. 0.0.0.0:1080, [::]:1080, 192.168.1.100:1080
+    #[arg(
+        long,
+        short = 'b',
+        default_value = "127.0.0.1:1080",
+        verbatim_doc_comment
+    )]
     bind: SocketAddr,
 
-    /// IP-CIDR, e.g. 2001:db8::/32
-    #[arg(long, short = 'i')]
+    /// Base CIDR block for outbound source address selection.
+    /// Used for session, TTL and range extensions.
+    /// e.g. 2001:db8::/32 or 10.0.0.0/24
+    #[arg(long, short = 'i', verbatim_doc_comment)]
     cidr: Option<IpCidr>,
 
-    /// IP-CIDR-Range, e.g. 64
-    #[arg(long, short = 'r')]
+    /// Sub-range bit width (CIDR range extension).
+    /// Carves host bits into per-user fixed allocation.
+    /// e.g. 64 (IPv6 only meaningful).
+    #[arg(long, short = 'r', verbatim_doc_comment)]
     cidr_range: Option<u8>,
 
-    /// Fallback address
-    #[arg(long, short)]
-    fallback: Option<IpAddr>,
+    /// Fallback local source address or interface when CIDR selection fails.
+    /// Accepts IPv4 / IPv6 address or interface name.
+    /// Interface name works only on Unix platforms.
+    /// e.g. 192.168.1.100, 2001:db8::1, eth0.
+    #[arg(long, short, verbatim_doc_comment)]
+    fallback: Option<Fallback>,
 
-    /// Connection timeout in seconds
-    #[arg(long, short = 't', default_value = "10")]
+    /// Outbound connection timeout (seconds). Applies to TCP (and TLS handshake).
+    /// Recommended: 5–15. Too low may fail on high latency links.
+    /// e.g. 5.
+    #[arg(long, short = 't', default_value = "10", verbatim_doc_comment)]
     connect_timeout: u64,
 
-    /// Maximum concurrent connections in socket queue
-    #[arg(long, short = 'c', default_value = "1024")]
+    /// Maximum concurrent active connections.
+    /// Protects resource exhaustion. Raise cautiously.
+    /// e.g. 128.
+    #[arg(long, short = 'c', default_value = "1024", verbatim_doc_comment)]
     concurrent: u32,
 
-    /// Enable SO_REUSEADDR for outbound connections
-    #[arg(long, default_value = "true")]
+    /// Enable SO_REUSEADDR for outbound sockets.
+    /// Helps mitigate TIME_WAIT port exhaustion.
+    /// e.g. true.
+    #[arg(long, default_value = "true", verbatim_doc_comment)]
     reuseaddr: Option<bool>,
 
     #[command(subcommand)]
@@ -193,7 +217,6 @@ pub struct BootArgs {
 }
 
 #[derive(Subcommand, Clone)]
-
 pub enum Oneself {
     /// Download and install updates to the proxy server
     Update,
