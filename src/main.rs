@@ -160,11 +160,6 @@ pub struct BootArgs {
     )]
     log: Level,
 
-    /// Worker thread count. Default: number of logical CPU cores.
-    /// Too small limits concurrency; too large wastes context switches.
-    #[arg(long, short = 'w', verbatim_doc_comment)]
-    workers: Option<usize>,
-
     /// Bind address (listen endpoint).
     /// e.g. 0.0.0.0:1080, [::]:1080, 192.168.1.100:1080
     #[arg(
@@ -174,6 +169,17 @@ pub struct BootArgs {
         verbatim_doc_comment
     )]
     bind: SocketAddr,
+
+    /// Maximum concurrent active connections.
+    /// Protects resource exhaustion. Raise cautiously.
+    /// e.g. 128.
+    #[arg(long, short = 'c', default_value = "1024", verbatim_doc_comment)]
+    concurrent: u32,
+
+    /// Worker thread count. Default: number of logical CPU cores.
+    /// Too small limits concurrency; too large wastes context switches.
+    #[arg(long, short = 'w', verbatim_doc_comment)]
+    workers: Option<usize>,
 
     /// Base CIDR block for outbound source address selection.
     /// Used for session, TTL and range extensions.
@@ -209,14 +215,8 @@ pub struct BootArgs {
     #[arg(long, default_value = "30", verbatim_doc_comment)]
     tcp_user_timeout: Option<u64>,
 
-    /// Maximum concurrent active connections.
-    /// Protects resource exhaustion. Raise cautiously.
-    /// e.g. 128.
-    #[arg(long, short = 'c', default_value = "1024", verbatim_doc_comment)]
-    concurrent: u32,
-
-    /// Enable SO_REUSEADDR for outbound sockets.
-    /// Helps mitigate TIME_WAIT port exhaustion.
+    /// Outbound SO_REUSEADDR for TCP sockets.
+    /// Helps mitigate TIME_WAIT port exhaustion and enables fast rebinding after restarts.
     /// e.g. true.
     #[arg(long, default_value = "true", verbatim_doc_comment)]
     reuseaddr: Option<bool>,
