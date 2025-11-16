@@ -97,6 +97,8 @@ pub fn run(args: BootArgs) -> Result<()> {
                     args.cidr_range,
                     args.fallback,
                     args.connect_timeout,
+                    #[cfg(any(target_os = "android", target_os = "fuchsia", target_os = "linux"))]
+                    args.tcp_user_timeout,
                     args.reuseaddr,
                 ),
             };

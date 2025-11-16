@@ -39,23 +39,13 @@ pub enum TargetAddr {
 /// with an IPv6 CIDR and a fallback IP address.
 #[derive(Clone)]
 pub struct Connector {
-    /// Optional IPv6 CIDR (Classless Inter-Domain Routing), used to optionally
-    /// configure an IPv6 address.
     cidr: Option<IpCidr>,
-
-    /// Optional CIDR range for IP addresses.
     cidr_range: Option<u8>,
-
-    /// Optional IP address as a fallback option in case of connection failure.
     fallback: Option<Fallback>,
-
-    /// Connect timeout in milliseconds.
     connect_timeout: Duration,
-
-    /// Enable SO_REUSEADDR for outbond connection socket
+    #[cfg(any(target_os = "android", target_os = "fuchsia", target_os = "linux"))]
+    tcp_user_timeout: Option<Duration>,
     reuseaddr: Option<bool>,
-
-    /// Default http connector
     http: connect::HttpConnector,
 }
 
@@ -134,6 +124,8 @@ impl Connector {
         cidr_range: Option<u8>,
         fallback: Option<Fallback>,
         connect_timeout: u64,
+        #[cfg(any(target_os = "android", target_os = "fuchsia", target_os = "linux"))]
+        tcp_user_timeout: Option<u64>,
         reuseaddr: Option<bool>,
     ) -> Self {
         let connect_timeout = Duration::from_secs(connect_timeout);
@@ -147,8 +139,10 @@ impl Connector {
             cidr_range,
             fallback,
             connect_timeout,
-            http: http_connector,
+            #[cfg(any(target_os = "android", target_os = "fuchsia", target_os = "linux"))]
+            tcp_user_timeout: tcp_user_timeout.map(Duration::from_secs),
             reuseaddr,
+            http: http_connector,
         }
     }
 
@@ -204,20 +198,28 @@ impl TcpConnector<'_> {
 
     /// Creates a [`TcpSocket`] and binds it to an IP address within the provided CIDR range.
     async fn create_socket_with_cidr(&self, cidr: IpCidr) -> std::io::Result<TcpSocket> {
-        match cidr {
+        let socket = match cidr {
             IpCidr::V4(cidr) => {
                 let socket = TcpSocket::new_v4()?;
                 let addr = assign_ipv4_from_extension(cidr, self.inner.cidr_range, self.extension);
                 socket.bind(SocketAddr::new(IpAddr::V4(addr), 0))?;
-                Ok(socket)
+                socket
             }
             IpCidr::V6(cidr) => {
                 let socket = TcpSocket::new_v6()?;
                 let addr = assign_ipv6_from_extension(cidr, self.inner.cidr_range, self.extension);
                 socket.bind(SocketAddr::new(IpAddr::V6(addr), 0))?;
-                Ok(socket)
+                socket
             }
+        };
+
+        #[cfg(any(target_os = "android", target_os = "fuchsia", target_os = "linux"))]
+        if let Some(tcp_user_timeout) = self.inner.tcp_user_timeout {
+            let socket_ref = socket2::SockRef::from(&socket);
+            socket_ref.set_tcp_user_timeout(Some(tcp_user_timeout))?;
         }
+
+        Ok(socket)
     }
 
     /// Creates a [`TcpSocket`] and binds it to the fallback address.
@@ -289,8 +291,15 @@ impl TcpConnector<'_> {
         };
 
         socket.set_nodelay(true)?;
+
         if let Some(reuseaddr) = self.inner.reuseaddr {
             socket.set_reuseaddr(reuseaddr)?;
+        }
+
+        #[cfg(any(target_os = "android", target_os = "fuchsia", target_os = "linux"))]
+        if let Some(tcp_user_timeout) = self.inner.tcp_user_timeout {
+            let socket_ref = socket2::SockRef::from(&socket);
+            socket_ref.set_tcp_user_timeout(Some(tcp_user_timeout))?;
         }
 
         Ok(socket)
@@ -672,8 +681,14 @@ impl HttpConnector<'_> {
         }
 
         connector.set_nodelay(true);
+
         if let Some(reuseaddr) = self.inner.reuseaddr {
             connector.set_reuse_address(reuseaddr);
+        }
+
+        #[cfg(any(target_os = "android", target_os = "fuchsia", target_os = "linux"))]
+        if let Some(tcp_user_timeout) = self.inner.tcp_user_timeout {
+            connector.set_tcp_user_timeout(Some(tcp_user_timeout));
         }
 
         Client::builder(TokioExecutor::new())
