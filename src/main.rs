@@ -200,9 +200,9 @@ pub struct BootArgs {
     #[arg(long, short = 't', default_value = "10", verbatim_doc_comment)]
     connect_timeout: u64,
 
-    /// TCP_USER_TIMEOUT for established TCP sockets (seconds).
-    /// Maximum time that transmitted data may remain unacknowledged before aborting the
-    /// connection. Not a keepalive: idle connections without in-flight data are unaffected.
+    /// Outbound TCP sockets user timeout (seconds).
+    /// Maximum time transmitted data may remain unacknowledged before aborting the connection.
+    /// Not a keepalive: idle connections without in-flight data are unaffected.
     /// Linux only. Kernel expects milliseconds; this value is converted from seconds.
     /// e.g. 15.
     #[cfg(any(target_os = "android", target_os = "fuchsia", target_os = "linux"))]
