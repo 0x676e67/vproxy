@@ -48,6 +48,12 @@ tokio-rustls = { version = "0.26.4", default-features = false, features = [
 ] }
 rcgen = "0.14.5"
 
+# http/3
+h3 = "0.0.4"
+h3-quinn = "0.0.5"
+quinn = "0.10.2"
+rustls_0_21 = { package = "rustls", version = "0.21" }
+
 # socks5
 bytes = "1.11.0"
 smallvec = "1.15.0"

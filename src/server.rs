@@ -1,6 +1,8 @@
 mod auto;
 mod context;
 mod http;
+mod http3;
+mod rand;
 mod socks;
 
 use std::{net::SocketAddr, time::Duration};
@@ -8,8 +10,17 @@ use std::{net::SocketAddr, time::Duration};
 use tokio::net::{TcpListener, TcpStream};
 use tracing_subscriber::{EnvFilter, FmtSubscriber};
 
-use self::{auto::AutoDetectServer, context::Context, http::HttpServer, socks::Socks5Server};
-use crate::{AuthMode, BootArgs, Proxy, Result, connect::Connector};
+use self::{
+    auto::AutoDetectServer,
+    connect::Connector,
+    context::Context,
+    http::HttpServer,
+    http3::Http3Server,
+    socks::Socks5Server,
+};
+
+use crate::{AuthMode, BootArgs, Proxy, Result};
+
 
 /// Trait for connection acceptors that handle incoming TCP streams.
 pub trait Acceptor {
@@ -110,8 +121,22 @@ pub fn run(args: BootArgs) -> Result<()> {
                             HttpServer::new(context(auth))?.start().await
                         }
                         Proxy::Https { auth, tls_cert, tls_key } => {
-                            HttpServer::new(context(auth))?
-                                .with_https(tls_cert, tls_key)?
+                            // Start both TCP (HTTP/1.1, HTTP/2) and UDP (HTTP/3) listeners
+                            let ctx = context(auth);
+                            let http_server = HttpServer::new(ctx.clone())?
+                                .with_https(tls_cert.clone(), tls_key.clone())?;
+                            
+                            // Start HTTP/3 server on the same port (UDP)
+                            let http3_server = Http3Server::new(ctx, tls_cert, tls_key).await?;
+                            
+                            // Run both servers concurrently
+                            tokio::select! {
+                                result = http_server.start() => result,
+                                result = http3_server.start() => result,
+                            }
+                        }
+                        Proxy::Http3 { auth, tls_cert, tls_key } => {
+                            Http3Server::new(context(auth), tls_cert, tls_key).await?
                                 .start()
                                 .await
                         }

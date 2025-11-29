@@ -1,9 +1,9 @@
 pub mod accept;
 pub mod tls;
 
-mod auth;
-mod error;
-mod genca;
+pub(crate) mod auth;
+pub(crate) mod error;
+pub(crate) mod genca;
 
 use std::{
     io::{self},
@@ -147,7 +147,7 @@ where
 {
     async fn start(mut self) -> std::io::Result<()> {
         tracing::info!(
-            "Http(s) proxy server listening on {}",
+            "Http(s) proxy server listening on {} (HTTP/1.1, HTTP/2)",
             self.listener.local_addr()?
         );
 

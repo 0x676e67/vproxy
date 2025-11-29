@@ -87,7 +87,7 @@ fn config_from_der(cert: Vec<Vec<u8>>, key: Vec<u8>) -> io::Result<ServerConfig>
         .with_single_cert(cert, key)
         .map_err(Error::other)?;
 
-    config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
+    config.alpn_protocols = vec![b"h3".to_vec(), b"h2".to_vec(), b"http/1.1".to_vec()];
 
     Ok(config)
 }
