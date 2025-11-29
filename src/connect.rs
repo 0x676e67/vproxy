@@ -1,5 +1,6 @@
 use std::{
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
+    str::FromStr,
     time::Duration,
 };
 
@@ -16,14 +17,17 @@ use tokio::{
     time::timeout,
 };
 
-use super::{extension::Extension, rand};
+use super::{ext::Extension, rand};
+
+/// Represents a fallback option for outbound connections.
+#[derive(Clone)]
+pub enum Fallback {
+    Address(IpAddr),
+    #[cfg(unix)]
+    Interface(String),
+}
 
 /// Represents a target address for outbound connections.
-///
-/// This enum supports three types of addresses:
-/// - `SocketAddress`: An IP address and port (IPv4 or IPv6).
-/// - `DomainAddress`: A domain name and port.
-/// - `Authority`: An HTTP authority (host[:port]) as used in HTTP requests.
 #[non_exhaustive]
 pub enum TargetAddr {
     SocketAddress(SocketAddr),
@@ -35,23 +39,13 @@ pub enum TargetAddr {
 /// with an IPv6 CIDR and a fallback IP address.
 #[derive(Clone)]
 pub struct Connector {
-    /// Optional IPv6 CIDR (Classless Inter-Domain Routing), used to optionally
-    /// configure an IPv6 address.
     cidr: Option<IpCidr>,
-
-    /// Optional CIDR range for IP addresses.
     cidr_range: Option<u8>,
-
-    /// Optional IP address as a fallback option in case of connection failure.
-    fallback: Option<IpAddr>,
-
-    /// Connect timeout in milliseconds.
+    fallback: Option<Fallback>,
     connect_timeout: Duration,
-
-    /// Enable SO_REUSEADDR for outbond connection socket
+    #[cfg(any(target_os = "android", target_os = "fuchsia", target_os = "linux"))]
+    tcp_user_timeout: Option<Duration>,
     reuseaddr: Option<bool>,
-
-    /// Default http connector
     http: connect::HttpConnector,
 }
 
@@ -76,6 +70,25 @@ pub struct UdpConnector<'a> {
 pub struct HttpConnector<'a> {
     inner: &'a Connector,
     extension: Extension,
+}
+
+// ==== impl Fallback ====
+
+impl FromStr for Fallback {
+    type Err = std::io::Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.parse::<IpAddr>() {
+            Ok(addr) => Ok(Fallback::Address(addr)),
+            #[cfg(unix)]
+            Err(_) => Ok(Fallback::Interface(s.to_owned())),
+            #[cfg(not(unix))]
+            Err(err) => Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("Invalid fallback address: {err}"),
+            )),
+        }
+    }
 }
 
 // ==== impl TargetAddr ====
@@ -109,8 +122,10 @@ impl Connector {
     pub(super) fn new(
         cidr: Option<IpCidr>,
         cidr_range: Option<u8>,
-        fallback: Option<IpAddr>,
+        fallback: Option<Fallback>,
         connect_timeout: u64,
+        #[cfg(any(target_os = "android", target_os = "fuchsia", target_os = "linux"))]
+        tcp_user_timeout: Option<u64>,
         reuseaddr: Option<bool>,
     ) -> Self {
         let connect_timeout = Duration::from_secs(connect_timeout);
@@ -124,8 +139,10 @@ impl Connector {
             cidr_range,
             fallback,
             connect_timeout,
-            http: http_connector,
+            #[cfg(any(target_os = "android", target_os = "fuchsia", target_os = "linux"))]
+            tcp_user_timeout: tcp_user_timeout.map(Duration::from_secs),
             reuseaddr,
+            http: http_connector,
         }
     }
 
@@ -165,83 +182,189 @@ impl TcpConnector<'_> {
     where
         F: FnOnce() -> std::io::Result<IpAddr>,
     {
-        match (self.inner.cidr, self.inner.fallback) {
-            (Some(cidr), _) => match cidr {
-                IpCidr::V4(cidr) => {
-                    let ip = IpAddr::V4(assign_ipv4_from_extension(
-                        cidr,
-                        self.inner.cidr_range,
-                        self.extension,
-                    ));
-                    Ok(SocketAddr::new(ip, 0))
-                }
-                IpCidr::V6(cidr) => {
-                    let ip = IpAddr::V6(assign_ipv6_from_extension(
-                        cidr,
-                        self.inner.cidr_range,
-                        self.extension,
-                    ));
-                    Ok(SocketAddr::new(ip, 0))
-                }
-            },
-            (None, Some(fallback)) => Ok(SocketAddr::new(fallback, 0)),
+        match (self.inner.cidr, &self.inner.fallback) {
+            (Some(IpCidr::V4(cidr)), _) => {
+                let addr = assign_ipv4_from_extension(cidr, self.inner.cidr_range, self.extension);
+                Ok(SocketAddr::new(IpAddr::V4(addr), 0))
+            }
+            (Some(IpCidr::V6(cidr)), _) => {
+                let addr = assign_ipv6_from_extension(cidr, self.inner.cidr_range, self.extension);
+                Ok(SocketAddr::new(IpAddr::V6(addr), 0))
+            }
+            (None, Some(Fallback::Address(addr))) => Ok(SocketAddr::new(*addr, 0)),
             _ => default().map(|ip| SocketAddr::new(ip, 0)),
         }
     }
 
-    /// Creates a [`TcpSocket`] and binds it to the provided IP address.
-    fn create_socket_with_addr(&self, bind: IpAddr) -> std::io::Result<TcpSocket> {
-        let socket = match bind {
-            IpAddr::V4(_) => {
+    /// Creates a [`TcpSocket`] and binds it to an IP address within the provided CIDR range.
+    async fn create_socket_with_cidr(&self, cidr: IpCidr) -> std::io::Result<TcpSocket> {
+        let socket = match cidr {
+            IpCidr::V4(cidr) => {
                 let socket = TcpSocket::new_v4()?;
-                let bind_addr = SocketAddr::new(bind, 0);
-                socket.bind(bind_addr)?;
+                let addr = assign_ipv4_from_extension(cidr, self.inner.cidr_range, self.extension);
+                socket.bind(SocketAddr::new(IpAddr::V4(addr), 0))?;
                 socket
             }
-            IpAddr::V6(_) => {
+            IpCidr::V6(cidr) => {
                 let socket = TcpSocket::new_v6()?;
-                let bind_addr = SocketAddr::new(bind, 0);
-                socket.bind(bind_addr)?;
+                let addr = assign_ipv6_from_extension(cidr, self.inner.cidr_range, self.extension);
+                socket.bind(SocketAddr::new(IpAddr::V6(addr), 0))?;
                 socket
             }
         };
 
-        socket.set_nodelay(true)?;
-        if let Some(reuseaddr) = self.inner.reuseaddr {
-            socket.set_reuseaddr(reuseaddr)?;
+        #[cfg(any(target_os = "android", target_os = "fuchsia", target_os = "linux"))]
+        if let Some(tcp_user_timeout) = self.inner.tcp_user_timeout {
+            let socket_ref = socket2::SockRef::from(&socket);
+            socket_ref.set_tcp_user_timeout(Some(tcp_user_timeout))?;
         }
 
         Ok(socket)
     }
 
-    /// Creates a [`TcpSocket`] and binds it to an IP address within the provided CIDR range.
-    async fn create_socket_with_cidr(&self, cidr: IpCidr) -> std::io::Result<TcpSocket> {
-        let bind = match cidr {
-            IpCidr::V4(cidr) => IpAddr::V4(assign_ipv4_from_extension(
-                cidr,
-                self.inner.cidr_range,
-                self.extension,
-            )),
-            IpCidr::V6(cidr) => IpAddr::V6(assign_ipv6_from_extension(
-                cidr,
-                self.inner.cidr_range,
-                self.extension,
-            )),
+    /// Creates a [`TcpSocket`] and binds it to the fallback address.
+    fn create_socket_with_fallback(
+        &self,
+        #[cfg_attr(not(unix), allow(unused))] target_addr: SocketAddr,
+        fallback: &Fallback,
+    ) -> std::io::Result<TcpSocket> {
+        let socket = match fallback {
+            Fallback::Address(IpAddr::V4(addr)) => {
+                let socket = TcpSocket::new_v4()?;
+                let bind_addr = SocketAddr::new(IpAddr::V4(*addr), 0);
+                socket.bind(bind_addr)?;
+                socket
+            }
+            Fallback::Address(IpAddr::V6(addr)) => {
+                let socket = TcpSocket::new_v6()?;
+                let bind_addr = SocketAddr::new(IpAddr::V6(*addr), 0);
+                socket.bind(bind_addr)?;
+                socket
+            }
+            #[cfg(unix)]
+            Fallback::Interface(interface) => {
+                let socket = match target_addr {
+                    SocketAddr::V4(_) => TcpSocket::new_v4()?,
+                    SocketAddr::V6(_) => TcpSocket::new_v6()?,
+                };
+                let socket_ref = socket2::SockRef::from(&socket);
+
+                // On Linux-like systems, set the interface to bind using
+                // `SO_BINDTODEVICE`.
+                #[cfg(any(target_os = "android", target_os = "fuchsia", target_os = "linux"))]
+                socket_ref.bind_device(Some(interface.as_bytes()))?;
+
+                // On macOS-like and Solaris-like systems, we instead use `IP_BOUND_IF`.
+                // This socket option desires an integer index for the interface, so we
+                // must first determine the index of the requested interface name using
+                // `if_nametoindex`.
+                #[cfg(any(
+                    target_os = "illumos",
+                    target_os = "ios",
+                    target_os = "macos",
+                    target_os = "solaris",
+                    target_os = "tvos",
+                    target_os = "visionos",
+                    target_os = "watchos",
+                ))]
+                {
+                    let interface = std::ffi::CString::new(interface.as_str())?;
+                    #[allow(unsafe_code)]
+                    let idx = unsafe { nix::libc::if_nametoindex(interface.as_ptr()) };
+                    let idx = std::num::NonZeroU32::new(idx).ok_or_else(|| {
+                        std::io::Error::new(
+                            std::io::ErrorKind::InvalidInput,
+                            format!("Interface {interface:?} not found"),
+                        )
+                    })?;
+
+                    // Different setsockopt calls are necessary depending on whether the
+                    // address is IPv4 or IPv6.
+                    match target_addr {
+                        SocketAddr::V4(_) => socket_ref.bind_device_by_index_v4(Some(idx)),
+                        SocketAddr::V6(_) => socket_ref.bind_device_by_index_v6(Some(idx)),
+                    }?;
+                }
+
+                socket
+            }
         };
 
-        self.create_socket_with_addr(bind)
+        socket.set_nodelay(true)?;
+
+        if let Some(reuseaddr) = self.inner.reuseaddr {
+            socket.set_reuseaddr(reuseaddr)?;
+        }
+
+        #[cfg(any(target_os = "android", target_os = "fuchsia", target_os = "linux"))]
+        if let Some(tcp_user_timeout) = self.inner.tcp_user_timeout {
+            let socket_ref = socket2::SockRef::from(&socket);
+            socket_ref.set_tcp_user_timeout(Some(tcp_user_timeout))?;
+        }
+
+        Ok(socket)
     }
 
     // Attempts to establish a TCP connection to the target address using the
     // provided IP address.
-    #[inline]
-    async fn connect_with_addr(
+    async fn connect_with_fallback(
         &self,
         target_addr: SocketAddr,
-        addr: IpAddr,
+        fallback: &Fallback,
     ) -> std::io::Result<TcpStream> {
-        let socket = self.create_socket_with_addr(addr)?;
+        let socket = self.create_socket_with_fallback(target_addr, fallback)?;
         socket.connect(target_addr).await
+    }
+
+    /// Attempts to establish a TCP connection to the target address using an IP
+    /// address from the provided CIDR range.
+    async fn connect_with_cidr(
+        &self,
+        target_addr: SocketAddr,
+        cidr: IpCidr,
+    ) -> std::io::Result<TcpStream> {
+        let socket = self.create_socket_with_cidr(cidr).await?;
+        socket.connect(target_addr).await
+    }
+
+    /// Attempts to establish a TCP connection to the target address using an IP
+    /// address from the provided CIDR range. If the connection attempt fails, it
+    /// falls back to using the provided fallback IP address.
+    async fn connect_with_cidr_fallback(
+        &self,
+        target_addr: SocketAddr,
+        cidr: IpCidr,
+        fallback: &Fallback,
+    ) -> std::io::Result<TcpStream> {
+        let preferred_fut = self.connect_with_cidr(target_addr, cidr);
+        futures_util::pin_mut!(preferred_fut);
+
+        let fallback_fut = self.connect_with_fallback(target_addr, fallback);
+        futures_util::pin_mut!(fallback_fut);
+
+        let fallback_delay = tokio::time::sleep(self.inner.connect_timeout);
+        futures_util::pin_mut!(fallback_delay);
+
+        let (result, future) = match futures_util::future::select(preferred_fut, fallback_delay)
+            .await
+        {
+            Either::Left((result, _fallback_delay)) => (result, Either::Right(fallback_fut)),
+            Either::Right(((), preferred_fut)) => {
+                // Delay is done, start polling both the preferred and the fallback
+                match futures_util::future::select(preferred_fut, fallback_fut).await {
+                    Either::Left((result, fallback_fut)) => (result, Either::Right(fallback_fut)),
+                    Either::Right((result, preferred_fut)) => (result, Either::Left(preferred_fut)),
+                }
+            }
+        };
+
+        if result.is_err() {
+            // Fallback to the remaining future (could be preferred or fallback)
+            // if we get an error
+            future.await
+        } else {
+            result
+        }
     }
 
     /// Attempts to establish a TCP connection to each of the target addresses
@@ -252,11 +375,11 @@ impl TcpConnector<'_> {
     ) -> std::io::Result<TcpStream> {
         let mut last_err = None;
         for target_addr in addrs {
-            let res = match (self.inner.cidr, self.inner.fallback) {
+            let res = match (self.inner.cidr, &self.inner.fallback) {
                 (None, Some(fallback)) => {
                     timeout(
                         self.inner.connect_timeout,
-                        self.connect_with_addr(target_addr, fallback),
+                        self.connect_with_fallback(target_addr, fallback),
                     )
                     .await?
                 }
@@ -294,58 +417,6 @@ impl TcpConnector<'_> {
         Err(error(last_err))
     }
 
-    /// Attempts to establish a TCP connection to the target address using an IP
-    /// address from the provided CIDR range.
-    #[inline]
-    async fn connect_with_cidr(
-        &self,
-        target_addr: SocketAddr,
-        cidr: IpCidr,
-    ) -> std::io::Result<TcpStream> {
-        let socket = self.create_socket_with_cidr(cidr).await?;
-        socket.connect(target_addr).await
-    }
-
-    /// Attempts to establish a TCP connection to the target address using an IP
-    /// address from the provided CIDR range. If the connection attempt fails, it
-    /// falls back to using the provided fallback IP address.
-    async fn connect_with_cidr_fallback(
-        &self,
-        target_addr: SocketAddr,
-        cidr: IpCidr,
-        fallback: IpAddr,
-    ) -> std::io::Result<TcpStream> {
-        let preferred_fut = self.connect_with_cidr(target_addr, cidr);
-        futures_util::pin_mut!(preferred_fut);
-
-        let fallback_fut = self.connect_with_addr(target_addr, fallback);
-        futures_util::pin_mut!(fallback_fut);
-
-        let fallback_delay = tokio::time::sleep(self.inner.connect_timeout);
-        futures_util::pin_mut!(fallback_delay);
-
-        let (result, future) = match futures_util::future::select(preferred_fut, fallback_delay)
-            .await
-        {
-            Either::Left((result, _fallback_delay)) => (result, Either::Right(fallback_fut)),
-            Either::Right(((), preferred_fut)) => {
-                // Delay is done, start polling both the preferred and the fallback
-                match futures_util::future::select(preferred_fut, fallback_fut).await {
-                    Either::Left((result, fallback_fut)) => (result, Either::Right(fallback_fut)),
-                    Either::Right((result, preferred_fut)) => (result, Either::Left(preferred_fut)),
-                }
-            }
-        };
-
-        if result.is_err() {
-            // Fallback to the remaining future (could be preferred or fallback)
-            // if we get an error
-            future.await
-        } else {
-            result
-        }
-    }
-
     /// Attempts to establish a TCP connection to the given target address.
     ///
     /// This method supports three types of target addresses:
@@ -378,7 +449,7 @@ impl TcpConnector<'_> {
 impl UdpConnector<'_> {
     /// Creates a [`UdpSocket`] and binds it to the provided IP address.
     #[inline]
-    async fn create_socket_with_addr(&self, ip: IpAddr) -> std::io::Result<UdpSocket> {
+    async fn create_socket(&self, ip: IpAddr) -> std::io::Result<UdpSocket> {
         UdpSocket::bind(SocketAddr::new(ip, 0)).await
     }
 
@@ -386,20 +457,12 @@ impl UdpConnector<'_> {
     async fn create_socket_with_cidr(&self, cidr: IpCidr) -> std::io::Result<UdpSocket> {
         match cidr {
             IpCidr::V4(cidr) => {
-                let bind = IpAddr::V4(assign_ipv4_from_extension(
-                    cidr,
-                    self.inner.cidr_range,
-                    self.extension,
-                ));
-                UdpSocket::bind(SocketAddr::new(bind, 0)).await
+                let addr = assign_ipv4_from_extension(cidr, self.inner.cidr_range, self.extension);
+                UdpSocket::bind(SocketAddr::new(IpAddr::V4(addr), 0)).await
             }
             IpCidr::V6(cidr) => {
-                let bind = IpAddr::V6(assign_ipv6_from_extension(
-                    cidr,
-                    self.inner.cidr_range,
-                    self.extension,
-                ));
-                UdpSocket::bind(SocketAddr::new(bind, 0)).await
+                let addr = assign_ipv6_from_extension(cidr, self.inner.cidr_range, self.extension);
+                UdpSocket::bind(SocketAddr::new(IpAddr::V6(addr), 0)).await
             }
         }
     }
@@ -411,22 +474,22 @@ impl UdpConnector<'_> {
     pub async fn create_socket_dual_stack(
         &self,
     ) -> std::io::Result<(UdpSocket, Option<UdpSocket>)> {
-        match (self.inner.cidr, self.inner.fallback) {
-            (Some(cidr), Some(fallback)) => {
+        match (self.inner.cidr, &self.inner.fallback) {
+            (Some(cidr), Some(Fallback::Address(addr))) => {
                 // Different IP families - create dual-stack sockets
                 let preferred_socket = self.create_socket_with_cidr(cidr).await?;
-                let fallback_socket = self.create_socket_with_addr(fallback).await?;
+                let fallback_socket = self.create_socket(*addr).await?;
                 Ok((preferred_socket, Some(fallback_socket)))
             }
-            (None, Some(fallback)) => {
-                let fallback_socket = self.create_socket_with_addr(fallback).await?;
+            (None, Some(Fallback::Address(addr))) => {
+                let fallback_socket = self.create_socket(*addr).await?;
                 Ok((fallback_socket, None))
             }
             (Some(cidr), None) => {
                 let fallback_socket = self.create_socket_with_cidr(cidr).await?;
                 Ok((fallback_socket, None))
             }
-            (None, None) => {
+            _ => {
                 // Create dual-stack sockets when no specific configuration is provided
                 let preferred_socket = UdpSocket::bind("0.0.0.0:0").await?;
                 let fallback_socket = UdpSocket::bind("[::]:0").await;
@@ -571,30 +634,61 @@ impl HttpConnector<'_> {
         req: Request<Incoming>,
     ) -> Result<Response<Incoming>, hyper_util::client::legacy::Error> {
         let mut connector = self.inner.http.clone();
-        match (self.inner.cidr, self.inner.fallback) {
-            (Some(IpCidr::V4(cidr)), Some(IpAddr::V6(v6))) => {
-                let v4 = assign_ipv4_from_extension(cidr, self.inner.cidr_range, self.extension);
-                connector.set_local_addresses(v4, v6);
-            }
-            (Some(IpCidr::V4(cidr)), None) => {
-                let v4 = assign_ipv4_from_extension(cidr, self.inner.cidr_range, self.extension);
-                connector.set_local_address(Some(v4.into()));
-            }
-            (Some(IpCidr::V6(cidr)), Some(IpAddr::V4(v4))) => {
-                let v6 = assign_ipv6_from_extension(cidr, self.inner.cidr_range, self.extension);
-                connector.set_local_addresses(v4, v6);
-            }
-            (Some(IpCidr::V6(cidr)), None) => {
-                let v6 = assign_ipv6_from_extension(cidr, self.inner.cidr_range, self.extension);
-                connector.set_local_address(Some(v6.into()));
-            }
-            (None, addr) => connector.set_local_address(addr),
+        match (self.inner.cidr, &self.inner.fallback) {
+            (Some(cidr), Some(fallback)) => match (cidr, fallback) {
+                (IpCidr::V4(cidr), Fallback::Address(IpAddr::V6(v6))) => {
+                    let v4 =
+                        assign_ipv4_from_extension(cidr, self.inner.cidr_range, self.extension);
+                    connector.set_local_addresses(v4, *v6);
+                }
+                (IpCidr::V6(cidr), Fallback::Address(IpAddr::V4(v4))) => {
+                    let v6 =
+                        assign_ipv6_from_extension(cidr, self.inner.cidr_range, self.extension);
+                    connector.set_local_addresses(*v4, v6);
+                }
+                #[cfg(unix)]
+                (_, Fallback::Interface(iface)) => {
+                    connector.set_interface(iface);
+                }
+                _ => {}
+            },
+            (Some(cidr), None) => match cidr {
+                IpCidr::V4(ipv4_cidr) => {
+                    let addr = assign_ipv4_from_extension(
+                        ipv4_cidr,
+                        self.inner.cidr_range,
+                        self.extension,
+                    );
+                    connector.set_local_address(Some(addr.into()));
+                }
+                IpCidr::V6(ipv6_cidr) => {
+                    let addr = assign_ipv6_from_extension(
+                        ipv6_cidr,
+                        self.inner.cidr_range,
+                        self.extension,
+                    );
+                    connector.set_local_address(Some(addr.into()));
+                }
+            },
+            (None, Some(fallback)) => match fallback {
+                Fallback::Address(addr) => connector.set_local_address(Some(*addr)),
+                #[cfg(unix)]
+                Fallback::Interface(iface) => {
+                    connector.set_interface(iface);
+                }
+            },
             _ => {}
         }
 
         connector.set_nodelay(true);
+
         if let Some(reuseaddr) = self.inner.reuseaddr {
             connector.set_reuse_address(reuseaddr);
+        }
+
+        #[cfg(any(target_os = "android", target_os = "fuchsia", target_os = "linux"))]
+        if let Some(tcp_user_timeout) = self.inner.tcp_user_timeout {
+            connector.set_tcp_user_timeout(Some(tcp_user_timeout));
         }
 
         Client::builder(TokioExecutor::new())

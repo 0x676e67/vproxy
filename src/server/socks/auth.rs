@@ -3,9 +3,9 @@ use std::{future::Future, io::Error};
 use password::{Request, Response, Status::*};
 use tokio::net::TcpStream;
 
-use crate::server::{
-    extension::Extension,
-    socks::proto::{AsyncStreamOperation, Method, UsernamePassword, handshake::password},
+use crate::{
+    ext::Extension,
+    server::socks::proto::{AsyncStreamOperation, Method, UsernamePassword, handshake::password},
 };
 
 /// Trait for SOCKS authentication methods.

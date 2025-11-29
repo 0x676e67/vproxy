@@ -1,7 +1,5 @@
 mod auto;
-mod connect;
 mod context;
-mod extension;
 mod http;
 mod http3;
 mod rand;
@@ -13,10 +11,16 @@ use tokio::net::{TcpListener, TcpStream};
 use tracing_subscriber::{EnvFilter, FmtSubscriber};
 
 use self::{
-    auto::AutoDetectServer, connect::Connector, context::Context, http::HttpServer,
-    http3::Http3Server, socks::Socks5Server,
+    auto::AutoDetectServer,
+    connect::Connector,
+    context::Context,
+    http::HttpServer,
+    http3::Http3Server,
+    socks::Socks5Server,
 };
+
 use crate::{AuthMode, BootArgs, Proxy, Result};
+
 
 /// Trait for connection acceptors that handle incoming TCP streams.
 pub trait Acceptor {
@@ -104,6 +108,8 @@ pub fn run(args: BootArgs) -> Result<()> {
                     args.cidr_range,
                     args.fallback,
                     args.connect_timeout,
+                    #[cfg(any(target_os = "android", target_os = "fuchsia", target_os = "linux"))]
+                    args.tcp_user_timeout,
                     args.reuseaddr,
                 ),
             };

@@ -25,7 +25,7 @@ jobs:
     environment: Linux
 
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v6
 
       - uses: actions-rs/toolchain@v1
         with:
@@ -48,7 +48,7 @@ jobs:
         rust: [stable]
 
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v6
 
       - uses: actions-rs/toolchain@v1
         with:
@@ -61,13 +61,14 @@ jobs:
   build:
     name: Build
     runs-on: ubuntu-latest
+    needs: ["style", "tests"]
     environment: Linux
     if: startsWith(github.ref, 'refs/tags/')
     container:
       image: ghcr.io/rust-cross/cargo-zigbuild:latest
 
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v6
 
       - name: Get tag
         if: startsWith(github.ref, 'refs/tags/')
@@ -125,53 +126,17 @@ jobs:
           prerelease: ${{ contains(github.ref, 'alpha') || contains(github.ref, 'beta') }}
           generate_release_notes: true
 
-  crates:
-    name: Publish crates
-    runs-on: ubuntu-latest
-    environment: Linux
-    needs: ["build", "style", "tests"]
-    if: startsWith(github.ref, 'refs/tags/')
-    steps:
-      - uses: actions/checkout@v5
-
-      - name: Get tag
-        if: startsWith(github.ref, 'refs/tags/')
-        id: tag
-        uses: dawidd6/action-get-tag@v1
-        with:
-          strip_v: true
-
-      - name: Tag Check
-        run: |
-          echo "tag=${{ steps.tag.outputs.tag }}" >> $GITHUB_ENV
-          echo "tag=${{ steps.tag.outputs.tag }}" >> $GITHUB_OUTPUT
-          if [ -z "${{ steps.tag.outputs.tag }}" ]; then
-            echo "tag=latest" >> $GITHUB_OUTPUT
-            echo "tag=latest" >> $GITHUB_ENV
-          fi
-
-      - uses: actions-rs/toolchain@v1
-        with:
-          toolchain: stable
-          override: true
-
-      - uses: katyo/publish-crates@v2
-        if: startsWith(github.ref, 'refs/tags/')
-        with:
-          registry-token: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-          ignore-unpublished-changes: true
-
   docker:
-    name: Build and push Docker image
+    name: Build Docker Image
     runs-on: ubuntu-latest
-    needs: ["build", "style", "tests"]
+    needs: ["style", "tests"]
     if: startsWith(github.ref, 'refs/tags/')
     permissions:
       contents: read
       packages: write
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v5
+        uses: actions/checkout@v6
         
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
@@ -205,3 +170,39 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           platforms: linux/amd64,linux/arm64
+
+  crates:
+    name: Publish crates
+    runs-on: ubuntu-latest
+    environment: Linux
+    needs: ["build", "style", "tests"]
+    if: startsWith(github.ref, 'refs/tags/')
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Get tag
+        if: startsWith(github.ref, 'refs/tags/')
+        id: tag
+        uses: dawidd6/action-get-tag@v1
+        with:
+          strip_v: true
+
+      - name: Tag Check
+        run: |
+          echo "tag=${{ steps.tag.outputs.tag }}" >> $GITHUB_ENV
+          echo "tag=${{ steps.tag.outputs.tag }}" >> $GITHUB_OUTPUT
+          if [ -z "${{ steps.tag.outputs.tag }}" ]; then
+            echo "tag=latest" >> $GITHUB_OUTPUT
+            echo "tag=latest" >> $GITHUB_ENV
+          fi
+
+      - uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+          override: true
+
+      - uses: katyo/publish-crates@v2
+        if: startsWith(github.ref, 'refs/tags/')
+        with:
+          registry-token: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+          ignore-unpublished-changes: true

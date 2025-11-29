@@ -33,8 +33,8 @@ use self::{
     error::Error,
     tls::{RustlsAcceptor, RustlsConfig},
 };
-use super::{Acceptor, Connector, Context, Server, extension::Extension};
-use crate::server::connect::TcpConnector;
+use super::{Acceptor, Connector, Context, Server};
+use crate::{connect::TcpConnector, ext::Extension};
 
 /// HTTP acceptor.
 #[derive(Clone)]
