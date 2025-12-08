@@ -9,7 +9,6 @@ mod connect;
 mod daemon;
 mod error;
 mod ext;
-mod io;
 mod oneself;
 mod rand;
 #[cfg(target_os = "linux")]

@@ -28,7 +28,7 @@ use self::{
     error::Error,
     proto::{Address, Reply, UdpHeader},
 };
-use super::{Acceptor, Context, Server};
+use super::{Acceptor, Context, Server, io};
 use crate::connect::{Connector, TcpConnector, UdpConnector};
 
 /// SOCKS5 acceptor.
@@ -173,7 +173,7 @@ async fn handle_connect(
                 .reply(Reply::Succeeded, Address::unspecified())
                 .await?;
 
-            match crate::io::copy_bidirectional(&mut inbound, &mut outbound).await {
+            match io::copy_bidirectional(&mut inbound, &mut outbound).await {
                 Ok((from_client, from_server)) => {
                     tracing::info!(
                         "[SOCKS5][CONNECT] client wrote {} bytes and received {} bytes",
@@ -418,7 +418,7 @@ async fn handle_bind(
         .await
     {
         Ok(mut inbound) => {
-            match crate::io::copy_bidirectional(&mut inbound, &mut outbound).await {
+            match io::copy_bidirectional(&mut inbound, &mut outbound).await {
                 Ok((from_client, from_server)) => {
                     tracing::info!(
                         "[SOCKS5][BIND] client wrote {} bytes and received {} bytes",

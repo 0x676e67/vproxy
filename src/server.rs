@@ -1,6 +1,7 @@
 mod auto;
 mod context;
 mod http;
+mod io;
 mod socks;
 
 use std::{net::SocketAddr, time::Duration};

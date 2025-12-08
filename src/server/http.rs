@@ -308,7 +308,7 @@ async fn tunnel(
         match hyper_util::server::conn::auto::upgrade::downcast::<TokioIo<TcpStream>>(upgraded) {
             Ok(io) => {
                 let mut client = io.io.into_inner();
-                let res = crate::io::copy_bidirectional(&mut client, &mut server).await;
+                let res = super::io::copy_bidirectional(&mut client, &mut server).await;
                 client.shutdown().await?;
                 res
             }
