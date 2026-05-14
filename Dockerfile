@@ -22,5 +22,8 @@ COPY --from=builder /app/target/release/vproxy /bin/vproxy
 # Iproute2 and procps are needed for the vproxy to work
 RUN apk add --no-cache iproute2 procps
 
-# Set the entrypoint
-ENTRYPOINT ["/bin/vproxy"]
+# Expose port 8080 for HTTP proxy
+EXPOSE 8080
+
+# Default command: run HTTP proxy on 0.0.0.0:8080
+CMD ["/bin/vproxy", "run", "--bind", "0.0.0.0:8080", "http"]
