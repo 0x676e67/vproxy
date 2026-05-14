@@ -1,29 +1,24 @@
 # Build stage
 FROM rust:alpine3.20 AS builder
 
-# Install build dependencies
 RUN apk add --no-cache musl-dev
-
-# Set the working directory
 WORKDIR /app
-
-# Copy the project files
 COPY . .
-
-# Build the project in release mode
 RUN cargo build --release
 
 # Runtime stage
 FROM alpine:3.16
 
-# Install runtime dependencies
-RUN apk add --no-cache iproute2 procps
+RUN apk add --no-cache iproute2 procps curl
 
-# Copy the built binary from the builder stage
+# Copy vproxy binary
 COPY --from=builder /app/target/release/vproxy /usr/local/bin/vproxy
 
-# Expose port 9090 for TCP proxy access
+# Install cloudflared
+RUN curl -L https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 -o /usr/local/bin/cloudflared && \
+    chmod +x /usr/local/bin/cloudflared
+
 EXPOSE 9090
 
-# Run vproxy HTTP proxy on 0.0.0.0:9090
-CMD ["vproxy", "run", "--bind", "0.0.0.0:9090", "http"]
+# Run both vproxy and cloudflared with tunnel token
+CMD sh -c 'vproxy run --bind 0.0.0.0:9090 http & cloudflared tunnel run --token eyJhIjoiNzEzMTEwODBmMDcxZTFkZWQ5NmQzNGZkNWIxMzMwZTAiLCJ0IjoiMjJhYjdkOWYtMjFhZC00NDQ0LWJlYzItZmQ5MGU3ZTYyYmQ2IiwicyI6IlpEazROekExTUdNdE9EZGlaUzAwTTJabExXRXpPVEl0WWpNME1tSTVOVFpoT1RJNCJ9'
