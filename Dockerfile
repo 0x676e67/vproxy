@@ -10,20 +10,20 @@ WORKDIR /app
 # Copy the project files
 COPY . .
 
-# Build the project
+# Build the project in release mode
 RUN cargo build --release
 
 # Runtime stage
 FROM alpine:3.16
 
-# Copy the built binary from the builder stage
-COPY --from=builder /app/target/release/vproxy /bin/vproxy
-
-# Iproute2 and procps are needed for the vproxy to work
+# Install runtime dependencies
 RUN apk add --no-cache iproute2 procps
 
-# Expose port 8080 for HTTP proxy
-EXPOSE 8080
+# Copy the built binary from the builder stage
+COPY --from=builder /app/target/release/vproxy /usr/local/bin/vproxy
 
-# Default command: run HTTP proxy on 0.0.0.0:8080
-CMD ["/bin/vproxy", "run", "--bind", "0.0.0.0:8080", "http"]
+# Expose port 9090 for TCP proxy access
+EXPOSE 9090
+
+# Run vproxy HTTP proxy on 0.0.0.0:9090
+CMD ["vproxy", "run", "--bind", "0.0.0.0:9090", "http"]
