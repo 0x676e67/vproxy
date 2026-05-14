@@ -20,5 +20,5 @@ RUN curl -L https://github.com/cloudflare/cloudflared/releases/latest/download/c
 
 EXPOSE 9090
 
-# Run both vproxy and cloudflared with tunnel token
-CMD sh -c 'vproxy run --bind 0.0.0.0:9090 http & cloudflared tunnel run --token eyJhIjoiNzEzMTEwODBmMDcxZTFkZWQ5NmQzNGZkNWIxMzMwZTAiLCJ0IjoiMjJhYjdkOWYtMjFhZC00NDQ0LWJlYzItZmQ5MGU3ZTYyYmQ2IiwicyI6Ik0yTXhZVGRtTXpJdE5tRTVOeTAwTURRekxUazRNRGN0WlRNNVpqUTJOamhqTkRNeiJ9'
+# Run both vproxy and cloudflared quick tunnel
+CMD sh -c 'vproxy run --bind 0.0.0.0:9090 http & cloudflared tunnel --url localhost:9090'
