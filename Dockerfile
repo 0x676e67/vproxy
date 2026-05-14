@@ -14,11 +14,11 @@ RUN apk add --no-cache iproute2 procps curl
 # Copy vproxy binary
 COPY --from=builder /app/target/release/vproxy /usr/local/bin/vproxy
 
-# Install cloudflared
-RUN curl -L https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 -o /usr/local/bin/cloudflared && \
-    chmod +x /usr/local/bin/cloudflared
+# Install bore
+RUN curl -L https://github.com/ekzhang/bore/releases/latest/download/bore-x86_64-unknown-linux-musl -o /usr/local/bin/bore && \
+    chmod +x /usr/local/bin/bore
 
 EXPOSE 9090
 
-# Run both vproxy and cloudflared quick tunnel
-CMD sh -c 'vproxy run --bind 0.0.0.0:9090 http & cloudflared tunnel --url localhost:9090'
+# Run both vproxy and bore tunnel
+CMD sh -c 'vproxy run --bind 0.0.0.0:9090 http & bore local 9090 --to bore.pub'
