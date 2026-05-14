@@ -3,5 +3,4 @@ build:
     dockerfile: Dockerfile
 run:
   command: /bin/vproxy run --bind 0.0.0.0:8080 http
-  expose:
-    - port: 8080
+  port: 8080
