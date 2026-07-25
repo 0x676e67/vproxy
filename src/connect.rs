@@ -172,6 +172,11 @@ impl Connector {
             extension,
         }
     }
+
+    #[inline]
+    pub(crate) fn connect_timeout(&self) -> Duration {
+        self.connect_timeout
+    }
 }
 
 // ==== impl TcpConnector ====
@@ -467,6 +472,112 @@ impl UdpConnector<'_> {
         }
     }
 
+    fn bind_ip_for_target(&self, target: SocketAddr) -> Option<IpAddr> {
+        match self.inner.cidr {
+            Some(IpCidr::V4(cidr)) if target.is_ipv4() => Some(IpAddr::V4(
+                assign_ipv4_from_extension(cidr, self.inner.cidr_range, self.extension),
+            )),
+            Some(IpCidr::V6(cidr)) if target.is_ipv6() => Some(IpAddr::V6(
+                assign_ipv6_from_extension(cidr, self.inner.cidr_range, self.extension),
+            )),
+            _ => match &self.inner.fallback {
+                Some(Fallback::Address(addr)) if addr.is_ipv4() == target.is_ipv4() => Some(*addr),
+                #[cfg(unix)]
+                Some(Fallback::Interface(_)) => Some(if target.is_ipv4() {
+                    IpAddr::V4(Ipv4Addr::UNSPECIFIED)
+                } else {
+                    IpAddr::V6(Ipv6Addr::UNSPECIFIED)
+                }),
+                None if self.inner.cidr.is_none() => Some(if target.is_ipv4() {
+                    IpAddr::V4(Ipv4Addr::UNSPECIFIED)
+                } else {
+                    IpAddr::V6(Ipv6Addr::UNSPECIFIED)
+                }),
+                _ => None,
+            },
+        }
+    }
+
+    async fn try_connect_targets(
+        &self,
+        targets: &[SocketAddr],
+        preferred_family: bool,
+    ) -> std::io::Result<UdpSocket> {
+        let mut last_err = None;
+        for &target in targets {
+            let is_preferred = self.inner.cidr.is_some_and(|cidr| {
+                matches!(
+                    (cidr, target),
+                    (IpCidr::V4(_), SocketAddr::V4(_)) | (IpCidr::V6(_), SocketAddr::V6(_))
+                )
+            });
+            if is_preferred != preferred_family {
+                continue;
+            }
+            let Some(bind_ip) = self.bind_ip_for_target(target) else {
+                continue;
+            };
+            let socket = match self.create_socket(bind_ip).await {
+                Ok(socket) => socket,
+                Err(error) => {
+                    last_err = Some(error);
+                    continue;
+                }
+            };
+            match socket.connect(target).await {
+                Ok(()) => {
+                    configure_udp_path(&socket)?;
+                    tracing::info!("[UDP] connected {} -> {}", socket.local_addr()?, target);
+                    return Ok(socket);
+                }
+                Err(error) => last_err = Some(error),
+            }
+        }
+        Err(error(last_err))
+    }
+
+    async fn try_connect_fallback(&self, targets: &[SocketAddr]) -> std::io::Result<UdpSocket> {
+        let Some(Fallback::Address(fallback)) = &self.inner.fallback else {
+            return Err(error(None));
+        };
+        let mut last_err = None;
+        for &target in targets {
+            if fallback.is_ipv4() != target.is_ipv4() {
+                continue;
+            }
+            let socket = match self.create_socket(*fallback).await {
+                Ok(socket) => socket,
+                Err(error) => {
+                    last_err = Some(error);
+                    continue;
+                }
+            };
+            match socket.connect(target).await {
+                Ok(()) => {
+                    configure_udp_path(&socket)?;
+                    tracing::info!("[UDP] connected {} -> {}", socket.local_addr()?, target);
+                    return Ok(socket);
+                }
+                Err(error) => last_err = Some(error),
+            }
+        }
+        Err(error(last_err))
+    }
+
+    pub(crate) async fn connect(&self, targets: &[SocketAddr]) -> std::io::Result<UdpSocket> {
+        if self.inner.cidr.is_some() {
+            match self.try_connect_targets(targets, true).await {
+                Ok(socket) => return Ok(socket),
+                Err(error) if targets.is_empty() => return Err(error),
+                Err(_) => {}
+            }
+            if let Ok(socket) = self.try_connect_fallback(targets).await {
+                return Ok(socket);
+            }
+        }
+        self.try_connect_targets(targets, false).await
+    }
+
     /// Binds UDP sockets based on the configured CIDR and fallback IP address.
     /// If both CIDR and fallback are provided and belong to different IP families,
     /// it creates two sockets for dual-stack support. Otherwise, it creates a single
@@ -623,6 +734,17 @@ impl UdpConnector<'_> {
             )),
         }
     }
+}
+
+fn configure_udp_path(socket: &UdpSocket) -> std::io::Result<()> {
+    let state = quinn_udp::UdpSocketState::new(socket.into())?;
+    if state.may_fragment() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "the platform cannot guarantee that UDP datagrams will not be fragmented",
+        ));
+    }
+    Ok(())
 }
 
 // ==== impl HttpConnector ====
@@ -803,6 +925,9 @@ fn assign_ipv6_from_extension(
 fn assign_rand_ipv4(cidr: Ipv4Cidr) -> Ipv4Addr {
     let mut ipv4 = u32::from(cidr.first_address());
     let prefix_len = cidr.network_length();
+    if u32::from(prefix_len) >= Ipv4Addr::BITS {
+        return cidr.first_address();
+    }
     let rand: u32 = rand::random_u32();
     let net_part = (ipv4 >> (32 - prefix_len)) << (32 - prefix_len);
     let host_part = (rand << prefix_len) >> prefix_len;
@@ -817,6 +942,9 @@ fn assign_rand_ipv4(cidr: Ipv4Cidr) -> Ipv4Addr {
 fn assign_rand_ipv6(cidr: Ipv6Cidr) -> Ipv6Addr {
     let mut ipv6 = u128::from(cidr.first_address());
     let prefix_len = cidr.network_length();
+    if u32::from(prefix_len) >= Ipv6Addr::BITS {
+        return cidr.first_address();
+    }
     let rand: u128 = rand::random_u128();
     let net_part = (ipv6 >> (128 - prefix_len)) << (128 - prefix_len);
     let host_part = (rand << prefix_len) >> prefix_len;
@@ -896,6 +1024,55 @@ fn extract_value_from_extension(extension: Extension) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn udp_target_prefers_cidr_family_and_uses_fallback_for_the_other_family() {
+        let connector = Connector::new(
+            Some("2001:db8::1/128".parse().expect("valid IPv6 CIDR")),
+            None,
+            Some(Fallback::Address(Ipv4Addr::LOCALHOST.into())),
+            10,
+            #[cfg(any(target_os = "android", target_os = "fuchsia", target_os = "linux"))]
+            None,
+            None,
+        );
+        let udp = connector.udp(Extension::None);
+
+        assert_eq!(
+            udp.bind_ip_for_target("192.0.2.1:443".parse().expect("valid IPv4 target")),
+            Some(Ipv4Addr::LOCALHOST.into())
+        );
+        assert_eq!(
+            udp.bind_ip_for_target("[2001:db8::2]:443".parse().expect("valid IPv6 target")),
+            Some("2001:db8::1".parse().expect("valid IPv6 address"))
+        );
+    }
+
+    #[tokio::test]
+    async fn udp_connect_uses_same_family_fallback_when_cidr_bind_fails() {
+        let target = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0))
+            .await
+            .expect("bind UDP target");
+        let connector = Connector::new(
+            Some("192.0.2.1/32".parse().expect("valid IPv4 CIDR")),
+            None,
+            Some(Fallback::Address(Ipv4Addr::LOCALHOST.into())),
+            10,
+            #[cfg(any(target_os = "android", target_os = "fuchsia", target_os = "linux"))]
+            None,
+            None,
+        );
+
+        let socket = connector
+            .udp(Extension::None)
+            .connect(&[target.local_addr().expect("target address")])
+            .await
+            .expect("fallback connects");
+        assert_eq!(
+            socket.local_addr().expect("local address").ip(),
+            IpAddr::V4(Ipv4Addr::LOCALHOST)
+        );
+    }
 
     #[test]
     fn test_assign_ipv4_with_fixed_combined() {
