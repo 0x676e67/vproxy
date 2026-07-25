@@ -71,11 +71,11 @@ async fn add_route(handle: Handle, cidr: &IpCidr) -> Result<(), Error> {
             && header.table == LOCAL_TABLE_ID
         {
             for attr in route.attributes.iter() {
-                if let RouteAttribute::Destination(dest) = attr {
-                    if dest == &route_address {
-                        tracing::info!("Route {} already exists on loopback interface", cidr);
-                        return Ok(());
-                    }
+                if let RouteAttribute::Destination(dest) = attr
+                    && dest == &route_address
+                {
+                    tracing::info!("Route {} already exists on loopback interface", cidr);
+                    return Ok(());
                 }
             }
         }
@@ -116,10 +116,10 @@ async fn add_route(handle: Handle, cidr: &IpCidr) -> Result<(), Error> {
 /// with the appropriate parameters. If the `sysctl` command fails, it logs an
 /// error message.
 pub fn sysctl_ipv6_no_local_bind(subnet: &IpCidr) {
-    if subnet.is_ipv6() {
-        if let Err(err) = execute_sysctl("net.ipv6.ip_nonlocal_bind", "1") {
-            tracing::trace!("Failed to execute sysctl: {}", err)
-        }
+    if subnet.is_ipv6()
+        && let Err(err) = execute_sysctl("net.ipv6.ip_nonlocal_bind", "1")
+    {
+        tracing::trace!("Failed to execute sysctl: {}", err)
     }
 }
 
@@ -128,10 +128,10 @@ pub fn sysctl_ipv6_no_local_bind(subnet: &IpCidr) {
 /// with the appropriate parameters. If the `sysctl` command fails, it logs an
 /// error message.
 pub fn sysctl_ipv6_all_enable_ipv6(subnet: &IpCidr) {
-    if subnet.is_ipv6() {
-        if let Err(err) = execute_sysctl("net.ipv6.conf.all.disable_ipv6", "0") {
-            tracing::trace!("Failed to execute sysctl: {}", err)
-        }
+    if subnet.is_ipv6()
+        && let Err(err) = execute_sysctl("net.ipv6.conf.all.disable_ipv6", "0")
+    {
+        tracing::trace!("Failed to execute sysctl: {}", err)
     }
 }
 
