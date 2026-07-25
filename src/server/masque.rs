@@ -33,11 +33,12 @@ use tokio::{
     time::timeout,
 };
 
-use super::{AuthMode, Context, Server, http::genca};
+use super::{AuthMode, Context, Handle, Server, http::genca};
 use crate::{connect::Connector, ext::Extension};
 
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
+const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_UDP_PAYLOAD: usize = 1_500;
 const DATAGRAM_CAPSULE_TYPE: u64 = 0;
 const MAX_CAPSULE_DATAGRAM_SIZE: usize = MAX_UDP_PAYLOAD + 8;
@@ -228,7 +229,7 @@ impl MasqueServer {
 }
 
 impl Server for MasqueServer {
-    async fn start(self) -> io::Result<()> {
+    async fn start(self, handle: Handle) -> io::Result<()> {
         tracing::info!(
             "HTTP/3 CONNECT-UDP proxy server listening on {}",
             self.endpoint.local_addr()?
@@ -236,6 +237,7 @@ impl Server for MasqueServer {
         let mut connections = JoinSet::new();
         loop {
             tokio::select! {
+                _ = handle.wait_graceful_shutdown() => break,
                 Some(result) = connections.join_next(), if !connections.is_empty() => {
                     if let Err(error) = result {
                         tracing::debug!("[MASQUE] connection task failed: {error}");
@@ -251,15 +253,33 @@ impl Server for MasqueServer {
                     };
                     let auth = self.auth.clone();
                     let connector = self.connector.clone();
-                    connections.spawn(async move {
+                    let connection_handle = handle.clone();
+                    connections.spawn_on(async move {
                         let _permit = permit;
-                        if let Err(error) = serve_incoming(incoming, auth, connector).await {
+                        if let Err(error) =
+                            serve_incoming(incoming, auth, connector, connection_handle).await
+                        {
                             tracing::debug!("[MASQUE] connection failed: {error}");
                         }
-                    });
+                    }, &pingora_runtime::current_handle());
                 }
             }
         }
+
+        self.endpoint.set_server_config(None);
+        if timeout(SHUTDOWN_TIMEOUT, async {
+            while connections.join_next().await.is_some() {}
+        })
+        .await
+        .is_err()
+        {
+            tracing::debug!("[MASQUE] connection drain timed out");
+            connections.abort_all();
+            while connections.join_next().await.is_some() {}
+        }
+        self.endpoint.close(0u32.into(), b"server shutdown");
+        self.endpoint.wait_idle().await;
+        Ok(())
     }
 }
 
@@ -298,28 +318,39 @@ async fn serve_incoming(
     incoming: Incoming,
     auth: Arc<AuthMode>,
     connector: Arc<Connector>,
+    handle: Handle,
 ) -> Result<(), BoxError> {
-    let connection = timeout(HANDSHAKE_TIMEOUT, incoming).await??;
+    let connection = tokio::select! {
+        _ = handle.wait_graceful_shutdown() => return Ok(()),
+        connection = timeout(HANDSHAKE_TIMEOUT, incoming) => connection??,
+    };
     let raw_connection = connection.clone();
     let mut builder = h3::server::builder();
     // RFC 9298 requires both extended CONNECT and HTTP Datagram support.
     // https://www.rfc-editor.org/rfc/rfc9298.html#section-3
     builder.enable_extended_connect(true).enable_datagram(true);
-    let mut h3_connection = timeout(
-        HANDSHAKE_TIMEOUT,
-        builder.build(h3_quinn::Connection::new(connection)),
-    )
-    .await??;
+    let mut h3_connection = tokio::select! {
+        _ = handle.wait_graceful_shutdown() => return Ok(()),
+        connection = timeout(
+            HANDSHAKE_TIMEOUT,
+            builder.build(h3_quinn::Connection::new(connection)),
+        ) => connection??,
+    };
     let sessions = Sessions::default();
-    let mut datagram_task = AbortOnDrop(tokio::spawn(process_datagrams(
-        h3_connection.get_datagram_reader(),
-        sessions.clone(),
-    )));
+    let mut datagram_task = AbortOnDrop(pingora_runtime::current_handle().spawn(
+        process_datagrams(h3_connection.get_datagram_reader(), sessions.clone()),
+    ));
     let mut tunnels = JoinSet::new();
 
+    let mut graceful = false;
     let result = async {
         loop {
             let resolver = tokio::select! {
+                _ = handle.wait_graceful_shutdown() => {
+                    graceful = true;
+                    h3_connection.shutdown(0).await?;
+                    break Ok(());
+                }
                 result = h3_connection.accept() => result?,
                 result = &mut datagram_task.0 => {
                     break match result {
@@ -350,14 +381,19 @@ async fn serve_incoming(
                 sessions.clone(),
                 connector.clone(),
                 extension,
+                handle.clone(),
             ));
         }
     }
     .await;
 
-    raw_connection.close(0u32.into(), b"proxy connection finished");
+    if graceful {
+        while tunnels.join_next().await.is_some() {}
+    } else {
+        tunnels.abort_all();
+    }
     drop(datagram_task);
-    tunnels.abort_all();
+    raw_connection.close(0u32.into(), b"proxy connection finished");
     result
 }
 
@@ -368,6 +404,7 @@ async fn handle_request<T>(
     sessions: Sessions,
     connector: Arc<Connector>,
     extension: Extension,
+    handle: Handle,
 ) -> Result<(), BoxError>
 where
     T: BidiStream<Bytes> + Send + 'static,
@@ -393,7 +430,7 @@ where
             return reject_proxy_error(&mut stream, ProxyError::from_io(&error)).await;
         }
     };
-    run_tunnel(stream, connection, sessions, socket).await
+    run_tunnel(stream, connection, sessions, socket, handle).await
 }
 
 async fn authenticate(auth: &AuthMode, request: &Request<()>) -> Option<Extension> {
@@ -551,6 +588,7 @@ async fn run_tunnel<T>(
     connection: quinn::Connection,
     sessions: Sessions,
     socket: Arc<UdpSocket>,
+    handle: Handle,
 ) -> Result<(), BoxError>
 where
     T: BidiStream<Bytes> + Send + 'static,
@@ -579,6 +617,10 @@ where
     let mut capsules = CapsuleDecoder::default();
     loop {
         tokio::select! {
+            _ = handle.wait_graceful_shutdown() => {
+                stream.finish().await?;
+                return Ok(());
+            }
             signal = signals.recv() => {
                 match signal {
                     Some(TunnelSignal::DatagramError) => {

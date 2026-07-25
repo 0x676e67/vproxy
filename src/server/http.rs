@@ -25,6 +25,7 @@ use tokio::{
     io::{AsyncRead, AsyncWrite, AsyncWriteExt},
     net::{TcpListener, TcpSocket, TcpStream},
 };
+use tokio_util::task::TaskTracker;
 use tracing::{Level, instrument};
 
 use self::{
@@ -33,7 +34,9 @@ use self::{
     error::Error,
     tls::{RustlsAcceptor, RustlsConfig},
 };
-use super::{Acceptor, Connector, Context, Server};
+use super::{
+    Acceptor, Connector, Context, Handle, Server, drain_connections, log_connection_result,
+};
 use crate::{connect::TcpConnector, ext::Extension};
 
 /// HTTP acceptor.
@@ -145,17 +148,32 @@ where
     A::Stream: AsyncRead + AsyncWrite + Unpin + Send,
     A::Future: Send,
 {
-    async fn start(mut self) -> std::io::Result<()> {
+    async fn start(mut self, handle: Handle) -> std::io::Result<()> {
         tracing::info!(
             "Http(s) proxy server listening on {}",
             self.listener.local_addr()?
         );
+        let mut connections = tokio::task::JoinSet::new();
 
         loop {
-            // Accept a new connection
-            let conn = HttpServer::<A>::incoming(&mut self.listener).await;
-            tokio::spawn(self.inner.clone().accept(conn));
+            tokio::select! {
+                _ = handle.wait_graceful_shutdown() => break,
+                result = connections.join_next(), if !connections.is_empty() => {
+                    if let Some(result) = result {
+                        log_connection_result(result, "HTTP");
+                    }
+                }
+                conn = HttpServer::<A>::incoming(&mut self.listener) => {
+                    connections.spawn_on(
+                        self.inner.clone().accept(conn, handle.clone()),
+                        &pingora_runtime::current_handle(),
+                    );
+                }
+            }
         }
+        drain_connections(&mut connections, "HTTP").await;
+        self.inner.shutdown().await;
+        Ok(())
     }
 }
 
@@ -165,20 +183,53 @@ where
     A::Stream: AsyncRead + AsyncWrite + Unpin + Send,
     A::Future: Send,
 {
-    async fn accept(self, (stream, socket_addr): (TcpStream, SocketAddr)) {
+    async fn accept(self, (stream, socket_addr): (TcpStream, SocketAddr), handle: Handle) {
         let acceptor = self.acceptor.clone();
         let builder = self.builder.clone();
         let handler = self.handler.clone();
 
-        if let Ok(stream) = acceptor.accept(stream).await
-            && let Err(err) = builder
-                .serve_connection_with_upgrades(
-                    TokioIo::new(stream),
-                    service_fn(|req| <Handler as Clone>::clone(&handler).proxy(socket_addr, req)),
-                )
-                .await
+        let stream = tokio::select! {
+            _ = handle.wait_graceful_shutdown() => return,
+            stream = acceptor.accept(stream) => match stream {
+                Ok(stream) => stream,
+                Err(error) => {
+                    tracing::debug!("[HTTP] failed to accept connection: {error}");
+                    return;
+                }
+            },
+        };
+        let connection = builder.serve_connection_with_upgrades(
+            TokioIo::new(stream),
+            service_fn(|request| <Handler as Clone>::clone(&handler).proxy(socket_addr, request)),
+        );
+        tokio::pin!(connection);
+        let mut shutting_down = false;
+
+        loop {
+            tokio::select! {
+                result = connection.as_mut() => {
+                    if let Err(error) = result {
+                        tracing::debug!("[HTTP] failed to serve connection: {error}");
+                    }
+                    return;
+                }
+                _ = handle.wait_graceful_shutdown(), if !shutting_down => {
+                    shutting_down = true;
+                    connection.as_mut().graceful_shutdown();
+                }
+            }
+        }
+    }
+}
+
+impl<A> HttpAcceptor<A> {
+    pub(super) async fn shutdown(&self) {
+        self.handler.tasks.close();
+        if tokio::time::timeout(Duration::from_secs(5), self.handler.tasks.wait())
+            .await
+            .is_err()
         {
-            tracing::debug!("[HTTP] failed to serve connection: {:?}", err);
+            tracing::debug!("[HTTP] upgraded connection drain timed out");
         }
     }
 }
@@ -187,6 +238,7 @@ where
 struct Handler {
     authenticator: Arc<Authenticator>,
     connector: Connector,
+    tasks: TaskTracker,
 }
 
 impl From<Context> for Handler {
@@ -199,6 +251,7 @@ impl From<Context> for Handler {
         Handler {
             authenticator: Arc::new(authenticator),
             connector: ctx.connector,
+            tasks: TaskTracker::new(),
         }
     }
 }
@@ -247,17 +300,21 @@ impl Handler {
             // connection be upgraded, so we can't return a response inside
             // `on_upgrade` future.
             if let Some(authority) = req.uri().authority().cloned() {
-                tokio::spawn(async move {
-                    match hyper::upgrade::on(req).await {
-                        Ok(upgraded) => {
-                            let connector = self.connector.tcp(extension);
-                            if let Err(e) = tunnel(socket, authority, upgraded, connector).await {
-                                tracing::debug!("[HTTP] server io error: {}", e);
-                            };
+                self.tasks.spawn_on(
+                    async move {
+                        match hyper::upgrade::on(req).await {
+                            Ok(upgraded) => {
+                                let connector = self.connector.tcp(extension);
+                                if let Err(e) = tunnel(socket, authority, upgraded, connector).await
+                                {
+                                    tracing::debug!("[HTTP] server io error: {}", e);
+                                };
+                            }
+                            Err(e) => tracing::debug!("[HTTP] upgrade error: {}", e),
                         }
-                        Err(e) => tracing::debug!("[HTTP] upgrade error: {}", e),
-                    }
-                });
+                    },
+                    &pingora_runtime::current_handle(),
+                );
 
                 Ok(Response::new(empty()))
             } else {
