@@ -33,11 +33,7 @@ Usage: vproxy
 
 Commands:
   run      Run server
-  start    Start server daemon
-  restart  Restart server daemon
-  stop     Stop server daemon
-  ps       Show server daemon process
-  log      Show server daemon log
+  systemd  Manage the systemd service
   self     Modify server installation
   help     Print this message or the help of the given subcommand(s)
 
@@ -97,20 +93,20 @@ sudo ip route add local 2001:470:e953::/48 dev lo
 # Run the server http/socks5
 vproxy run -i 2001:470:e953::/48 http
 
-# Start the daemon (runs in the background), requires sudo
-sudo vproxy start -i 2001:470:e953::/48 http
+# Install, enable, and start the systemd service
+sudo vproxy systemd start -i 2001:470:e953::/48 http
 
-# Restart the daemon, requires sudo
-sudo vproxy restart
+# Update its configuration and restart it
+sudo vproxy systemd restart -i 2001:470:e953::/48 http
 
-# Stop the daemon, requires sudo
-sudo vproxy stop
+# Stop the service
+sudo vproxy systemd stop
 
-# Show daemon log
-vproxy log
+# Show recent service logs and follow new entries
+sudo vproxy systemd logs
 
-# Show daemon status
-vproxy status
+# Show service status
+vproxy systemd status
 
 # Download and install updates to vproxy
 vproxy self update
@@ -158,6 +154,10 @@ vproxy run https --tls-cert cert.pem --tls-key key.pem -u username -p password
 ```
 
 If no TLS certificate is provided, vproxy will automatically generate a self-signed certificate for HTTPS connections.
+
+Generated certificates are stored as `cert.pem` and `key.pem` in the vproxy
+platform cache directory. A systemd service uses `/var/lib/vproxy` through
+`StateDirectory=vproxy`.
 
 3. SOCKS5 Proxy
 

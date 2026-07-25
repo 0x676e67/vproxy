@@ -5,20 +5,16 @@ use rcgen::{
 
 /// Get self-signed certificate and key.
 pub fn get_self_signed_cert() -> crate::Result<(Vec<u8>, Vec<u8>)> {
-    let temp_dir = std::env::temp_dir().join(env!("CARGO_PKG_NAME"));
-    if !temp_dir.exists() {
-        tracing::info!("Creating temp cert directory: {}", temp_dir.display());
-        std::fs::create_dir_all(&temp_dir)?;
-    }
+    let certificate_directory = crate::state::directory();
+    crate::state::prepare_private_directory(&certificate_directory)?;
 
-    let cert_path = temp_dir.join("cert.pem");
-    let key_path = temp_dir.join("key.pem");
+    let cert_path = certificate_directory.join("cert.pem");
+    let key_path = certificate_directory.join("key.pem");
     if cert_path.exists() && key_path.exists() {
-        let cert = std::fs::read_to_string(cert_path)?;
+        let cert = std::fs::read(cert_path)?;
         let key = std::fs::read(key_path)?;
-        tracing::trace!("Using existing self-signed certificate: \n{}", cert);
 
-        return Ok((cert.into_bytes(), key));
+        return Ok((cert, key));
     }
 
     let (cert, key) = generate_self_signed()?;
