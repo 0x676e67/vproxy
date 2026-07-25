@@ -96,6 +96,7 @@ func runEcho(addr string) {
 		log.Fatal(err)
 	}
 	defer connection.Close()
+	log.Printf("UDP echo listening on %s", connection.LocalAddr())
 	buffer := make([]byte, 1500)
 	for {
 		length, peer, err := connection.ReadFrom(buffer)

@@ -106,9 +106,25 @@ jobs:
           echo_pid=$!
           trap 'kill "$vproxy_pid" "$echo_pid" 2>/dev/null || true' EXIT
 
-          sleep 1
-          kill -0 "$vproxy_pid"
-          kill -0 "$echo_pid"
+          ready=false
+          for _ in {1..50}; do
+            if grep -q "proxy server listening" "$RUNNER_TEMP/vproxy.log" \
+              && grep -q "UDP echo listening" "$RUNNER_TEMP/udp-echo.log"
+            then
+              ready=true
+              break
+            fi
+            if ! kill -0 "$vproxy_pid" 2>/dev/null || ! kill -0 "$echo_pid" 2>/dev/null
+            then
+              break
+            fi
+            sleep 0.1
+          done
+          if [[ "$ready" != true ]]; then
+            cat "$RUNNER_TEMP/vproxy.log"
+            cat "$RUNNER_TEMP/udp-echo.log"
+            exit 1
+          fi
           if ! timeout 30s "$RUNNER_TEMP/bin/masque-interop" \
             -mode client \
             -proxy 'https://localhost:4433/.well-known/masque/udp/{target_host}/{target_port}/' \
