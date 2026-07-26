@@ -1,11 +1,8 @@
 use std::{future::Future, io::Error};
 
-use password::{Request, Response, Status::*};
-use tokio::net::TcpStream;
-
 use crate::{
     ext::Extension,
-    server::socks::proto::{AsyncStreamOperation, Method, UsernamePassword, handshake::password},
+    server::socks::proto::{Method, UsernamePassword},
 };
 
 /// Trait for SOCKS authentication methods.
@@ -15,8 +12,38 @@ pub trait Auth: Send {
     /// Returns the SOCKS authentication method type.
     fn method(&self) -> Method;
 
-    /// Executes the authentication process with the client.
-    fn execute(&self, stream: &mut TcpStream) -> impl Future<Output = Self::Output> + Send;
+    /// Validates credentials already decoded from the client.
+    fn authenticate(
+        &self,
+        credentials: Option<UsernamePassword>,
+    ) -> impl Future<Output = Self::Output> + Send;
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum AuthError {
+    #[error("{0}")]
+    Rejected(&'static str),
+
+    #[error(transparent)]
+    Internal(#[from] Error),
+}
+
+impl AuthError {
+    #[inline]
+    pub(super) fn is_rejected(&self) -> bool {
+        matches!(self, Self::Rejected(_))
+    }
+}
+
+impl From<AuthError> for Error {
+    fn from(error: AuthError) -> Self {
+        match error {
+            AuthError::Rejected(message) => {
+                Error::new(std::io::ErrorKind::PermissionDenied, message)
+            }
+            AuthError::Internal(error) => error,
+        }
+    }
 }
 
 /// Unified interface for different SOCKS authentication methods.
@@ -41,7 +68,7 @@ impl AuthAdaptor {
 }
 
 impl Auth for AuthAdaptor {
-    type Output = std::io::Result<Extension>;
+    type Output = Result<Extension, AuthError>;
 
     #[inline]
     fn method(&self) -> Method {
@@ -52,10 +79,10 @@ impl Auth for AuthAdaptor {
     }
 
     #[inline]
-    async fn execute(&self, stream: &mut TcpStream) -> Self::Output {
+    async fn authenticate(&self, credentials: Option<UsernamePassword>) -> Self::Output {
         match self {
-            Self::NoAuth(auth) => auth.execute(stream).await,
-            Self::Password(auth) => auth.execute(stream).await,
+            Self::NoAuth(auth) => auth.authenticate(credentials).await,
+            Self::Password(auth) => auth.authenticate(credentials).await,
         }
     }
 }
@@ -64,7 +91,7 @@ impl Auth for AuthAdaptor {
 pub struct NoAuth;
 
 impl Auth for NoAuth {
-    type Output = std::io::Result<Extension>;
+    type Output = Result<Extension, AuthError>;
 
     #[inline]
     fn method(&self) -> Method {
@@ -72,50 +99,56 @@ impl Auth for NoAuth {
     }
 
     #[inline]
-    async fn execute(&self, _stream: &mut TcpStream) -> Self::Output {
-        Ok(Extension::None)
+    async fn authenticate(&self, credentials: Option<UsernamePassword>) -> Self::Output {
+        if credentials.is_none() {
+            Ok(Extension::None)
+        } else {
+            Err(AuthError::Rejected(
+                "unexpected credentials for no-auth method",
+            ))
+        }
     }
 }
 
 /// Username and password as the socks5 handshake method.
 pub struct Password {
-    inner: UsernamePassword,
+    username: String,
+    password: String,
 }
 
 impl Password {
     /// Create a new [`PasswordAuth`] instance with the given username and password.
     pub fn new<S: Into<String>>(username: S, password: S) -> Self {
         Self {
-            inner: UsernamePassword::new(username, password),
+            username: username.into(),
+            password: password.into(),
         }
     }
 }
 
 impl Auth for Password {
-    type Output = std::io::Result<Extension>;
+    type Output = Result<Extension, AuthError>;
 
     #[inline]
     fn method(&self) -> Method {
         Method::Password
     }
 
-    async fn execute(&self, stream: &mut TcpStream) -> Self::Output {
-        let req = Request::retrieve_from_async_stream(stream).await?;
-
-        // Check if the username and password are correct
-        let is_equal = req.user_pass.username.starts_with(&self.inner.username)
-            && req.user_pass.password.eq(&self.inner.password);
-
-        let resp = Response::new(if is_equal { Succeeded } else { Failed });
-        resp.write_to_async_stream(stream).await?;
+    async fn authenticate(&self, credentials: Option<UsernamePassword>) -> Self::Output {
+        let credentials =
+            credentials.ok_or(AuthError::Rejected("username and password are required"))?;
+        let is_equal = credentials.username.starts_with(self.username.as_bytes())
+            && credentials.password.as_ref() == self.password.as_bytes();
         if is_equal {
-            let extension = Extension::try_from(&self.inner.username, req.user_pass.username)
+            let username = std::str::from_utf8(&credentials.username)
+                .map_err(|_| AuthError::Rejected("username or password is incorrect"))?;
+            let extension = Extension::try_from(&self.username, username)
                 .await
-                .map_err(|_| Error::other("failed to parse extension"))?;
+                .map_err(|error| AuthError::Internal(Error::other(error)))?;
 
             Ok(extension)
         } else {
-            Err(Error::other("username or password is incorrect"))
+            Err(AuthError::Rejected("username or password is incorrect"))
         }
     }
 }

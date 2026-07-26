@@ -1,23 +1,32 @@
 mod address;
+mod codec;
 mod command;
 mod reply;
-mod request;
-mod response;
 mod udp;
 
 pub mod handshake;
 
-use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
+use tokio::io::{AsyncWrite, AsyncWriteExt};
 
 pub use self::{
     address::Address,
+    codec::{ClientFrame, ClientFrameKind, MAX_CLIENT_FRAME_LEN, ServerFrame, SocksCodec},
     command::Command,
     handshake::{Method, password::UsernamePassword},
     reply::Reply,
-    request::Request,
-    response::Response,
     udp::UdpHeader,
 };
+
+pub async fn write_server_frame<W>(stream: &mut W, frame: ServerFrame) -> std::io::Result<()>
+where
+    W: AsyncWrite + Unpin,
+{
+    use tokio_util::codec::Encoder;
+
+    let mut buffer = bytes::BytesMut::new();
+    SocksCodec::new().encode(frame, &mut buffer)?;
+    stream.write_all(&buffer).await
+}
 
 /// SOCKS protocol version, either 4 or 5
 #[repr(u8)]
@@ -61,23 +70,7 @@ pub trait StreamOperation {
         R: std::io::Read,
         Self: Sized;
 
-    fn write_to_buf<B: bytes::BufMut>(&self, buf: &mut B);
+    fn write_to_buf<B: bytes::BufMut>(&self, buf: &mut B) -> std::io::Result<()>;
 
     fn len(&self) -> usize;
-}
-
-pub trait AsyncStreamOperation: StreamOperation {
-    async fn retrieve_from_async_stream<R>(r: &mut R) -> std::io::Result<Self>
-    where
-        R: AsyncRead + Unpin + Send,
-        Self: Sized;
-
-    async fn write_to_async_stream<W>(&self, w: &mut W) -> std::io::Result<()>
-    where
-        W: AsyncWrite + Unpin + Send,
-    {
-        let mut buf = bytes::BytesMut::with_capacity(self.len());
-        self.write_to_buf(&mut buf);
-        w.write_all(&buf).await
-    }
 }
