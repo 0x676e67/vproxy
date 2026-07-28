@@ -518,12 +518,15 @@ impl UdpConnector<'_> {
                     (IpCidr::V4(_), SocketAddr::V4(_)) | (IpCidr::V6(_), SocketAddr::V6(_))
                 )
             });
+
             if is_preferred != preferred_family {
                 continue;
             }
+
             let Some(bind_ip) = self.bind_ip_for_target(target) else {
                 continue;
             };
+
             let socket = match self.create_socket(bind_ip).await {
                 Ok(socket) => socket,
                 Err(error) => {
@@ -531,6 +534,7 @@ impl UdpConnector<'_> {
                     continue;
                 }
             };
+
             match socket.connect(target).await {
                 Ok(()) => {
                     configure_udp_path(&socket)?;
@@ -547,11 +551,14 @@ impl UdpConnector<'_> {
         let Some(Fallback::Address(fallback)) = &self.inner.fallback else {
             return Err(error(None));
         };
+
         let mut last_err = None;
+
         for &target in targets {
             if fallback.is_ipv4() != target.is_ipv4() {
                 continue;
             }
+
             let socket = match self.create_socket(*fallback).await {
                 Ok(socket) => socket,
                 Err(error) => {
@@ -559,6 +566,7 @@ impl UdpConnector<'_> {
                     continue;
                 }
             };
+
             match socket.connect(target).await {
                 Ok(()) => {
                     configure_udp_path(&socket)?;
@@ -568,6 +576,7 @@ impl UdpConnector<'_> {
                 Err(error) => last_err = Some(error),
             }
         }
+
         Err(error(last_err))
     }
 
