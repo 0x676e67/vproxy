@@ -22,13 +22,16 @@ use h3_datagram::{
 };
 use http::{
     Request, Response, StatusCode,
-    header::{PROXY_AUTHENTICATE, PROXY_AUTHORIZATION},
+    header::{
+        CONTENT_LENGTH, CONTENT_TYPE, PROXY_AUTHENTICATE, PROXY_AUTHORIZATION, TRANSFER_ENCODING,
+    },
 };
 use quinn::{Endpoint, Incoming, ServerConfig, TransportConfig, crypto::rustls::QuicServerConfig};
 use rustls::ServerConfig as TlsServerConfig;
+use sfv::{BareItem, Item, Parser};
 use tokio::{
     net::UdpSocket,
-    sync::{Semaphore, mpsc},
+    sync::{OwnedSemaphorePermit, Semaphore, mpsc},
     task::{JoinHandle, JoinSet},
     time::timeout,
 };
@@ -49,7 +52,7 @@ pub struct MasqueServer {
     endpoint: Endpoint,
     auth: Arc<AuthMode>,
     connector: Arc<Connector>,
-    connection_limit: Arc<Semaphore>,
+    tunnel_limit: Arc<Semaphore>,
 }
 
 struct SessionRegistration {
@@ -222,7 +225,7 @@ impl MasqueServer {
             endpoint,
             auth: Arc::new(ctx.auth),
             connector: Arc::new(ctx.connector),
-            connection_limit: Arc::new(Semaphore::new(concurrent)),
+            tunnel_limit: Arc::new(Semaphore::new(concurrent)),
         })
     }
 }
@@ -245,15 +248,13 @@ impl Server for MasqueServer {
                     let Some(incoming) = incoming else {
                         return Ok(());
                     };
-                    let Ok(permit) = self.connection_limit.clone().try_acquire_owned() else {
-                        incoming.refuse();
-                        continue;
-                    };
                     let auth = self.auth.clone();
                     let connector = self.connector.clone();
+                    let tunnel_limit = self.tunnel_limit.clone();
                     connections.spawn(async move {
-                        let _permit = permit;
-                        if let Err(error) = serve_incoming(incoming, auth, connector).await {
+                        if let Err(error) =
+                            serve_incoming(incoming, auth, connector, tunnel_limit).await
+                        {
                             tracing::debug!("[MASQUE] connection failed: {error}");
                         }
                     });
@@ -298,6 +299,7 @@ async fn serve_incoming(
     incoming: Incoming,
     auth: Arc<AuthMode>,
     connector: Arc<Connector>,
+    tunnel_limit: Arc<Semaphore>,
 ) -> Result<(), BoxError> {
     let connection = timeout(HANDSHAKE_TIMEOUT, incoming).await??;
     let raw_connection = connection.clone();
@@ -349,6 +351,7 @@ async fn serve_incoming(
                 raw_connection.clone(),
                 sessions.clone(),
                 connector.clone(),
+                tunnel_limit.clone(),
                 extension,
             ));
         }
@@ -367,6 +370,7 @@ async fn handle_request<T>(
     connection: quinn::Connection,
     sessions: Sessions,
     connector: Arc<Connector>,
+    tunnel_limit: Arc<Semaphore>,
     extension: Extension,
 ) -> Result<(), BoxError>
 where
@@ -374,6 +378,12 @@ where
 {
     let Some(target) = requested_target(&request) else {
         return reject_request(&mut stream).await;
+    };
+    let permit = match tunnel_limit.try_acquire_owned() {
+        Ok(permit) => permit,
+        Err(_) => {
+            return reject_proxy_error(&mut stream, ProxyError::ConnectionLimitReached).await;
+        }
     };
     let connect_timeout = connector.connect_timeout();
     let targets = match timeout(connect_timeout, tokio::net::lookup_host(&target)).await {
@@ -393,7 +403,7 @@ where
             return reject_proxy_error(&mut stream, ProxyError::from_io(&error)).await;
         }
     };
-    run_tunnel(stream, connection, sessions, socket).await
+    run_tunnel(stream, connection, sessions, socket, permit).await
 }
 
 async fn authenticate(auth: &AuthMode, request: &Request<()>) -> Option<Extension> {
@@ -420,6 +430,9 @@ fn requested_target(request: &Request<()>) -> Option<(String, u16)> {
         || request.uri().scheme_str() != Some("https")
         || request.uri().authority().is_none()
         || request.uri().query().is_some()
+        || [CONTENT_LENGTH, CONTENT_TYPE, TRANSFER_ENCODING]
+            .iter()
+            .any(|name| request.headers().contains_key(name))
         || !uses_capsule_protocol(request)
     {
         return None;
@@ -448,13 +461,11 @@ fn uses_capsule_protocol(request: &Request<()>) -> bool {
     if values.next().is_some() {
         return false;
     }
-    value.to_str().ok().is_some_and(|value| {
-        let value = value.trim();
-        value == "?1"
-            || value
-                .strip_prefix("?1")
-                .is_some_and(|rest| rest.starts_with(';'))
-    })
+    value
+        .to_str()
+        .ok()
+        .and_then(|value| Parser::new(value).parse::<Item>().ok())
+        .is_some_and(|item| item.bare_item == BareItem::Boolean(true))
 }
 
 async fn reject_authentication<T>(stream: &mut RequestStream<T, Bytes>) -> Result<(), BoxError>
@@ -496,6 +507,7 @@ enum ProxyError {
     ConnectionRefused,
     ConnectionTimeout,
     DestinationUnavailable,
+    ConnectionLimitReached,
 }
 
 impl ProxyError {
@@ -519,6 +531,9 @@ impl ProxyError {
             Self::ConnectionTimeout => (StatusCode::GATEWAY_TIMEOUT, "connection_timeout"),
             Self::DestinationUnavailable => {
                 (StatusCode::SERVICE_UNAVAILABLE, "destination_unavailable")
+            }
+            Self::ConnectionLimitReached => {
+                (StatusCode::SERVICE_UNAVAILABLE, "connection_limit_reached")
             }
         }
     }
@@ -551,6 +566,7 @@ async fn run_tunnel<T>(
     connection: quinn::Connection,
     sessions: Sessions,
     socket: Arc<UdpSocket>,
+    _permit: OwnedSemaphorePermit,
 ) -> Result<(), BoxError>
 where
     T: BidiStream<Bytes> + Send + 'static,
@@ -770,6 +786,14 @@ fn decode_varint_length(data: &[u8]) -> Option<(u64, usize)> {
 mod tests {
     use super::*;
 
+    fn connect_udp_request() -> http::request::Builder {
+        Request::builder()
+            .method(http::Method::CONNECT)
+            .uri("https://proxy.example/.well-known/masque/udp/target.example/443/")
+            .extension(Protocol::CONNECT_UDP)
+            .header("capsule-protocol", "?1")
+    }
+
     #[tokio::test]
     async fn authentication_preserves_username_session_extension() {
         let credentials =
@@ -814,6 +838,17 @@ mod tests {
             .body(())
             .expect("valid HTTP request");
         assert!(requested_target(&request).is_none());
+    }
+
+    #[test]
+    fn connect_udp_rejects_http_content_fields() {
+        for name in [CONTENT_LENGTH, CONTENT_TYPE, TRANSFER_ENCODING] {
+            let request = connect_udp_request()
+                .header(name, "0")
+                .body(())
+                .expect("valid HTTP request");
+            assert!(requested_target(&request).is_none());
+        }
     }
 
     #[test]
@@ -881,6 +916,29 @@ mod tests {
             .body(())
             .expect("valid request");
         assert!(!uses_capsule_protocol(&request));
+    }
+
+    #[test]
+    fn capsule_protocol_rejects_false_and_malformed_items() {
+        for value in ["?0", "1", "?1;", "?1;==="] {
+            let request = Request::builder()
+                .header("capsule-protocol", value)
+                .body(())
+                .expect("valid request");
+            assert!(!uses_capsule_protocol(&request), "{value}");
+        }
+    }
+
+    #[test]
+    fn tunnel_limit_counts_streams_instead_of_quic_connections() {
+        let limit = Arc::new(Semaphore::new(1));
+        let permit = limit
+            .clone()
+            .try_acquire_owned()
+            .expect("first tunnel is admitted");
+        assert!(limit.clone().try_acquire_owned().is_err());
+        drop(permit);
+        assert!(limit.try_acquire_owned().is_ok());
     }
 
     #[test]
