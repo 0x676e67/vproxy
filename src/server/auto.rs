@@ -6,8 +6,9 @@ use tokio::{
 };
 
 use super::{
-    Acceptor, Context, Server,
+    Acceptor, Context, Handle, Server, drain_connections,
     http::{HttpAcceptor, accept::DefaultAcceptor, tls::RustlsAcceptor},
+    log_connection_result,
     socks::Socks5Acceptor,
 };
 
@@ -55,44 +56,49 @@ impl AutoDetectServer {
 }
 
 impl Server for AutoDetectServer {
-    async fn start(mut self) -> std::io::Result<()> {
+    async fn start(mut self, handle: Handle) -> std::io::Result<()> {
         tracing::info!(
             "Http(s)/Socks5 proxy server listening on {}",
             self.listener.local_addr()?
         );
+        let mut connections = tokio::task::JoinSet::new();
 
         loop {
-            // Accept a new connection
-            let conn = AutoDetectServer::incoming(&mut self.listener).await;
-            let acceptor = self.acceptor.clone();
-
-            tokio::spawn(async move {
-                // Peek the first byte to determine the protocol
-                // SOCKS5 always starts with version byte 0x05
-                // TLS/HTTPS starts with binary data (< 0x41)
-                // HTTP methods start with ASCII letters (>= 0x41: GET, POST, CONNECT, etc.)
-                let mut protocol = [0u8; 1];
-                let mut buf = ReadBuf::new(&mut protocol);
-                if std::future::poll_fn(|cx| conn.0.poll_peek(cx, &mut buf))
-                    .await
-                    .is_ok()
-                {
-                    match protocol[0] {
-                        0x05 => {
-                            // ASCII '5', assuming socks5
-                            acceptor.0.accept(conn).await;
-                        }
-                        0x00..0x41 => {
-                            // ASCII < 'A', assuming https
-                            acceptor.2.accept(conn).await;
-                        }
-                        _ => {
-                            // ASCII >= 'A', assuming http
-                            acceptor.1.accept(conn).await;
-                        }
+            tokio::select! {
+                _ = handle.wait_graceful_shutdown() => break,
+                result = connections.join_next(), if !connections.is_empty() => {
+                    if let Some(result) = result {
+                        log_connection_result(result, "auto");
                     }
                 }
-            });
+                conn = AutoDetectServer::incoming(&mut self.listener) => {
+                    let acceptor = self.acceptor.clone();
+                    let connection_handle = handle.clone();
+                    connections.spawn_on(async move {
+                        // Peek the first byte to determine the protocol
+                        // SOCKS5 always starts with version byte 0x05
+                        // TLS/HTTPS starts with binary data (< 0x41)
+                        // HTTP methods start with ASCII letters (>= 0x41: GET, POST, CONNECT, etc.)
+                        let mut protocol = [0u8; 1];
+                        let mut buf = ReadBuf::new(&mut protocol);
+                        let peeked = tokio::select! {
+                            _ = connection_handle.wait_graceful_shutdown() => return,
+                            result = std::future::poll_fn(|cx| conn.0.poll_peek(cx, &mut buf)) => result,
+                        };
+                        if peeked.is_ok() {
+                            match protocol[0] {
+                                0x05 => acceptor.0.accept(conn, connection_handle).await,
+                                0x00..0x41 => acceptor.2.accept(conn, connection_handle).await,
+                                _ => acceptor.1.accept(conn, connection_handle).await,
+                            }
+                        }
+                    }, &pingora_runtime::current_handle());
+                }
+            }
         }
+        drain_connections(&mut connections, "auto").await;
+        self.acceptor.1.shutdown().await;
+        self.acceptor.2.shutdown().await;
+        Ok(())
     }
 }
