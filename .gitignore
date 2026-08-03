@@ -27,3 +27,6 @@ Cargo.lock
 scripts/
 *.py
 .venv/
+AGENTS.md
+.agents/*
+.codex/*

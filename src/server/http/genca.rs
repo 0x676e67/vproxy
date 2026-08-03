@@ -43,7 +43,11 @@ fn generate_self_signed() -> crate::Result<(Vec<u8>, Vec<u8>)> {
         KeyUsagePurpose::KeyEncipherment,
     ];
     params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
-    params.subject_alt_names = vec![SanType::DnsName("localhost".try_into()?)];
+    params.subject_alt_names = vec![
+        SanType::DnsName("localhost".try_into()?),
+        SanType::IpAddress(std::net::Ipv4Addr::LOCALHOST.into()),
+        SanType::IpAddress(std::net::Ipv6Addr::LOCALHOST.into()),
+    ];
 
     let key_pair = KeyPair::generate()?;
     let cert = params.self_signed(&key_pair)?;

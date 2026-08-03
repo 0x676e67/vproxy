@@ -65,7 +65,7 @@ impl IncomingConnection {
     /// quickly as possible.
     #[inline]
     pub fn set_linger(&self, dur: Option<Duration>) -> std::io::Result<()> {
-        self.stream.set_linger(dur)
+        socket2::SockRef::from(&self.stream).set_linger(dur)
     }
 
     /// Gets the value of the `TCP_NODELAY` option on this socket.
@@ -218,7 +218,7 @@ impl AuthenticatedStream {
     /// quickly as possible.
     #[inline]
     pub fn set_linger(&self, dur: Option<Duration>) -> std::io::Result<()> {
-        self.0.set_linger(dur)
+        socket2::SockRef::from(&self.0).set_linger(dur)
     }
 
     /// Gets the value of the `TCP_NODELAY` option on this socket.

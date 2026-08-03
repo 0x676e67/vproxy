@@ -3,7 +3,7 @@ pub mod tls;
 
 mod auth;
 mod error;
-mod genca;
+pub(super) mod genca;
 
 use std::{
     io::{self},
@@ -170,16 +170,15 @@ where
         let builder = self.builder.clone();
         let handler = self.handler.clone();
 
-        if let Ok(stream) = acceptor.accept(stream).await {
-            if let Err(err) = builder
+        if let Ok(stream) = acceptor.accept(stream).await
+            && let Err(err) = builder
                 .serve_connection_with_upgrades(
                     TokioIo::new(stream),
                     service_fn(|req| <Handler as Clone>::clone(&handler).proxy(socket_addr, req)),
                 )
                 .await
-            {
-                tracing::debug!("[HTTP] failed to serve connection: {:?}", err);
-            }
+        {
+            tracing::debug!("[HTTP] failed to serve connection: {:?}", err);
         }
     }
 }

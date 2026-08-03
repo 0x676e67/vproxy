@@ -8,7 +8,7 @@
 
 > 🚀 Help me work seamlessly with open source sharing by [sponsoring me on GitHub](https://github.com/0x676e67/0x676e67/blob/main/SPONSOR.md)
 
-A high-performance `HTTP`/`HTTPS`/`SOCKS5` proxy server
+A high-performance `HTTP`/`HTTPS`/`SOCKS5`/`HTTP/3 CONNECT-UDP` proxy server
 
 ## Features
 
@@ -20,6 +20,7 @@ A high-performance `HTTP`/`HTTPS`/`SOCKS5` proxy server
 - `IPv4`/`IPv6` dual-stack
 - Service binding to specific `CIDR` addresses
 - SOCKS5: `CONNECT`/`BIND`/`ASSOCIATE`  
+- MASQUE: HTTP/3 `CONNECT-UDP`
 
 ## Manual
 
@@ -171,7 +172,26 @@ vproxy run socks5 -u username -p password
 vproxy run --bind 0.0.0.0:1080 socks5
 ```
 
-4. Auto Protocol Detection
+4. HTTP/3 CONNECT-UDP
+
+```bash
+# A certificate is generated automatically when none is provided
+vproxy run --bind 0.0.0.0:443 quic
+
+# Production certificate and Basic proxy authentication
+vproxy run --bind 0.0.0.0:443 quic \
+  --tls-cert cert.pem --tls-key key.pem \
+  -u username -p password
+```
+
+The QUIC server implements the HTTP/3 `CONNECT-UDP` protocol from
+[RFC 9298](https://www.rfc-editor.org/rfc/rfc9298.html). Clients must trust the
+configured certificate or the generated certificate in the local vproxy
+certificate directory. When a client uses a custom root bundle, keep its
+normal platform roots in that bundle as well so TLS validation for tunneled
+HTTPS targets continues to work.
+
+5. Auto Protocol Detection
 
 ```bash
 # Auto-detect HTTP/HTTPS/SOCKS5 protocols on single port

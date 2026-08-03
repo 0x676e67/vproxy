@@ -56,15 +56,15 @@ struct Opt {
 #[derive(Subcommand)]
 pub enum Commands {
     /// Run server
-    Run(BootArgs),
+    Run(Box<BootArgs>),
 
     /// Start server daemon
     #[cfg(target_family = "unix")]
-    Start(BootArgs),
+    Start(Box<BootArgs>),
 
     /// Restart server daemon
     #[cfg(target_family = "unix")]
-    Restart(BootArgs),
+    Restart(Box<BootArgs>),
 
     /// Stop server daemon
     #[cfg(target_family = "unix")]
@@ -127,6 +127,21 @@ pub enum Proxy {
         /// Authentication type
         #[command(flatten)]
         auth: AuthMode,
+    },
+
+    /// HTTP/3 CONNECT-UDP (MASQUE) proxy
+    Quic {
+        /// Authentication type
+        #[command(flatten)]
+        auth: AuthMode,
+
+        /// TLS certificate file
+        #[arg(long, requires = "tls_key")]
+        tls_cert: Option<PathBuf>,
+
+        /// TLS private key file
+        #[arg(long, requires = "tls_cert")]
+        tls_key: Option<PathBuf>,
     },
 
     /// Auto detect server (SOCKS5, HTTP, HTTPS)
@@ -199,7 +214,8 @@ pub struct BootArgs {
     #[arg(long, short, verbatim_doc_comment)]
     fallback: Option<Fallback>,
 
-    /// Outbound connection timeout (seconds). Applies to TCP (and TLS handshake).
+    /// Outbound connection timeout (seconds).
+    /// Applies to TCP/TLS and MASQUE DNS/UDP setup.
     /// Recommended: 5–15. Too low may fail on high latency links.
     /// e.g. 5.
     #[arg(long, short = 't', default_value = "10", verbatim_doc_comment)]
@@ -237,11 +253,11 @@ fn main() -> Result<()> {
     #[cfg(target_family = "unix")]
     let daemon = daemon::Daemon::default();
     match opt.commands {
-        Commands::Run(args) => server::run(args),
+        Commands::Run(args) => server::run(*args),
         #[cfg(target_family = "unix")]
-        Commands::Start(args) => daemon.start(args),
+        Commands::Start(args) => daemon.start(*args),
         #[cfg(target_family = "unix")]
-        Commands::Restart(args) => daemon.restart(args),
+        Commands::Restart(args) => daemon.restart(*args),
         #[cfg(target_family = "unix")]
         Commands::Stop => daemon.stop(),
         #[cfg(target_family = "unix")]

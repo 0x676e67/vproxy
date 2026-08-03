@@ -62,12 +62,12 @@ impl Daemon {
             .stderr(stderr)
             .privileged_action(|| "Executed before drop privileges");
 
-        if let Ok(user) = std::env::var("SUDO_USER") {
-            if let Ok(Some(real_user)) = nix::unistd::User::from_name(&user) {
-                daemonize = daemonize
-                    .user(real_user.name.as_str())
-                    .group(real_user.gid.as_raw());
-            }
+        if let Ok(user) = std::env::var("SUDO_USER")
+            && let Ok(Some(real_user)) = nix::unistd::User::from_name(&user)
+        {
+            daemonize = daemonize
+                .user(real_user.name.as_str())
+                .group(real_user.gid.as_raw());
         }
 
         if let Some(err) = daemonize.start().err() {
@@ -91,10 +91,10 @@ impl Daemon {
             }
         }
 
-        if let Some(err) = fs::remove_file(&self.pid_file).err() {
-            if !matches!(err.kind(), io::ErrorKind::NotFound) {
-                println!("failed to remove pid file: {err}");
-            }
+        if let Some(err) = fs::remove_file(&self.pid_file).err()
+            && !matches!(err.kind(), io::ErrorKind::NotFound)
+        {
+            println!("failed to remove pid file: {err}");
         }
 
         Ok(())

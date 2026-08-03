@@ -2,6 +2,7 @@ mod auto;
 mod context;
 mod http;
 mod io;
+mod masque;
 mod socks;
 
 use std::{net::SocketAddr, time::Duration};
@@ -9,6 +10,7 @@ use std::{net::SocketAddr, time::Duration};
 use tokio::net::{TcpListener, TcpStream};
 use tracing_subscriber::{EnvFilter, FmtSubscriber};
 
+use self::masque::MasqueServer;
 use self::{auto::AutoDetectServer, context::Context, http::HttpServer, socks::Socks5Server};
 use crate::{AuthMode, BootArgs, Proxy, Result, connect::Connector};
 
@@ -118,6 +120,11 @@ pub fn run(args: BootArgs) -> Result<()> {
                         }
                         Proxy::Socks5 { auth } => {
                             Socks5Server::new(context(auth))?.start().await
+                        }
+                        Proxy::Quic { auth, tls_cert, tls_key } => {
+                            MasqueServer::new(context(auth), tls_cert, tls_key)?
+                                .start()
+                                .await
                         }
                         Proxy::Auto { auth, tls_cert, tls_key } => {
                             AutoDetectServer::new(context(auth), tls_cert, tls_key)?
