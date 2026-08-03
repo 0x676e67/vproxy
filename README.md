@@ -8,7 +8,7 @@
 
 > 🚀 Help me work seamlessly with open source sharing by [sponsoring me on GitHub](https://github.com/0x676e67/0x676e67/blob/main/SPONSOR.md)
 
-A high-performance `HTTP`/`HTTPS`/`SOCKS5`/`HTTP/3 CONNECT-UDP` proxy server
+A high-performance `HTTP`/`HTTPS`/`SOCKS5`/`MASQUE` proxy server
 
 ## Features
 
@@ -26,7 +26,7 @@ A high-performance `HTTP`/`HTTPS`/`SOCKS5`/`HTTP/3 CONNECT-UDP` proxy server
 
 ```shell
 $ vproxy -h
-A high-performance HTTP/HTTPS/SOCKS5 proxy server
+A high-performance HTTP/HTTPS/SOCKS5/MASQUE proxy server
 
 Usage: vproxy
        vproxy <COMMAND>
