@@ -15,10 +15,6 @@ pub enum Error {
     #[error(transparent)]
     SelfUpdate(#[from] self_update::errors::Error),
 
-    #[cfg(target_family = "unix")]
-    #[error(transparent)]
-    Nix(#[from] nix::Error),
-
     #[error(transparent)]
     Rcgen(#[from] rcgen::Error),
 
@@ -33,4 +29,12 @@ pub enum Error {
 
     #[error(transparent)]
     Utf8(#[from] std::string::FromUtf8Error),
+
+    #[cfg(target_os = "linux")]
+    #[error(transparent)]
+    Systemd(#[from] unitbus::Error),
+
+    #[cfg(target_os = "linux")]
+    #[error(transparent)]
+    Journal(#[from] sdjournal::SdJournalError),
 }
