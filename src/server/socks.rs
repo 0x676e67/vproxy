@@ -28,7 +28,7 @@ use self::{
     error::Error,
     proto::{Address, Reply, UdpHeader},
 };
-use super::{Acceptor, Context, Server, io};
+use super::{Acceptor, Context, Handle, Server, drain_connections, io, log_connection_result};
 use crate::connect::{Connector, TcpConnector, UdpConnector};
 
 /// SOCKS5 acceptor.
@@ -62,7 +62,7 @@ impl Socks5Acceptor {
 }
 
 impl Acceptor for Socks5Acceptor {
-    async fn accept(self, (stream, socket_addr): (TcpStream, SocketAddr)) {
+    async fn accept(self, (stream, socket_addr): (TcpStream, SocketAddr), _handle: Handle) {
         if let Err(err) = handle(
             IncomingConnection::new(stream, self.auth),
             socket_addr,
@@ -97,17 +97,31 @@ impl Socks5Server {
 }
 
 impl Server for Socks5Server {
-    async fn start(mut self) -> std::io::Result<()> {
+    async fn start(mut self, handle: Handle) -> std::io::Result<()> {
         tracing::info!(
             "Socks5 proxy server listening on {}",
             self.listener.local_addr()?
         );
+        let mut connections = tokio::task::JoinSet::new();
 
         loop {
-            // Accept a new connection
-            let conn = Socks5Server::incoming(&mut self.listener).await;
-            tokio::spawn(self.acceptor.clone().accept(conn));
+            tokio::select! {
+                _ = handle.wait_graceful_shutdown() => break,
+                result = connections.join_next(), if !connections.is_empty() => {
+                    if let Some(result) = result {
+                        log_connection_result(result, "SOCKS5");
+                    }
+                }
+                conn = Socks5Server::incoming(&mut self.listener) => {
+                    connections.spawn_on(
+                        self.acceptor.clone().accept(conn, handle.clone()),
+                        &pingora_runtime::current_handle(),
+                    );
+                }
+            }
         }
+        drain_connections(&mut connections, "SOCKS5").await;
+        Ok(())
     }
 }
 
