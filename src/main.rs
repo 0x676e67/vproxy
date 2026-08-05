@@ -5,8 +5,6 @@
 #![cfg_attr(not(test), warn(unused_crate_dependencies))]
 
 mod connect;
-#[cfg(target_family = "unix")]
-mod daemon;
 mod error;
 mod ext;
 mod oneself;
@@ -14,6 +12,9 @@ mod rand;
 #[cfg(target_os = "linux")]
 mod route;
 mod server;
+mod state;
+#[cfg(target_os = "linux")]
+mod systemd;
 
 use std::{net::SocketAddr, path::PathBuf};
 
@@ -58,25 +59,10 @@ pub enum Commands {
     /// Run server
     Run(Box<BootArgs>),
 
-    /// Start server daemon
-    #[cfg(target_family = "unix")]
-    Start(Box<BootArgs>),
-
-    /// Restart server daemon
-    #[cfg(target_family = "unix")]
-    Restart(Box<BootArgs>),
-
-    /// Stop server daemon
-    #[cfg(target_family = "unix")]
-    Stop,
-
-    /// Show server daemon process
-    #[cfg(target_family = "unix")]
-    PS,
-
-    /// Show server daemon log
-    #[cfg(target_family = "unix")]
-    Log,
+    /// Manage the systemd service
+    #[cfg(target_os = "linux")]
+    #[command(subcommand)]
+    Systemd(SystemdCommand),
 
     /// Modify server installation
     #[clap(name = "self")]
@@ -248,25 +234,46 @@ pub enum Oneself {
     Uninstall,
 }
 
+#[cfg(target_os = "linux")]
+#[derive(Subcommand)]
+pub enum SystemdCommand {
+    /// Install, enable, and start the systemd service
+    Start(Box<BootArgs>),
+
+    /// Update and restart the systemd service
+    Restart(Box<BootArgs>),
+
+    /// Stop the systemd service
+    Stop,
+
+    /// Show recent systemd logs and follow new entries
+    Logs,
+
+    /// Show the systemd service status
+    Status,
+}
+
 fn main() -> Result<()> {
     let opt = Opt::parse();
-    #[cfg(target_family = "unix")]
-    let daemon = daemon::Daemon::default();
     match opt.commands {
         Commands::Run(args) => server::run(*args),
-        #[cfg(target_family = "unix")]
-        Commands::Start(args) => daemon.start(*args),
-        #[cfg(target_family = "unix")]
-        Commands::Restart(args) => daemon.restart(*args),
-        #[cfg(target_family = "unix")]
-        Commands::Stop => daemon.stop(),
-        #[cfg(target_family = "unix")]
-        Commands::PS => daemon.status(),
-        #[cfg(target_family = "unix")]
-        Commands::Log => daemon.log(),
+        #[cfg(target_os = "linux")]
+        Commands::Systemd(command) => match command {
+            SystemdCommand::Start(args) => systemd::start(*args, systemd_server_arguments()),
+            SystemdCommand::Restart(args) => systemd::restart(*args, systemd_server_arguments()),
+            SystemdCommand::Stop => systemd::stop(),
+            SystemdCommand::Logs => systemd::log(),
+            SystemdCommand::Status => systemd::status(),
+        },
         Commands::Oneself { command } => match command {
             Oneself::Update => oneself::update(),
             Oneself::Uninstall => oneself::uninstall(),
         },
     }
+}
+
+/// Returns the server arguments after Clap validates `vproxy systemd <action>`.
+#[cfg(target_os = "linux")]
+fn systemd_server_arguments() -> impl Iterator<Item = std::ffi::OsString> {
+    std::env::args_os().skip(3)
 }

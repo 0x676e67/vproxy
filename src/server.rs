@@ -7,7 +7,12 @@ mod masque;
 mod runtime;
 mod socks;
 
-use std::{io as std_io, net::SocketAddr, num::NonZeroUsize, time::Duration};
+use std::{
+    io::{self as std_io, IsTerminal},
+    net::SocketAddr,
+    num::NonZeroUsize,
+    time::Duration,
+};
 
 use tokio::{
     net::{TcpListener, TcpStream},
@@ -85,6 +90,7 @@ pub fn run(args: BootArgs) -> Result<()> {
         FmtSubscriber::builder()
             .with_max_level(args.log)
             .with_env_filter(filter)
+            .with_ansi(std_io::stderr().is_terminal())
             .finish(),
     )?;
 
