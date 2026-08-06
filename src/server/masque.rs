@@ -36,15 +36,17 @@ use tokio::{
     time::timeout,
 };
 
-use super::{AuthMode, Context, Handle, Server, http::genca};
+use super::{
+    AuthMode, Context, Handle, MAX_UDP_RELAY_PAYLOAD_SIZE, Server, http::genca,
+    is_oversized_datagram_error,
+};
 use crate::{connect::Connector, ext::Extension};
 
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
-const MAX_UDP_PAYLOAD: usize = 1_500;
 const DATAGRAM_CAPSULE_TYPE: u64 = 0;
-const MAX_CAPSULE_DATAGRAM_SIZE: usize = MAX_UDP_PAYLOAD + 8;
+const MAX_CAPSULE_DATAGRAM_SIZE: usize = MAX_UDP_RELAY_PAYLOAD_SIZE + 8;
 
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
 type Sessions = Arc<RwLock<HashMap<StreamId, Arc<Session>>>>;
@@ -654,7 +656,7 @@ where
     // RFC 9298 forbids the proxy from fragmenting UDP payloads. One extra byte
     // lets recv detect and discard datagrams above the common Ethernet MTU.
     // https://www.rfc-editor.org/rfc/rfc9298.html#section-6
-    let mut payload = [0; MAX_UDP_PAYLOAD + 1];
+    let mut payload = [0; MAX_UDP_RELAY_PAYLOAD_SIZE + 1];
     let mut capsules = CapsuleDecoder::default();
     loop {
         tokio::select! {
@@ -742,7 +744,7 @@ async fn forward_capsule_datagram(socket: &UdpSocket, datagram: &[u8]) -> io::Re
             "missing CONNECT-UDP context ID",
         ));
     };
-    if context_id != 0 || payload.len() > MAX_UDP_PAYLOAD {
+    if context_id != 0 || payload.len() > MAX_UDP_RELAY_PAYLOAD_SIZE {
         return Ok(());
     }
     match socket.send(payload).await {
@@ -756,19 +758,6 @@ fn decode_capsule_header(data: &[u8]) -> Option<(u64, u64)> {
     let (capsule_type, type_length) = decode_varint_length(data)?;
     let (capsule_length, _) = decode_varint_length(&data[type_length..])?;
     Some((capsule_type, capsule_length))
-}
-
-fn is_oversized_datagram_error(error: &io::Error) -> bool {
-    error.raw_os_error().is_some_and(|code| {
-        #[cfg(windows)]
-        {
-            code == 10040
-        }
-        #[cfg(not(windows))]
-        {
-            code == 90
-        }
-    })
 }
 
 fn encode_target_datagram(stream_id: StreamId, payload: &[u8]) -> io::Result<Bytes> {
@@ -785,7 +774,7 @@ fn encode_target_datagram(stream_id: StreamId, payload: &[u8]) -> io::Result<Byt
 }
 
 fn usable_udp_payload(payload: &[u8], length: usize) -> Option<&[u8]> {
-    (length <= MAX_UDP_PAYLOAD).then(|| &payload[..length])
+    (length <= MAX_UDP_RELAY_PAYLOAD_SIZE).then(|| &payload[..length])
 }
 
 async fn process_datagrams<H>(
@@ -815,7 +804,7 @@ where
         if context_id != 0 {
             continue;
         }
-        if payload.len() > MAX_UDP_PAYLOAD {
+        if payload.len() > MAX_UDP_RELAY_PAYLOAD_SIZE {
             continue;
         }
         tracing::trace!(
@@ -1010,13 +999,13 @@ mod tests {
 
     #[test]
     fn drops_udp_payloads_above_the_proxy_limit() {
-        let payload = [0; MAX_UDP_PAYLOAD + 1];
+        let payload = [0; MAX_UDP_RELAY_PAYLOAD_SIZE + 1];
         assert_eq!(
-            usable_udp_payload(&payload, MAX_UDP_PAYLOAD)
+            usable_udp_payload(&payload, MAX_UDP_RELAY_PAYLOAD_SIZE)
                 .expect("payload at the limit is accepted")
                 .len(),
-            MAX_UDP_PAYLOAD
+            MAX_UDP_RELAY_PAYLOAD_SIZE
         );
-        assert!(usable_udp_payload(&payload, MAX_UDP_PAYLOAD + 1).is_none());
+        assert!(usable_udp_payload(&payload, MAX_UDP_RELAY_PAYLOAD_SIZE + 1).is_none());
     }
 }

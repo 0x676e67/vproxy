@@ -752,6 +752,24 @@ impl UdpConnector<'_> {
     }
 }
 
+#[cfg(any(target_os = "linux", target_os = "android"))]
+fn configure_udp_path(socket: &UdpSocket) -> std::io::Result<()> {
+    use rustix::net::sockopt::{
+        Ipv4PathMtuDiscovery, Ipv6PathMtuDiscovery, set_ip_mtu_discover, set_ipv6_mtu_discover,
+    };
+
+    // RFC 9298 forbids the proxy from introducing IP fragmentation. PROBE
+    // preserves datagram boundaries and reports an oversized send as EMSGSIZE.
+    // https://www.rfc-editor.org/rfc/rfc9298.html#section-6
+    if socket.peer_addr()?.is_ipv4() {
+        set_ip_mtu_discover(socket, Ipv4PathMtuDiscovery::PROBE)?;
+    } else {
+        set_ipv6_mtu_discover(socket, Ipv6PathMtuDiscovery::PROBE)?;
+    }
+    Ok(())
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "android")))]
 fn configure_udp_path(socket: &UdpSocket) -> std::io::Result<()> {
     let state = quinn_udp::UdpSocketState::new(socket.into())?;
     if state.may_fragment() {

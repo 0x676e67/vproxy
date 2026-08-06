@@ -11,6 +11,7 @@ use std::{
     },
 };
 
+use bytes::BytesMut;
 use tokio::{
     io::AsyncWriteExt,
     net::{TcpListener, TcpStream, UdpSocket},
@@ -26,9 +27,12 @@ use self::{
         connect::{self, Connect},
     },
     error::Error,
-    proto::{Address, Reply, UdpHeader},
+    proto::{Address, Reply},
 };
-use super::{Acceptor, Context, Handle, Server, drain_connections, io, log_connection_result};
+use super::{
+    Acceptor, Context, Handle, MAX_UDP_RELAY_PAYLOAD_SIZE, Server, drain_connections, io,
+    is_oversized_datagram_error, log_connection_result,
+};
 use crate::connect::{Connector, TcpConnector, UdpConnector};
 
 /// SOCKS5 acceptor.
@@ -212,7 +216,11 @@ async fn handle_connect(
     }
 }
 
-const MAX_UDP_RELAY_PACKET_SIZE: usize = 1500;
+// Keep the default bounded while allowing common 1,200-1,350 byte QUIC packets.
+// AssociatedUdpSocket adds the largest RFC 1928 header and one truncation
+// detection byte to its reusable receive buffer.
+// https://www.rfc-editor.org/rfc/rfc1928.html#section-7
+const UDP_PAYLOAD_RECV_BUFFER_SIZE: usize = MAX_UDP_RELAY_PAYLOAD_SIZE + 1;
 
 #[instrument(skip(associate, connector), level = Level::DEBUG)]
 async fn handle_udp(
@@ -220,8 +228,6 @@ async fn handle_udp(
     address: Address,
     connector: UdpConnector<'_>,
 ) -> std::io::Result<()> {
-    const BUF_SIZE: usize = MAX_UDP_RELAY_PACKET_SIZE - UdpHeader::max_serialized_len();
-
     let socket = UdpSocket::bind(SocketAddr::from((associate.local_addr()?.ip(), 0))).await?;
     let listen_addr = socket.local_addr()?;
     tracing::info!("[SOCKS5][UDP] listening on: {listen_addr}");
@@ -230,7 +236,12 @@ async fn handle_udp(
         .reply(Reply::Succeeded, Address::from(listen_addr))
         .await?;
 
-    let inbound = AssociatedUdpSocket::from((socket, BUF_SIZE));
+    let inbound = AssociatedUdpSocket::new(socket, MAX_UDP_RELAY_PAYLOAD_SIZE)?;
+    let mut inbound_buffer = vec![0; inbound.recv_buffer_size()];
+    let mut preferred_buffer = [0; UDP_PAYLOAD_RECV_BUFFER_SIZE];
+    let mut fallback_buffer = [0; UDP_PAYLOAD_RECV_BUFFER_SIZE];
+    let mut preferred_response = BytesMut::new();
+    let mut fallback_response = BytesMut::new();
     let (preferred_outbound, fallback_outbound) = connector.create_socket_dual_stack().await?;
 
     // Determine the source IP for UDP packets:
@@ -248,8 +259,7 @@ async fn handle_udp(
     loop {
         let result = tokio::select! {
             req = async {
-                inbound.set_max_packet_size(BUF_SIZE);
-                let (pkt, frag, dst_addr, src_addr) = inbound.recv_from().await?;
+                let (pkt, frag, dst_addr, src_addr) = inbound.recv_from(&mut inbound_buffer).await?;
 
                 if frag != 0 {
                     return Err(Error::from("[SOCKS5][UDP] packet fragment is not supported"));
@@ -293,13 +303,13 @@ async fn handle_udp(
                     Address::SocketAddress(target_addr) => {
                         tracing::info!("[SOCKS5][UDP] {src_addr} -> {target_addr} forwarding packet, size {}", pkt.len());
                         connector
-                            .send_packet(&pkt, target_addr, &preferred_outbound, fallback_outbound.as_ref())
+                            .send_packet(pkt, target_addr, &preferred_outbound, fallback_outbound.as_ref())
                             .await?;
                     }
                     Address::DomainAddress(domain, port) => {
                         tracing::info!("[SOCKS5][UDP] {src_addr} -> {domain}:{port} forwarding packet, size {}", pkt.len());
                         connector
-                            .send_packet(&pkt, (domain, port), &preferred_outbound, fallback_outbound.as_ref())
+                            .send_packet(pkt, (domain, port), &preferred_outbound, fallback_outbound.as_ref())
                             .await?;
                     }
                 }
@@ -308,14 +318,27 @@ async fn handle_udp(
             } => req,
 
             preferred_resp = async {
-                let mut buf = [0u8; MAX_UDP_RELAY_PACKET_SIZE];
-            let (len, remote_addr) = preferred_outbound.recv_from(&mut buf).await?;
+                let (len, remote_addr) = match preferred_outbound.recv_from(&mut preferred_buffer).await {
+                    Ok(received) => received,
+                    Err(error) if is_oversized_datagram_error(&error) => return Ok(()),
+                    Err(error) => return Err(Error::from(error)),
+                };
+                if len > MAX_UDP_RELAY_PAYLOAD_SIZE {
+                    tracing::trace!("[SOCKS5][UDP] dropping oversized packet from {remote_addr}");
+                    return Ok(());
+                }
                 let src_addr = SocketAddr::new(src_ip, src_port.load(Ordering::Relaxed));
 
                 tracing::info!("[SOCKS5][UDP] {src_addr} <- {remote_addr} feedback to incoming, packet size {len}");
 
                 inbound
-                    .send_to(&buf[..len], 0, remote_addr.into(), src_addr)
+                    .send_to_buffered(
+                        &preferred_buffer[..len],
+                        0,
+                        remote_addr.into(),
+                        src_addr,
+                        &mut preferred_response,
+                    )
                     .await
                     .map(|_| ())
                     .map_err(Error::from)
@@ -323,14 +346,27 @@ async fn handle_udp(
 
             fallback_resp = async {
                 if let Some(ref fallback_outbound) = fallback_outbound {
-                    let mut buf = [0u8; MAX_UDP_RELAY_PACKET_SIZE];
-                    let (len, remote_addr) = fallback_outbound.recv_from(&mut buf).await?;
+                    let (len, remote_addr) = match fallback_outbound.recv_from(&mut fallback_buffer).await {
+                        Ok(received) => received,
+                        Err(error) if is_oversized_datagram_error(&error) => return Ok(()),
+                        Err(error) => return Err(Error::from(error)),
+                    };
+                    if len > MAX_UDP_RELAY_PAYLOAD_SIZE {
+                        tracing::trace!("[SOCKS5][UDP] dropping oversized packet from {remote_addr}");
+                        return Ok(());
+                    }
                     let src_addr = SocketAddr::new(src_ip, src_port.load(Ordering::Relaxed));
 
                     tracing::info!("[SOCKS5][UDP] {src_addr} <- {remote_addr} feedback to incoming, packet size {len}");
 
                     inbound
-                        .send_to(&buf[..len], 0, remote_addr.into(), src_addr)
+                        .send_to_buffered(
+                            &fallback_buffer[..len],
+                            0,
+                            remote_addr.into(),
+                            src_addr,
+                            &mut fallback_response,
+                        )
                         .await
                         .map(|_| ())
                         .map_err(Error::from)
@@ -452,5 +488,80 @@ async fn handle_bind(
             tcp.shutdown().await?;
             return Err(err);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{net::SocketAddr, time::Duration};
+
+    use tokio::{net::UdpSocket, time::timeout};
+
+    use super::{Address, AssociatedUdpSocket, MAX_UDP_RELAY_PAYLOAD_SIZE};
+
+    #[tokio::test]
+    async fn udp_relay_buffer_accepts_a_quic_sized_datagram() {
+        const QUIC_PACKET_SIZE: usize = 1350;
+
+        let receiver_socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let receiver_address = receiver_socket.local_addr().unwrap();
+        let receiver =
+            AssociatedUdpSocket::new(receiver_socket, MAX_UDP_RELAY_PAYLOAD_SIZE).unwrap();
+        let mut receive_buffer = vec![0; receiver.recv_buffer_size()];
+
+        let sender_socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let sender = AssociatedUdpSocket::new(sender_socket, MAX_UDP_RELAY_PAYLOAD_SIZE).unwrap();
+        let destination = Address::from(SocketAddr::from(([127, 0, 0, 1], 443)));
+        let payload = vec![0x5a; QUIC_PACKET_SIZE];
+
+        let sent = sender
+            .send_to(&payload, 0, destination.clone(), receiver_address)
+            .await
+            .unwrap();
+        assert_eq!(sent, payload.len());
+
+        let (received, fragment, received_destination, _) = timeout(
+            Duration::from_secs(1),
+            receiver.recv_from(&mut receive_buffer),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(fragment, 0);
+        assert_eq!(received_destination, destination);
+        assert_eq!(received, payload);
+    }
+
+    #[tokio::test]
+    async fn udp_relay_drops_an_oversized_datagram_without_forwarding_a_truncated_packet() {
+        let receiver_socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let receiver_address = receiver_socket.local_addr().unwrap();
+        let receiver =
+            AssociatedUdpSocket::new(receiver_socket, MAX_UDP_RELAY_PAYLOAD_SIZE).unwrap();
+        let mut receive_buffer = vec![0; receiver.recv_buffer_size()];
+
+        let sender_socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let sender = AssociatedUdpSocket::new(sender_socket, receiver.recv_buffer_size()).unwrap();
+        let destination = Address::from(SocketAddr::from(([127, 0, 0, 1], 443)));
+        let oversized = vec![0x5a; receiver.recv_buffer_size()];
+        sender
+            .send_to(&oversized, 0, destination.clone(), receiver_address)
+            .await
+            .unwrap();
+        sender
+            .send_to(b"valid", 0, destination.clone(), receiver_address)
+            .await
+            .unwrap();
+
+        let (received, fragment, received_destination, _) = timeout(
+            Duration::from_secs(1),
+            receiver.recv_from(&mut receive_buffer),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(fragment, 0);
+        assert_eq!(received_destination, destination);
+        assert_eq!(received, b"valid");
     }
 }
