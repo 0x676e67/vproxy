@@ -1,0 +1,6 @@
+build:
+  docker:
+    dockerfile: Dockerfile
+run:
+  command: /bin/vproxy run --bind 0.0.0.0:9090 http
+  port: 9090
