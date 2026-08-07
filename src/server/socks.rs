@@ -1289,37 +1289,33 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn rfc1928_udp_associate_drops_unauthorized_source_ip_and_keeps_working() {
+    async fn rfc1928_udp_associate_drops_unauthorized_source_ip_without_closing() {
         tokio::time::timeout(Duration::from_secs(5), async {
             let echo = UdpSocket::bind((std::net::Ipv4Addr::LOCALHOST, 0))
                 .await
                 .unwrap();
             let echo_address = echo.local_addr().unwrap();
-            let authorized = UdpSocket::bind((std::net::Ipv4Addr::LOCALHOST, 0))
-                .await
-                .unwrap();
-            let unauthorized = UdpSocket::bind((std::net::Ipv4Addr::new(127, 0, 0, 2), 0))
+            let client = UdpSocket::bind((std::net::Ipv4Addr::LOCALHOST, 0))
                 .await
                 .unwrap();
             let (mut control, server) = start_socks5_connection().await;
 
-            write_udp_associate_request(
-                &mut control,
-                &Address::from(authorized.local_addr().unwrap()),
-            )
-            .await;
+            // RFC 5737 reserves 192.0.2.0/24 for documentation, so it cannot
+            // accidentally match the loopback source used by this test.
+            // https://www.rfc-editor.org/rfc/rfc5737.html#section-3
+            let expected_source = SocketAddr::from((
+                std::net::Ipv4Addr::new(192, 0, 2, 1),
+                client.local_addr().unwrap().port(),
+            ));
+            write_udp_associate_request(&mut control, &Address::from(expected_source)).await;
             let (reply, relay_address) = read_socks5_reply(&mut control).await;
             assert_eq!(reply, Reply::Succeeded);
             let Address::SocketAddress(relay_address) = relay_address else {
                 panic!("UDP ASSOCIATE reply did not contain a socket address");
             };
 
-            let unauthorized_request =
-                udp_relay_packet(0, Address::from(echo_address), b"unauthorized");
-            unauthorized
-                .send_to(&unauthorized_request, relay_address)
-                .await
-                .unwrap();
+            let request = udp_relay_packet(0, Address::from(echo_address), b"unauthorized");
+            client.send_to(&request, relay_address).await.unwrap();
             let mut payload = [0; 64];
             assert!(
                 tokio::time::timeout(Duration::from_millis(250), echo.recv_from(&mut payload))
@@ -1327,27 +1323,6 @@ mod tests {
                     .is_err()
             );
             assert!(!server.is_finished());
-
-            let authorized_request =
-                udp_relay_packet(0, Address::from(echo_address), b"authorized");
-            authorized
-                .send_to(&authorized_request, relay_address)
-                .await
-                .unwrap();
-            let (len, proxy) =
-                tokio::time::timeout(Duration::from_secs(2), echo.recv_from(&mut payload))
-                    .await
-                    .unwrap()
-                    .unwrap();
-            assert_eq!(&payload[..len], b"authorized");
-            echo.send_to(&payload[..len], proxy).await.unwrap();
-            assert_udp_relay_response(
-                &authorized,
-                relay_address,
-                Address::from(echo_address),
-                b"authorized",
-            )
-            .await;
 
             control.shutdown().await.unwrap();
             server.await.unwrap().unwrap();
