@@ -28,6 +28,27 @@ use self::{
 use crate::{AuthMode, BootArgs, Proxy, Result, connect::Connector};
 
 const CONNECTION_DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
+// A bounded default that accommodates common QUIC packets without reserving a
+// maximum-sized UDP datagram for every active relay.
+const MAX_UDP_RELAY_PAYLOAD_SIZE: usize = 1_500;
+
+fn is_oversized_datagram_error(error: &std_io::Error) -> bool {
+    let Some(code) = error.raw_os_error() else {
+        return false;
+    };
+    #[cfg(windows)]
+    {
+        code == 10040
+    }
+    #[cfg(unix)]
+    {
+        code == libc::EMSGSIZE
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        false
+    }
+}
 
 /// Trait for connection acceptors that handle incoming TCP streams.
 pub trait Acceptor {

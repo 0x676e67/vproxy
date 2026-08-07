@@ -1,18 +1,18 @@
 use std::{
     net::SocketAddr,
     pin::Pin,
-    sync::atomic::{AtomicUsize, Ordering},
     task::{Context, Poll},
     time::Duration,
 };
 
-use bytes::{Bytes, BytesMut};
+use bytes::BytesMut;
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf},
     net::{TcpStream, ToSocketAddrs, UdpSocket},
 };
 
 use super::proto::{Address, AsyncStreamOperation, Reply, Response, StreamOperation, UdpHeader};
+use crate::server::is_oversized_datagram_error;
 
 /// Socks5 connection type `UdpAssociate`
 #[derive(Debug)]
@@ -203,15 +203,6 @@ impl<S> From<UdpAssociate<S>> for TcpStream {
 /// It will add the socks5 UDP header to every UDP packet it sends, also try to
 /// parse the socks5 UDP header from any UDP packet received.
 ///
-/// The receiving buffer size for each UDP packet can be set with
-/// [`set_recv_buffer_size()`](#method.set_recv_buffer_size), and be read with
-/// [`get_max_packet_size()`](#method.get_recv_buffer_size).
-///
-/// You can create this struct by using
-/// [`AssociatedUdpSocket::from::<(UdpSocket,
-/// usize)>()`](#impl-From<UdpSocket>), the first element of the tuple is the
-/// UDP socket, the second element is the receiving buffer size.
-///
 /// This struct can also be revert into a raw tokio UDP socket with
 /// [`UdpSocket::from::<AssociatedUdpSocket>()`](#
 /// impl-From<AssociatedUdpSocket>).
@@ -220,10 +211,29 @@ impl<S> From<UdpAssociate<S>> for TcpStream {
 #[derive(Debug)]
 pub struct AssociatedUdpSocket {
     socket: UdpSocket,
-    buf_size: AtomicUsize,
+    max_payload_size: usize,
+    recv_buffer_size: usize,
 }
 
 impl AssociatedUdpSocket {
+    /// Creates a socket that accepts payloads up to `max_payload_size` bytes.
+    pub fn new(socket: UdpSocket, max_payload_size: usize) -> std::io::Result<Self> {
+        let recv_buffer_size = max_payload_size
+            .checked_add(UdpHeader::max_serialized_len())
+            .and_then(|size| size.checked_add(1))
+            .ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "SOCKS5 UDP receive buffer size overflow",
+                )
+            })?;
+        Ok(Self {
+            socket,
+            max_payload_size,
+            recv_buffer_size,
+        })
+    }
+
     /// Connects the UDP socket setting the default destination for send() and
     /// limiting packets that are read via recv from the address specified in
     /// addr.
@@ -232,17 +242,21 @@ impl AssociatedUdpSocket {
         self.socket.connect(addr).await
     }
 
-    /// Get the maximum UDP packet size, with socks5 UDP header included.
+    /// Returns the required receive buffer size, including one byte used to
+    /// detect and discard oversized datagrams.
     #[inline]
-    pub fn get_max_packet_size(&self) -> usize {
-        self.buf_size.load(Ordering::Relaxed)
+    pub const fn recv_buffer_size(&self) -> usize {
+        self.recv_buffer_size
     }
 
-    /// Set the maximum UDP packet size, with socks5 UDP header included, for
-    /// adjusting the receiving buffer size.
-    #[inline]
-    pub fn set_max_packet_size(&self, size: usize) {
-        self.buf_size.store(size, Ordering::Release);
+    fn validate_buffer(&self, buffer: &[u8]) -> std::io::Result<()> {
+        if buffer.len() < self.recv_buffer_size {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "SOCKS5 UDP receive buffer is too small",
+            ));
+        }
+        Ok(())
     }
 
     /// Receives a socks5 UDP relay packet on the socket from the remote address
@@ -252,37 +266,57 @@ impl AssociatedUdpSocket {
     /// The [`connect`](#method.connect) method will connect this socket to a
     /// remote address. This method will fail if the socket is not
     /// connected.
-    pub async fn recv(&self) -> std::io::Result<(Bytes, u8, Address)> {
-        loop {
-            let max_packet_size = self.buf_size.load(Ordering::Acquire);
-            let mut buf = vec![0; max_packet_size];
-            let len = self.socket.recv(&mut buf).await?;
-            buf.truncate(len);
-            let pkt = Bytes::from(buf);
-
-            if let Ok(header) = UdpHeader::retrieve_from_async_stream(&mut pkt.as_ref()).await {
-                let pkt = pkt.slice(header.len()..);
-                return Ok((pkt, header.frag, header.address));
+    pub async fn recv<'a>(&self, buffer: &'a mut [u8]) -> std::io::Result<(&'a [u8], u8, Address)> {
+        self.validate_buffer(buffer)?;
+        let (payload, fragment, address) = loop {
+            let len = match self.socket.recv(buffer).await {
+                Ok(len) => len,
+                Err(error) if is_oversized_datagram_error(&error) => continue,
+                Err(error) => return Err(error),
+            };
+            if len == self.recv_buffer_size {
+                continue;
             }
-        }
+            let mut packet = &buffer[..len];
+            if let Ok(header) = UdpHeader::retrieve_from_stream(&mut packet)
+                && packet.len() <= self.max_payload_size
+            {
+                break (len - packet.len()..len, header.frag, header.address);
+            }
+        };
+        Ok((&buffer[payload], fragment, address))
     }
 
     /// Receives a socks5 UDP relay packet on the socket from the any remote
     /// address. On success, returns the packet itself, the fragment number,
     /// the remote target address and the source address.
-    pub async fn recv_from(&self) -> std::io::Result<(Bytes, u8, Address, SocketAddr)> {
-        loop {
-            let max_packet_size = self.buf_size.load(Ordering::Acquire);
-            let mut buf = vec![0; max_packet_size];
-            let (len, src_addr) = self.socket.recv_from(&mut buf).await?;
-            buf.truncate(len);
-            let pkt = Bytes::from(buf);
-
-            if let Ok(header) = UdpHeader::retrieve_from_async_stream(&mut pkt.as_ref()).await {
-                let pkt = pkt.slice(header.len()..);
-                return Ok((pkt, header.frag, header.address, src_addr));
+    pub async fn recv_from<'a>(
+        &self,
+        buffer: &'a mut [u8],
+    ) -> std::io::Result<(&'a [u8], u8, Address, SocketAddr)> {
+        self.validate_buffer(buffer)?;
+        let (payload, fragment, address, source) = loop {
+            let (len, src_addr) = match self.socket.recv_from(buffer).await {
+                Ok(received) => received,
+                Err(error) if is_oversized_datagram_error(&error) => continue,
+                Err(error) => return Err(error),
+            };
+            if len == self.recv_buffer_size {
+                continue;
             }
-        }
+            let mut packet = &buffer[..len];
+            if let Ok(header) = UdpHeader::retrieve_from_stream(&mut packet)
+                && packet.len() <= self.max_payload_size
+            {
+                break (
+                    len - packet.len()..len,
+                    header.frag,
+                    header.address,
+                    src_addr,
+                );
+            }
+        };
+        Ok((&buffer[payload], fragment, address, source))
     }
 
     /// Sends a UDP relay packet to the remote address to which it is connected.
@@ -293,12 +327,30 @@ impl AssociatedUdpSocket {
         frag: u8,
         from_addr: Address,
     ) -> std::io::Result<usize> {
+        if pkt.as_ref().len() > self.max_payload_size {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "SOCKS5 UDP payload exceeds the configured limit",
+            ));
+        }
         let header = UdpHeader::new(frag, from_addr);
-        let mut buf = BytesMut::with_capacity(header.len() + pkt.as_ref().len());
+        let packet_size = header
+            .len()
+            .checked_add(pkt.as_ref().len())
+            .ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "SOCKS5 UDP packet size overflow",
+                )
+            })?;
+        let mut buf = BytesMut::with_capacity(packet_size);
         header.write_to_buf(&mut buf);
         buf.extend_from_slice(pkt.as_ref());
 
-        self.socket.send(&buf).await.map(|len| len - header.len())
+        self.socket.send(&buf).await.and_then(|len| {
+            len.checked_sub(header.len())
+                .ok_or_else(|| std::io::Error::other("UDP socket sent less than the SOCKS5 header"))
+        })
     }
 
     /// Sends a UDP relay packet to a specified remote address to which it is
@@ -310,25 +362,45 @@ impl AssociatedUdpSocket {
         from_addr: Address,
         to_addr: SocketAddr,
     ) -> std::io::Result<usize> {
-        let header = UdpHeader::new(frag, from_addr);
-        let mut buf = BytesMut::with_capacity(header.len() + pkt.as_ref().len());
-        header.write_to_buf(&mut buf);
-        buf.extend_from_slice(pkt.as_ref());
-
-        self.socket
-            .send_to(&buf, to_addr)
+        let mut buffer = BytesMut::new();
+        self.send_to_buffered(pkt, frag, from_addr, to_addr, &mut buffer)
             .await
-            .map(|len| len - header.len())
     }
-}
 
-impl From<(UdpSocket, usize)> for AssociatedUdpSocket {
-    #[inline]
-    fn from(from: (UdpSocket, usize)) -> Self {
-        AssociatedUdpSocket {
-            socket: from.0,
-            buf_size: AtomicUsize::new(from.1),
+    /// Sends a UDP relay packet using caller-owned storage.
+    pub async fn send_to_buffered<P: AsRef<[u8]>>(
+        &self,
+        pkt: P,
+        frag: u8,
+        from_addr: Address,
+        to_addr: SocketAddr,
+        buffer: &mut BytesMut,
+    ) -> std::io::Result<usize> {
+        if pkt.as_ref().len() > self.max_payload_size {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "SOCKS5 UDP payload exceeds the configured limit",
+            ));
         }
+        let header = UdpHeader::new(frag, from_addr);
+        let packet_size = header
+            .len()
+            .checked_add(pkt.as_ref().len())
+            .ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "SOCKS5 UDP packet size overflow",
+                )
+            })?;
+        buffer.clear();
+        buffer.reserve(packet_size);
+        header.write_to_buf(buffer);
+        buffer.extend_from_slice(pkt.as_ref());
+
+        self.socket.send_to(buffer, to_addr).await.and_then(|len| {
+            len.checked_sub(header.len())
+                .ok_or_else(|| std::io::Error::other("UDP socket sent less than the SOCKS5 header"))
+        })
     }
 }
 
