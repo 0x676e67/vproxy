@@ -224,7 +224,7 @@ fn reply_for_connect_error(error: &std::io::Error) -> Reply {
 }
 
 // The UDP length field is 16 bits. A buffer of this size therefore holds every
-// datagram that can reach the SOCKS5 relay without truncation.
+// ordinary datagram representable by that field without truncation.
 // https://www.rfc-editor.org/rfc/rfc768.html
 const MAX_UDP_DATAGRAM_SIZE: usize = u16::MAX as usize;
 const MAX_BIND_EARLY_DATA: usize = 64 * 1024;

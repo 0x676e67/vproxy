@@ -61,7 +61,6 @@ quinn = { version = "0.11", default-features = false, features = [
     "runtime-tokio",
     "rustls-ring",
 ] }
-quinn-udp = "0.5.14"
 
 # socks5
 bytes = "1.11.0"
@@ -76,6 +75,15 @@ snmalloc-rs = { version = "0.3.8", optional = true }
 rpmalloc = { version = "0.2.2", optional = true }
 jemallocator = { package = "tikv-jemallocator", version = "0.6.1", optional = true }
 mimalloc = { version = "0.1.48", default-features = false, optional = true }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2.189"
+
+[target.'cfg(any(target_os = "linux", target_os = "android"))'.dependencies]
+rustix = { version = "1.1.4", features = ["net"] }
+
+[target.'cfg(not(any(target_os = "linux", target_os = "android")))'.dependencies]
+quinn-udp = "0.5.14"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 sysctl = "0.7.1"
