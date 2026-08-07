@@ -1,4 +1,5 @@
 use std::{
+    io::IoSlice,
     marker::PhantomData,
     net::SocketAddr,
     pin::Pin,
@@ -6,25 +7,32 @@ use std::{
     time::Duration,
 };
 
+use bytes::Bytes;
 use tokio::{
-    io::{AsyncRead, AsyncWrite, AsyncWriteExt, ReadBuf},
-    net::{
-        TcpStream,
-        tcp::{ReadHalf, WriteHalf},
-    },
+    io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf},
+    net::TcpStream,
 };
 
-use super::proto::{Address, AsyncStreamOperation, Reply, Response};
+use super::{
+    poll_read_with_pending,
+    proto::{Address, Reply, ServerFrame, write_server_frame},
+    reject_request,
+};
 
-/// Socks5 command type `Bind`
-/// you may get a `Bind<NeedFirstReply>`. After replying the client 2 times
-/// you will get a `Bind<Ready>`, which can be used as a regular async TCP
-/// stream.
+/// A SOCKS5 BIND connection.
 ///
-/// A `Bind<S>` can be converted to a regular tokio [`TcpStream`](https://docs.rs/tokio/latest/tokio/net/struct.TcpStream.html) by using the `From` trait.
+/// A `Bind<NeedFirstReply>` becomes `Bind<Ready>` after the two replies
+/// required by RFC 1928 have been sent. The ready state can be used as a
+/// regular asynchronous TCP stream.
+/// https://www.rfc-editor.org/rfc/rfc1928.html#section-6
+///
+/// A `Bind<S>` can be converted into its raw tokio
+/// [`TcpStream`](https://docs.rs/tokio/latest/tokio/net/struct.TcpStream.html)
+/// and any prefetched application data by using the `From` trait.
 #[derive(Debug)]
 pub struct Bind<S> {
     stream: TcpStream,
+    pending: Bytes,
     _state: PhantomData<S>,
 }
 
@@ -44,25 +52,23 @@ pub struct Ready;
 impl Bind<NeedFirstReply> {
     /// Create a new [`Bind<NeedFirstReply>`] from a [`TcpStream`].
     #[inline]
-    pub(super) fn new(stream: TcpStream) -> Self {
+    pub(super) fn new(stream: TcpStream, pending: Bytes) -> Self {
         Self {
             stream,
+            pending,
             _state: PhantomData,
         }
     }
 
-    /// Reply to the SOCKS5 client with the given reply and address.
-    ///
-    /// If encountered an error while writing the reply, the error alongside the
-    /// original `TcpStream` is returned.
-    pub async fn reply(
-        mut self,
-        reply: Reply,
-        addr: Address,
-    ) -> std::io::Result<Bind<NeedSecondReply>> {
-        let resp = Response::new(reply, addr);
-        resp.write_to_async_stream(&mut self.stream).await?;
-        Ok(Bind::<NeedSecondReply>::new(self.stream))
+    /// Sends the first successful BIND reply.
+    pub async fn succeed(mut self, addr: Address) -> std::io::Result<Bind<NeedSecondReply>> {
+        write_server_frame(&mut self.stream, ServerFrame::Reply(Reply::Succeeded, addr)).await?;
+        Ok(Bind::<NeedSecondReply>::new(self.stream, self.pending))
+    }
+
+    /// Sends a failed first BIND reply and closes the control connection.
+    pub async fn reject(mut self, reply: Reply, addr: Address) -> std::io::Result<()> {
+        reject_request(&mut self.stream, reply, addr).await
     }
 
     /// Causes the other peer to receive a read of length 0, indicating that no
@@ -142,29 +148,50 @@ impl Bind<NeedFirstReply> {
 
 impl Bind<NeedSecondReply> {
     #[inline]
-    fn new(stream: TcpStream) -> Self {
+    fn new(stream: TcpStream, pending: Bytes) -> Self {
         Self {
             stream,
+            pending,
             _state: PhantomData,
         }
     }
 
-    /// Reply to the SOCKS5 client with the given reply and address.
+    /// Reads data that arrives while the server waits for the BIND peer.
     ///
-    /// If encountered an error while writing the reply, the error alongside the
-    /// original `TcpStream` is returned.
-    pub async fn reply(
-        mut self,
-        reply: Reply,
-        addr: Address,
-    ) -> Result<Bind<Ready>, (std::io::Error, TcpStream)> {
-        let resp = Response::new(reply, addr);
+    /// The handler keeps these bytes in order and forwards them only after the
+    /// second successful BIND reply.
+    pub(in crate::server::socks) async fn read_early_data(
+        &mut self,
+        buffer: &mut [u8],
+    ) -> std::io::Result<usize> {
+        self.stream.read(buffer).await
+    }
 
-        if let Err(err) = resp.write_to_async_stream(&mut self.stream).await {
-            return Err((err, self.stream));
+    /// Returns application data that the request codec read ahead.
+    #[inline]
+    pub(in crate::server::socks) fn pending_len(&self) -> usize {
+        self.pending.len()
+    }
+
+    /// Sends the second successful BIND reply and enables the data stream.
+    ///
+    /// If writing the reply fails, the error and connection state are returned.
+    pub async fn succeed(
+        mut self,
+        addr: Address,
+    ) -> Result<Bind<Ready>, (std::io::Error, Bind<NeedSecondReply>)> {
+        if let Err(err) =
+            write_server_frame(&mut self.stream, ServerFrame::Reply(Reply::Succeeded, addr)).await
+        {
+            return Err((err, self));
         }
 
-        Ok(Bind::<Ready>::new(self.stream))
+        Ok(Bind::<Ready>::new(self.stream, self.pending))
+    }
+
+    /// Sends a failed second BIND reply and closes the control connection.
+    pub async fn reject(mut self, reply: Reply, addr: Address) -> std::io::Result<()> {
+        reject_request(&mut self.stream, reply, addr).await
     }
 
     /// Causes the other peer to receive a read of length 0, indicating that no
@@ -241,33 +268,29 @@ impl Bind<NeedSecondReply> {
 
 impl Bind<Ready> {
     #[inline]
-    fn new(stream: TcpStream) -> Self {
+    fn new(stream: TcpStream, pending: Bytes) -> Self {
         Self {
             stream,
+            pending,
             _state: PhantomData,
         }
     }
 
-    /// Split the connection into a read and a write half.
+    /// Takes application data read together with the SOCKS5 request.
     #[inline]
-    pub fn split(&mut self) -> (ReadHalf<'_>, WriteHalf<'_>) {
-        self.stream.split()
+    pub fn take_pending_data(&mut self) -> Bytes {
+        std::mem::take(&mut self.pending)
     }
-}
 
-impl std::ops::Deref for Bind<Ready> {
-    type Target = TcpStream;
-
-    #[inline]
-    fn deref(&self) -> &Self::Target {
-        &self.stream
-    }
-}
-
-impl std::ops::DerefMut for Bind<Ready> {
-    #[inline]
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.stream
+    /// Returns the raw transport after all codec-prefetched data is handled.
+    pub fn transport_mut(&mut self) -> std::io::Result<&mut TcpStream> {
+        if self.pending.is_empty() {
+            Ok(&mut self.stream)
+        } else {
+            Err(std::io::Error::other(
+                "SOCKS5 prefetched data must be forwarded first",
+            ))
+        }
     }
 }
 
@@ -278,7 +301,8 @@ impl AsyncRead for Bind<Ready> {
         cx: &mut Context<'_>,
         buf: &mut ReadBuf<'_>,
     ) -> Poll<std::io::Result<()>> {
-        Pin::new(&mut self.stream).poll_read(cx, buf)
+        let this = &mut *self;
+        poll_read_with_pending(&mut this.stream, &mut this.pending, cx, buf)
     }
 }
 
@@ -293,6 +317,20 @@ impl AsyncWrite for Bind<Ready> {
     }
 
     #[inline]
+    fn poll_write_vectored(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        bufs: &[IoSlice<'_>],
+    ) -> Poll<std::io::Result<usize>> {
+        Pin::new(&mut self.stream).poll_write_vectored(cx, bufs)
+    }
+
+    #[inline]
+    fn is_write_vectored(&self) -> bool {
+        self.stream.is_write_vectored()
+    }
+
+    #[inline]
     fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
         Pin::new(&mut self.stream).poll_flush(cx)
     }
@@ -303,9 +341,39 @@ impl AsyncWrite for Bind<Ready> {
     }
 }
 
-impl<S> From<Bind<S>> for TcpStream {
-    #[inline]
-    fn from(conn: Bind<S>) -> Self {
-        conn.stream
+impl<S> From<Bind<S>> for (TcpStream, Bytes) {
+    fn from(connection: Bind<S>) -> Self {
+        (connection.stream, connection.pending)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use bytes::Bytes;
+    use tokio::{
+        io::{AsyncReadExt, AsyncWriteExt},
+        net::{TcpListener, TcpStream},
+    };
+
+    use super::{Bind, Ready};
+
+    #[tokio::test]
+    async fn ready_stream_reads_prefetched_data_before_transport_data() {
+        let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .await
+            .unwrap();
+        let listener_addr = listener.local_addr().unwrap();
+        let client = tokio::spawn(async move {
+            let mut client = TcpStream::connect(listener_addr).await.unwrap();
+            client.write_all(b"transport").await.unwrap();
+        });
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut bind = Bind::<Ready>::new(stream, Bytes::from_static(b"prefetched-"));
+        let mut received = [0; 20];
+
+        bind.read_exact(&mut received).await.unwrap();
+
+        assert_eq!(&received, b"prefetched-transport");
+        client.await.unwrap();
     }
 }

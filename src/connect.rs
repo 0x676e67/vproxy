@@ -709,7 +709,7 @@ impl UdpConnector<'_> {
         socket: &UdpSocket,
     ) -> std::io::Result<usize> {
         socket.send_to(pkt, addr).await.and_then(|size| {
-            tracing::info!(
+            tracing::trace!(
                 "[UDP] UDP packet sent to {} via {}, size: {}",
                 addr,
                 socket.local_addr()?,

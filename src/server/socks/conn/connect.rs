@@ -5,15 +5,17 @@ use std::{
     task::{Context, Poll},
 };
 
+use bytes::Bytes;
 use tokio::{
     io::{AsyncRead, AsyncWrite, AsyncWriteExt, ReadBuf},
-    net::{
-        TcpStream,
-        tcp::{OwnedReadHalf, OwnedWriteHalf, ReadHalf, WriteHalf},
-    },
+    net::TcpStream,
 };
 
-use super::proto::{Address, AsyncStreamOperation, Reply, Response};
+use super::{
+    poll_read_with_pending,
+    proto::{Address, Reply, ServerFrame, write_server_frame},
+    reject_request,
+};
 
 /// Socks5 connection type `Connect`
 ///
@@ -22,14 +24,16 @@ use super::proto::{Address, AsyncStreamOperation, Reply, Response};
 #[derive(Debug)]
 pub struct Connect<S> {
     stream: TcpStream,
+    pending: Bytes,
     _state: S,
 }
 
 impl<S: Default> Connect<S> {
     #[inline]
-    pub(super) fn new(stream: TcpStream) -> Self {
+    pub(super) fn new(stream: TcpStream, pending: Bytes) -> Self {
         Self {
             stream,
+            pending,
             _state: S::default(),
         }
     }
@@ -60,42 +64,36 @@ pub struct NeedReply;
 pub struct Ready;
 
 impl Connect<NeedReply> {
-    /// Reply to the client.
+    /// Sends a successful CONNECT reply and enables the data stream.
     #[inline]
-    pub async fn reply(mut self, reply: Reply, addr: Address) -> std::io::Result<Connect<Ready>> {
-        let resp = Response::new(reply, addr);
-        resp.write_to_async_stream(&mut self.stream).await?;
-        Ok(Connect::<Ready>::new(self.stream))
+    pub async fn succeed(mut self, addr: Address) -> std::io::Result<Connect<Ready>> {
+        write_server_frame(&mut self.stream, ServerFrame::Reply(Reply::Succeeded, addr)).await?;
+        Ok(Connect::<Ready>::new(self.stream, self.pending))
+    }
+
+    /// Sends a failed CONNECT reply and closes the control connection.
+    #[inline]
+    pub async fn reject(mut self, reply: Reply, addr: Address) -> std::io::Result<()> {
+        reject_request(&mut self.stream, reply, addr).await
     }
 }
 
 impl Connect<Ready> {
-    /// Returns the read/write half of the stream.
+    /// Takes application data read together with the SOCKS5 request.
     #[inline]
-    pub fn split(&mut self) -> (ReadHalf<'_>, WriteHalf<'_>) {
-        self.stream.split()
+    pub fn take_pending_data(&mut self) -> Bytes {
+        std::mem::take(&mut self.pending)
     }
 
-    /// Returns the owned read/write half of the stream.
-    #[inline]
-    pub fn into_split(self) -> (OwnedReadHalf, OwnedWriteHalf) {
-        self.stream.into_split()
-    }
-}
-
-impl std::ops::Deref for Connect<Ready> {
-    type Target = TcpStream;
-
-    #[inline]
-    fn deref(&self) -> &Self::Target {
-        &self.stream
-    }
-}
-
-impl std::ops::DerefMut for Connect<Ready> {
-    #[inline]
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.stream
+    /// Returns the raw transport after all codec-prefetched data is handled.
+    pub fn transport_mut(&mut self) -> std::io::Result<&mut TcpStream> {
+        if self.pending.is_empty() {
+            Ok(&mut self.stream)
+        } else {
+            Err(std::io::Error::other(
+                "SOCKS5 prefetched data must be forwarded first",
+            ))
+        }
     }
 }
 
@@ -106,7 +104,8 @@ impl AsyncRead for Connect<Ready> {
         cx: &mut Context<'_>,
         buf: &mut ReadBuf<'_>,
     ) -> Poll<std::io::Result<()>> {
-        Pin::new(&mut self.stream).poll_read(cx, buf)
+        let this = &mut *self;
+        poll_read_with_pending(&mut this.stream, &mut this.pending, cx, buf)
     }
 }
 
@@ -145,9 +144,39 @@ impl AsyncWrite for Connect<Ready> {
     }
 }
 
-impl<S> From<Connect<S>> for TcpStream {
-    #[inline]
-    fn from(conn: Connect<S>) -> Self {
-        conn.stream
+impl<S> From<Connect<S>> for (TcpStream, Bytes) {
+    fn from(connection: Connect<S>) -> Self {
+        (connection.stream, connection.pending)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use bytes::Bytes;
+    use tokio::{
+        io::{AsyncReadExt, AsyncWriteExt},
+        net::{TcpListener, TcpStream},
+    };
+
+    use super::{Connect, Ready};
+
+    #[tokio::test]
+    async fn ready_stream_reads_prefetched_data_before_transport_data() {
+        let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .await
+            .unwrap();
+        let listener_addr = listener.local_addr().unwrap();
+        let client = tokio::spawn(async move {
+            let mut client = TcpStream::connect(listener_addr).await.unwrap();
+            client.write_all(b"transport").await.unwrap();
+        });
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut connect = Connect::<Ready>::new(stream, Bytes::from_static(b"prefetched-"));
+        let mut received = [0; 20];
+
+        connect.read_exact(&mut received).await.unwrap();
+
+        assert_eq!(&received, b"prefetched-transport");
+        client.await.unwrap();
     }
 }
