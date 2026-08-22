@@ -99,7 +99,7 @@ unitbus = { version = "=0.1.7", default-features = false, features = [
 ] }
 
 [target.'cfg(any(target_os = "illumos", target_os = "ios", target_os = "macos", target_os = "solaris", target_os = "tvos", target_os = "visionos", target_os = "watchos"))'.dependencies]
-nix = "0.30.1"
+nix = "0.31.3"
 
 [features]
 default = ["mimalloc"]
