@@ -3,10 +3,8 @@ use std::{
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
 };
 
+use super::StreamOperation;
 use bytes::BufMut;
-use tokio::io::{AsyncRead, AsyncReadExt};
-
-use super::{AsyncStreamOperation, StreamOperation};
 
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 #[repr(u8)]
@@ -85,6 +83,28 @@ impl Address {
     pub const fn max_serialized_len() -> usize {
         1 + 1 + u8::MAX as usize + 2
     }
+
+    /// Checks that this address can be represented by the RFC 1928 wire format.
+    ///
+    /// A domain address carries its octet length in one byte.
+    /// https://www.rfc-editor.org/rfc/rfc1928.html#section-5
+    pub(in crate::server::socks) fn validate_for_serialization(&self) -> std::io::Result<()> {
+        let Self::DomainAddress(domain, _) = self else {
+            return Ok(());
+        };
+        if domain.is_empty() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "SOCKS5 domain name cannot be empty",
+            ));
+        }
+        u8::try_from(domain.len()).map(|_| ()).map_err(|_| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "SOCKS5 domain name exceeds 255 octets",
+            )
+        })
+    }
 }
 
 impl StreamOperation for Address {
@@ -103,6 +123,12 @@ impl StreamOperation for Address {
                 let mut len = [0; 1];
                 stream.read_exact(&mut len)?;
                 let len = len[0] as usize;
+                if len == 0 {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "SOCKS5 domain name cannot be empty",
+                    ));
+                }
                 let mut buf = vec![0; len + 2];
                 stream.read_exact(&mut buf)?;
 
@@ -132,7 +158,8 @@ impl StreamOperation for Address {
         }
     }
 
-    fn write_to_buf<B: BufMut>(&self, buf: &mut B) {
+    fn write_to_buf<B: BufMut>(&self, buf: &mut B) -> std::io::Result<()> {
+        self.validate_for_serialization()?;
         match self {
             Self::SocketAddress(SocketAddr::V4(addr)) => {
                 buf.put_u8(AddressType::IPv4.into());
@@ -152,6 +179,7 @@ impl StreamOperation for Address {
                 buf.put_u16(*port);
             }
         }
+        Ok(())
     }
 
     fn len(&self) -> usize {
@@ -159,54 +187,6 @@ impl StreamOperation for Address {
             Address::SocketAddress(SocketAddr::V4(_)) => 1 + 4 + 2,
             Address::SocketAddress(SocketAddr::V6(_)) => 1 + 16 + 2,
             Address::DomainAddress(addr, _) => 1 + 1 + addr.len() + 2,
-        }
-    }
-}
-
-impl AsyncStreamOperation for Address {
-    async fn retrieve_from_async_stream<R>(stream: &mut R) -> std::io::Result<Self>
-    where
-        R: AsyncRead + Unpin + Send,
-    {
-        let atyp = stream.read_u8().await?;
-        match AddressType::try_from(atyp)? {
-            AddressType::IPv4 => {
-                let mut addr_bytes = [0; 4];
-                stream.read_exact(&mut addr_bytes).await?;
-                let mut buf = [0; 2];
-                stream.read_exact(&mut buf).await?;
-                let addr = Ipv4Addr::from(addr_bytes);
-                let port = u16::from_be_bytes(buf);
-                Ok(Self::SocketAddress(SocketAddr::from((addr, port))))
-            }
-            AddressType::Domain => {
-                let len = stream.read_u8().await? as usize;
-                let mut buf = vec![0; len + 2];
-                stream.read_exact(&mut buf).await?;
-
-                let port = u16::from_be_bytes([buf[len], buf[len + 1]]);
-                buf.truncate(len);
-
-                let addr = match String::from_utf8(buf) {
-                    Ok(addr) => addr,
-                    Err(err) => {
-                        let err = format!("Invalid address encoding: {err}");
-                        return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, err));
-                    }
-                };
-                Ok(Self::DomainAddress(addr, port))
-            }
-            AddressType::IPv6 => {
-                let mut addr_bytes = [0; 16];
-                stream.read_exact(&mut addr_bytes).await?;
-                let mut buf = [0; 2];
-                stream.read_exact(&mut buf).await?;
-                let port = u16::from_be_bytes(buf);
-                Ok(Self::SocketAddress(SocketAddr::from((
-                    Ipv6Addr::from(addr_bytes),
-                    port,
-                ))))
-            }
         }
     }
 }
@@ -248,11 +228,14 @@ impl TryFrom<&Address> for SocketAddr {
     }
 }
 
-impl From<Address> for Vec<u8> {
-    fn from(addr: Address) -> Self {
+impl TryFrom<Address> for Vec<u8> {
+    type Error = std::io::Error;
+
+    fn try_from(addr: Address) -> std::io::Result<Self> {
+        addr.validate_for_serialization()?;
         let mut buf = Vec::with_capacity(addr.len());
-        addr.write_to_buf(&mut buf);
-        buf
+        addr.write_to_buf(&mut buf)?;
+        Ok(buf)
     }
 }
 
@@ -337,5 +320,21 @@ impl TryFrom<&str> for Address {
             let port = port.parse::<u16>()?;
             Ok(Address::DomainAddress(addr.to_owned(), port))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rejects_domains_that_do_not_fit_rfc1928_length_octet() {
+        let address = Address::DomainAddress("a".repeat(u8::MAX as usize + 1), 443);
+        let mut buffer = Vec::new();
+
+        let error = address.write_to_buf(&mut buffer).unwrap_err();
+
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+        assert!(buffer.is_empty());
     }
 }
