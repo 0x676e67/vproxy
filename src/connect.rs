@@ -44,6 +44,8 @@ pub struct Connector {
     fallback: Option<Fallback>,
     connect_timeout: Duration,
     #[cfg(any(target_os = "android", target_os = "fuchsia", target_os = "linux"))]
+    mark: Option<u32>,
+    #[cfg(any(target_os = "android", target_os = "fuchsia", target_os = "linux"))]
     tcp_user_timeout: Option<Duration>,
     reuseaddr: Option<bool>,
     http: connect::HttpConnector,
@@ -124,6 +126,9 @@ impl Connector {
         cidr_range: Option<u8>,
         fallback: Option<Fallback>,
         connect_timeout: u64,
+        #[cfg(any(target_os = "android", target_os = "fuchsia", target_os = "linux"))] mark: Option<
+            u32,
+        >,
         #[cfg(any(target_os = "android", target_os = "fuchsia", target_os = "linux"))]
         tcp_user_timeout: Option<u64>,
         reuseaddr: Option<bool>,
@@ -134,11 +139,17 @@ impl Connector {
         if let Some(reuseaddr) = reuseaddr {
             http_connector.set_reuse_address(reuseaddr);
         }
+        #[cfg(any(target_os = "android", target_os = "fuchsia", target_os = "linux"))]
+        if let Some(mark) = mark {
+            http_connector.set_mark(Some(mark));
+        }
         Connector {
             cidr,
             cidr_range,
             fallback,
             connect_timeout,
+            #[cfg(any(target_os = "android", target_os = "fuchsia", target_os = "linux"))]
+            mark,
             #[cfg(any(target_os = "android", target_os = "fuchsia", target_os = "linux"))]
             tcp_user_timeout: tcp_user_timeout.map(Duration::from_secs),
             reuseaddr,
@@ -201,6 +212,34 @@ impl TcpConnector<'_> {
         }
     }
 
+    #[inline]
+    #[cfg(any(target_os = "android", target_os = "fuchsia", target_os = "linux"))]
+    pub(crate) fn mark(&self) -> Option<u32> {
+        self.inner.mark
+    }
+
+    fn configure_socket(&self, socket: &TcpSocket) -> std::io::Result<()> {
+        socket.set_nodelay(true)?;
+
+        if let Some(reuseaddr) = self.inner.reuseaddr {
+            socket.set_reuseaddr(reuseaddr)?;
+        }
+
+        #[cfg(any(target_os = "android", target_os = "fuchsia", target_os = "linux"))]
+        if let Some(mark) = self.inner.mark {
+            let socket_ref = socket2::SockRef::from(socket);
+            socket_ref.set_mark(mark)?;
+        }
+
+        #[cfg(any(target_os = "android", target_os = "fuchsia", target_os = "linux"))]
+        if let Some(tcp_user_timeout) = self.inner.tcp_user_timeout {
+            let socket_ref = socket2::SockRef::from(socket);
+            socket_ref.set_tcp_user_timeout(Some(tcp_user_timeout))?;
+        }
+
+        Ok(())
+    }
+
     /// Creates a [`TcpSocket`] and binds it to an IP address within the provided CIDR range.
     async fn create_socket_with_cidr(&self, cidr: IpCidr) -> std::io::Result<TcpSocket> {
         let socket = match cidr {
@@ -218,11 +257,7 @@ impl TcpConnector<'_> {
             }
         };
 
-        #[cfg(any(target_os = "android", target_os = "fuchsia", target_os = "linux"))]
-        if let Some(tcp_user_timeout) = self.inner.tcp_user_timeout {
-            let socket_ref = socket2::SockRef::from(&socket);
-            socket_ref.set_tcp_user_timeout(Some(tcp_user_timeout))?;
-        }
+        self.configure_socket(&socket)?;
 
         Ok(socket)
     }
@@ -295,17 +330,7 @@ impl TcpConnector<'_> {
             }
         };
 
-        socket.set_nodelay(true)?;
-
-        if let Some(reuseaddr) = self.inner.reuseaddr {
-            socket.set_reuseaddr(reuseaddr)?;
-        }
-
-        #[cfg(any(target_os = "android", target_os = "fuchsia", target_os = "linux"))]
-        if let Some(tcp_user_timeout) = self.inner.tcp_user_timeout {
-            let socket_ref = socket2::SockRef::from(&socket);
-            socket_ref.set_tcp_user_timeout(Some(tcp_user_timeout))?;
-        }
+        self.configure_socket(&socket)?;
 
         Ok(socket)
     }
@@ -403,7 +428,12 @@ impl TcpConnector<'_> {
                     .await?
                 }
                 (None, None) => {
-                    timeout(self.inner.connect_timeout, TcpStream::connect(target_addr)).await?
+                    let socket = match target_addr {
+                        SocketAddr::V4(_) => TcpSocket::new_v4()?,
+                        SocketAddr::V6(_) => TcpSocket::new_v6()?,
+                    };
+                    self.configure_socket(&socket)?;
+                    timeout(self.inner.connect_timeout, socket.connect(target_addr)).await?
                 }
             }
             .and_then(|stream| {
@@ -452,24 +482,37 @@ impl TcpConnector<'_> {
 // ==== impl UdpConnector ====
 
 impl UdpConnector<'_> {
+    fn configure_socket(&self, _socket: &UdpSocket) -> std::io::Result<()> {
+        #[cfg(any(target_os = "android", target_os = "fuchsia", target_os = "linux"))]
+        if let Some(mark) = self.inner.mark {
+            let socket_ref = socket2::SockRef::from(_socket);
+            socket_ref.set_mark(mark)?;
+        }
+        Ok(())
+    }
+
     /// Creates a [`UdpSocket`] and binds it to the provided IP address.
     #[inline]
     async fn create_socket(&self, ip: IpAddr) -> std::io::Result<UdpSocket> {
-        UdpSocket::bind(SocketAddr::new(ip, 0)).await
+        let socket = UdpSocket::bind(SocketAddr::new(ip, 0)).await?;
+        self.configure_socket(&socket)?;
+        Ok(socket)
     }
 
     /// Creates a [`UdpSocket`] and binds it to an IP address within the provided CIDR range.
     async fn create_socket_with_cidr(&self, cidr: IpCidr) -> std::io::Result<UdpSocket> {
-        match cidr {
+        let socket = match cidr {
             IpCidr::V4(cidr) => {
                 let addr = assign_ipv4_from_extension(cidr, self.inner.cidr_range, self.extension);
-                UdpSocket::bind(SocketAddr::new(IpAddr::V4(addr), 0)).await
+                UdpSocket::bind(SocketAddr::new(IpAddr::V4(addr), 0)).await?
             }
             IpCidr::V6(cidr) => {
                 let addr = assign_ipv6_from_extension(cidr, self.inner.cidr_range, self.extension);
-                UdpSocket::bind(SocketAddr::new(IpAddr::V6(addr), 0)).await
+                UdpSocket::bind(SocketAddr::new(IpAddr::V6(addr), 0)).await?
             }
-        }
+        };
+        self.configure_socket(&socket)?;
+        Ok(socket)
     }
 
     fn bind_ip_for_target(&self, target: SocketAddr) -> Option<IpAddr> {
@@ -619,8 +662,15 @@ impl UdpConnector<'_> {
             _ => {
                 // Create dual-stack sockets when no specific configuration is provided
                 let preferred_socket = UdpSocket::bind("0.0.0.0:0").await?;
-                let fallback_socket = UdpSocket::bind("[::]:0").await;
-                Ok((preferred_socket, fallback_socket.ok()))
+                self.configure_socket(&preferred_socket)?;
+                let fallback_socket = match UdpSocket::bind("[::]:0").await {
+                    Ok(socket) => {
+                        self.configure_socket(&socket)?;
+                        Some(socket)
+                    }
+                    Err(_) => None,
+                };
+                Ok((preferred_socket, fallback_socket))
             }
         }
     }
@@ -840,6 +890,11 @@ impl HttpConnector<'_> {
 
         if let Some(reuseaddr) = self.inner.reuseaddr {
             connector.set_reuse_address(reuseaddr);
+        }
+
+        #[cfg(any(target_os = "android", target_os = "fuchsia", target_os = "linux"))]
+        if let Some(mark) = self.inner.mark {
+            connector.set_mark(Some(mark));
         }
 
         #[cfg(any(target_os = "android", target_os = "fuchsia", target_os = "linux"))]
@@ -1068,6 +1123,8 @@ mod tests {
             10,
             #[cfg(any(target_os = "android", target_os = "fuchsia", target_os = "linux"))]
             None,
+            #[cfg(any(target_os = "android", target_os = "fuchsia", target_os = "linux"))]
+            None,
             None,
         );
         let udp = connector.udp(Extension::None);
@@ -1092,6 +1149,8 @@ mod tests {
             None,
             Some(Fallback::Address(Ipv4Addr::LOCALHOST.into())),
             10,
+            #[cfg(any(target_os = "android", target_os = "fuchsia", target_os = "linux"))]
+            None,
             #[cfg(any(target_os = "android", target_os = "fuchsia", target_os = "linux"))]
             None,
             None,
@@ -1164,5 +1223,94 @@ mod tests {
         let cidr_v6 = "2001:db8::1/128".parse::<Ipv6Cidr>().unwrap();
         let ipv6_address = assign_ipv6_from_extension(cidr_v6, None, extension);
         assert_eq!(ipv6_address, "2001:db8::1".parse::<Ipv6Addr>().unwrap());
+    }
+
+    #[cfg(any(target_os = "android", target_os = "fuchsia", target_os = "linux"))]
+    fn can_set_mark() -> bool {
+        let Ok(socket) = socket2::Socket::new(
+            socket2::Domain::IPV4,
+            socket2::Type::STREAM,
+            Some(socket2::Protocol::TCP),
+        ) else {
+            return false;
+        };
+        socket.set_mark(1).is_ok()
+    }
+
+    #[tokio::test]
+    #[cfg(any(target_os = "android", target_os = "fuchsia", target_os = "linux"))]
+    async fn tcp_connect_applies_egress_fwmark() {
+        if !can_set_mark() {
+            eprintln!("Skipping test: CAP_NET_ADMIN required to set SO_MARK");
+            return;
+        }
+
+        let listener = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+            .await
+            .expect("bind listener");
+        let addr = listener.local_addr().expect("listener addr");
+
+        let connector = Connector::new(None, None, None, 5, Some(0x1234), None, None);
+
+        let stream = connector
+            .tcp(Extension::None)
+            .connect(addr)
+            .await
+            .expect("connect succeeds");
+
+        let sock_ref = socket2::SockRef::from(&stream);
+        let mark = sock_ref.mark().expect("get mark");
+        assert_eq!(mark, 0x1234);
+    }
+
+    #[tokio::test]
+    #[cfg(any(target_os = "android", target_os = "fuchsia", target_os = "linux"))]
+    async fn udp_connect_applies_egress_fwmark() {
+        if !can_set_mark() {
+            eprintln!("Skipping test: CAP_NET_ADMIN required to set SO_MARK");
+            return;
+        }
+
+        let target = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0))
+            .await
+            .expect("bind target");
+        let addr = target.local_addr().expect("target addr");
+
+        let connector = Connector::new(None, None, None, 5, Some(0x5678), None, None);
+
+        let socket = connector
+            .udp(Extension::None)
+            .connect(&[addr])
+            .await
+            .expect("connect succeeds");
+
+        let sock_ref = socket2::SockRef::from(&socket);
+        let mark = sock_ref.mark().expect("get mark");
+        assert_eq!(mark, 0x5678);
+    }
+
+    #[tokio::test]
+    #[cfg(any(target_os = "android", target_os = "fuchsia", target_os = "linux"))]
+    async fn udp_dual_stack_applies_egress_fwmark() {
+        if !can_set_mark() {
+            eprintln!("Skipping test: CAP_NET_ADMIN required to set SO_MARK");
+            return;
+        }
+
+        let connector = Connector::new(None, None, None, 5, Some(0x9abc), None, None);
+
+        let (preferred, fallback) = connector
+            .udp(Extension::None)
+            .create_socket_dual_stack()
+            .await
+            .expect("create dual stack sockets");
+
+        let sock_ref = socket2::SockRef::from(&preferred);
+        assert_eq!(sock_ref.mark().expect("get mark"), 0x9abc);
+
+        if let Some(fallback) = fallback {
+            let sock_ref = socket2::SockRef::from(&fallback);
+            assert_eq!(sock_ref.mark().expect("get mark"), 0x9abc);
+        }
     }
 }

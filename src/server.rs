@@ -144,6 +144,11 @@ pub fn run(args: BootArgs) -> Result<()> {
             args.bind,
         );
 
+        #[cfg(any(target_os = "android", target_os = "fuchsia", target_os = "linux"))]
+        if let Some(mark) = args.mark {
+            tracing::info!(mark = mark, "egress fwmark configured");
+        }
+
         let context = move |auth: AuthMode| Context {
             auth,
             bind: args.bind,
@@ -154,6 +159,8 @@ pub fn run(args: BootArgs) -> Result<()> {
                 args.cidr_range,
                 args.fallback,
                 args.connect_timeout,
+                #[cfg(any(target_os = "android", target_os = "fuchsia", target_os = "linux"))]
+                args.mark,
                 #[cfg(any(target_os = "android", target_os = "fuchsia", target_os = "linux"))]
                 args.tcp_user_timeout,
                 args.reuseaddr,

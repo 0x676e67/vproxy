@@ -216,6 +216,13 @@ pub struct BootArgs {
     #[arg(long, default_value = "30", verbatim_doc_comment)]
     tcp_user_timeout: Option<u64>,
 
+    /// Netfilter mark (fwmark) for proxied egress traffic.
+    /// Sets SO_MARK on outbound sockets (vproxy => target).
+    /// Linux only. Accepts decimal (e.g. 100) or hex (e.g. 0x64).
+    #[cfg(any(target_os = "android", target_os = "fuchsia", target_os = "linux"))]
+    #[arg(long, short = 'm', value_parser = parse_mark, verbatim_doc_comment)]
+    mark: Option<u32>,
+
     /// Outbound SO_REUSEADDR for TCP sockets.
     /// Helps mitigate TIME_WAIT port exhaustion and enables fast rebinding after restarts.
     /// e.g. true.
@@ -224,6 +231,16 @@ pub struct BootArgs {
 
     #[command(subcommand)]
     proxy: Proxy,
+}
+
+#[cfg(any(target_os = "android", target_os = "fuchsia", target_os = "linux"))]
+fn parse_mark(s: &str) -> std::result::Result<u32, String> {
+    let s = s.trim();
+    if let Some(hex) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
+        u32::from_str_radix(hex, 16).map_err(|e| format!("invalid hex mark: {e}"))
+    } else {
+        s.parse::<u32>().map_err(|e| format!("invalid mark: {e}"))
+    }
 }
 
 #[derive(Subcommand, Clone)]
@@ -276,4 +293,46 @@ fn main() -> Result<()> {
 #[cfg(target_os = "linux")]
 fn systemd_server_arguments() -> impl Iterator<Item = std::ffi::OsString> {
     std::env::args_os().skip(3)
+}
+
+#[cfg(all(
+    test,
+    any(target_os = "android", target_os = "fuchsia", target_os = "linux")
+))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_mark_flag_parsing() {
+        let opt = Opt::try_parse_from(["vproxy", "run", "--mark", "100", "http"]).unwrap();
+        if let Commands::Run(args) = opt.commands {
+            assert_eq!(args.mark, Some(100));
+        } else {
+            panic!("expected Run command");
+        }
+
+        let opt = Opt::try_parse_from(["vproxy", "run", "-m", "0x64", "socks5"]).unwrap();
+        if let Commands::Run(args) = opt.commands {
+            assert_eq!(args.mark, Some(100));
+        } else {
+            panic!("expected Run command");
+        }
+
+        let opt = Opt::try_parse_from(["vproxy", "run", "-m", "0XFF", "http"]).unwrap();
+        if let Commands::Run(args) = opt.commands {
+            assert_eq!(args.mark, Some(255));
+        } else {
+            panic!("expected Run command");
+        }
+
+        let opt = Opt::try_parse_from(["vproxy", "run", "http"]).unwrap();
+        if let Commands::Run(args) = opt.commands {
+            assert_eq!(args.mark, None);
+        } else {
+            panic!("expected Run command");
+        }
+
+        assert!(Opt::try_parse_from(["vproxy", "run", "--mark", "invalid", "http"]).is_err());
+        assert!(Opt::try_parse_from(["vproxy", "run", "-m", "-5", "http"]).is_err());
+    }
 }
