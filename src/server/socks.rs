@@ -541,7 +541,13 @@ async fn handle_bind(
         }
     };
     let listener = match TcpListener::bind(listen_ip).await {
-        Ok(listener) => listener,
+        Ok(listener) => {
+            #[cfg(any(target_os = "android", target_os = "fuchsia", target_os = "linux"))]
+            if let Some(mark) = connector.mark() {
+                let _ = socket2::SockRef::from(&listener).set_mark(mark);
+            }
+            listener
+        }
         Err(error) => {
             bind.reject(reply_for_connect_error(&error), Address::unspecified())
                 .await?;
@@ -611,7 +617,13 @@ async fn handle_bind(
         }
     };
     let (mut outbound, outbound_addr) = match accepted {
-        Ok(connection) => connection,
+        Ok(connection) => {
+            #[cfg(any(target_os = "android", target_os = "fuchsia", target_os = "linux"))]
+            if let Some(mark) = connector.mark() {
+                let _ = socket2::SockRef::from(&connection.0).set_mark(mark);
+            }
+            connection
+        }
         Err(error) => {
             inbound
                 .reject(reply_for_connect_error(&error), Address::unspecified())
@@ -716,6 +728,8 @@ mod tests {
             None,
             None,
             5,
+            #[cfg(any(target_os = "android", target_os = "fuchsia", target_os = "linux"))]
+            None,
             #[cfg(any(target_os = "android", target_os = "fuchsia", target_os = "linux"))]
             None,
             None,

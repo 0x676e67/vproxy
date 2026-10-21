@@ -243,7 +243,7 @@ fn service_unit(
     if config.bind.port() < 1024 {
         capabilities.push("CAP_NET_BIND_SERVICE");
     }
-    if config.cidr.is_some() {
+    if config.cidr.is_some() || config.mark.is_some() {
         capabilities.push("CAP_NET_ADMIN");
     }
     if matches!(config.fallback.as_ref(), Some(Fallback::Interface(_))) {
