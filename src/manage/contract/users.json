@@ -1,0 +1,914 @@
+{
+  "paths": {
+    "/api/v1/proxy/policy": {
+      "get": {
+        "operationId": "getLocalUserPolicy",
+        "summary": "Read local proxy policy status",
+        "description": "Read saved policy, current runtime publication and historical durable publication facts, not a proxy connection test. API-only means proxy_running=false and applied_revision=null; a historical durable_applied_revision may remain. Automation Bearer identities cannot read this resource.",
+        "tags": ["Users"],
+        "security": [{ "Session": [] }],
+        "responses": {
+          "200": {
+            "description": "Current local policy status.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/UserPolicyStatus" }
+              }
+            }
+          },
+          "default": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/api/v1/proxy/owner": {
+      "get": {
+        "operationId": "getLocalUserPolicyOwner",
+        "summary": "Read local policy ownership",
+        "description": "Read the controller node ID, ownership epoch and terminal command high-water mark. Null controller_node_id means local ownership, not an unknown field. Node enrollment and policy ownership are separate permissions. Automation Bearer identities cannot read this resource.",
+        "tags": ["Users"],
+        "security": [{ "Session": [] }],
+        "responses": {
+          "200": {
+            "description": "Local ownership metadata.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/UserPolicyOwner" }
+              }
+            }
+          },
+          "default": { "$ref": "#/components/responses/Error" }
+        }
+      },
+      "put": {
+        "operationId": "setLocalUserPolicyOwner",
+        "summary": "Change local policy ownership",
+        "description": "Explicitly delegate to an enrolled controller or take local ownership with controller_node_id=null. expected_epoch is the current ownership epoch, not a policy or user revision. The controller field is required even when null. This does not enroll peers, configure listeners or revoke trust elsewhere. After an uncertain response, read ownership before deciding on a new action; do not automatically replay the write. JSON is bounded to 4096 bytes.",
+        "tags": ["Users"],
+        "security": [{ "Session": [], "Csrf": [] }],
+        "parameters": [{ "$ref": "#/components/parameters/Origin" }],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/UserPolicyOwnerInput" }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Ownership metadata after the accepted change.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/UserPolicyOwner" }
+              }
+            }
+          },
+          "default": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/api/v1/proxy/users": {
+      "get": {
+        "operationId": "listLocalUsers",
+        "summary": "Read one local user page",
+        "description": "Ascending user-ID keyset pages; default limit 25, maximum 50. The cursor is the last returned user ID, not a search cursor. Each page observes its own policy revision; listing is not a coherent multi-page snapshot. Unknown/duplicate fields and raw queries over 1024 bytes are rejected. Choose Session OR Automation, never Bearer with Cookie or X-CSRF-Token. Proxy-Authorization is rejected. F1 users:read permits only local user listing/search, not credentials, policy, owner, targets or writes. Missing or invalid Bearer authentication uses HTTP 401 with WWW-Authenticate; storage unavailability is not an invalid token.",
+        "tags": ["Users"],
+        "security": [{ "Session": [] }, { "Automation": [] }],
+        "parameters": [
+          { "$ref": "#/components/parameters/PageAfter" },
+          { "$ref": "#/components/parameters/PageLimit" },
+          { "$ref": "#/components/parameters/IncludeDeleted" }
+        ],
+        "responses": {
+          "200": {
+            "description": "Public user metadata. Row revisions are no newer than the page revision. Deleted rows are omitted unless requested; no credentials or verifiers are returned.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/UserPage" }
+              }
+            }
+          },
+          "default": { "$ref": "#/components/responses/Error" }
+        }
+      },
+      "post": {
+        "operationId": "createLocalUserDirectly",
+        "summary": "Create a local user directly",
+        "description": "Existing direct-write endpoint. Prefer user-operations reserve/execute when a queryable request identity is needed. Creates an active user, not a proxy credential. expected_revision is the whole policy's saved revision; a remote owner blocks local writes. No operation ID is assigned here. A lost response, cancellation or later error does not prove the policy was not saved, so do not automatically repeat it. Success is not a proxy connectivity test. JSON is bounded to 4096 bytes.",
+        "tags": ["Users"],
+        "security": [{ "Session": [], "Csrf": [] }],
+        "parameters": [{ "$ref": "#/components/parameters/Origin" }],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/UserInput" }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Saved change containing the created user; credential and secret are null. No durable operation record was reserved.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/PolicyChange" }
+              }
+            }
+          },
+          "default": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/api/v1/proxy/users/search": {
+      "get": {
+        "operationId": "searchLocalUsers",
+        "summary": "Find local users by name or exact ID",
+        "description": "Filter this node's users before pagination. Name matching is literal substring matching after Unicode lowercase conversion: percent/underscore are not wildcards; there is no Unicode normalization, locale matching or full casefolding. ID mode needs the full case-sensitive ID and forbids after. Form-encode the original term without trimming/lowercasing it. Unknown/duplicate decoded fields, malformed percent escapes/UTF-8 and raw queries over 1024 bytes fail. A continuation binds node, normalized query, deletion flag, limit and policy revision. Keep options unchanged; 409 user_search_changed requires an explicit new search, not silent cursor removal or fallback. Choose Session OR Automation, never Bearer with Cookie or X-CSRF-Token. F1 users:read remains local/read-only; Proxy-Authorization is rejected. Missing/invalid Bearer authentication uses a 401 challenge; I/O or migration failures are not invalid_token.",
+        "tags": ["Users"],
+        "security": [{ "Session": [] }, { "Automation": [] }],
+        "parameters": [
+          {
+            "name": "mode",
+            "in": "query",
+            "required": true,
+            "description": "Explicit name substring or exact ID mode; an ID-shaped name does not select ID mode.",
+            "schema": { "type": "string", "enum": ["name", "id"] }
+          },
+          {
+            "name": "q",
+            "in": "query",
+            "required": true,
+            "description": "1–128 UTF-8 bytes, without control characters or leading/trailing Unicode whitespace. ID mode requires a complete canonical Id. maxLength does not express the UTF-8 byte limit.",
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128,
+              "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]+$"
+            }
+          },
+          {
+            "name": "after",
+            "in": "query",
+            "required": false,
+            "description": "Exact search next_cursor with unchanged options. Not a plain-ID list cursor; forbidden in ID mode.",
+            "schema": { "$ref": "#/components/schemas/UserSearchCursor" }
+          },
+          { "$ref": "#/components/parameters/PageLimit" },
+          { "$ref": "#/components/parameters/IncludeDeleted" }
+        ],
+        "responses": {
+          "200": {
+            "description": "One ascending-ID page of matching public users. ID mode returns at most one row and no continuation. A cursor is an observation marker, not authentication or independent identity proof.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/UserSearchPage" }
+              }
+            }
+          },
+          "default": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/api/v1/proxy/users/{id}": {
+      "parameters": [{ "$ref": "#/components/parameters/ResourceId" }],
+      "put": {
+        "operationId": "updateLocalUserDirectly",
+        "summary": "Replace local user settings directly",
+        "description": "Replace name, complete protocol set and concurrency limit, not ID or active state. expected_revision is the whole-policy saved revision, not the user row revision. Deleted users cannot be edited. Prefer reserved user operations for exact result lookup. This direct route has no operation ID; response loss or an error after commit cannot prove nothing changed. Do not automatically replay it. JSON is bounded to 4096 bytes.",
+        "tags": ["Users"],
+        "security": [{ "Session": [], "Csrf": [] }],
+        "parameters": [{ "$ref": "#/components/parameters/Origin" }],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/UserInput" }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Saved change containing the user; credential and secret are null.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/PolicyChange" }
+              }
+            }
+          },
+          "default": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/api/v1/proxy/users/{id}/state": {
+      "parameters": [{ "$ref": "#/components/parameters/ResourceId" }],
+      "post": {
+        "operationId": "setLocalUserStateDirectly",
+        "summary": "Enable or disable a local user directly",
+        "description": "Set active for a non-deleted user using the whole-policy saved revision. This does not revoke credentials or terminate existing tunnels; new authentication uses the managed policy. Prefer reserved user operations for queryable request identity. This direct route has no such ID; response loss or an error does not prove failure and must not trigger automatic replay. JSON is bounded to 4096 bytes.",
+        "tags": ["Users"],
+        "security": [{ "Session": [], "Csrf": [] }],
+        "parameters": [{ "$ref": "#/components/parameters/Origin" }],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/UserStateInput" }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Saved change containing the user; credential and secret are null.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/PolicyChange" }
+              }
+            }
+          },
+          "default": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/api/v1/proxy/users/{id}/delete": {
+      "parameters": [{ "$ref": "#/components/parameters/ResourceId" }],
+      "post": {
+        "operationId": "deleteLocalUserDirectly",
+        "summary": "Permanently retire a local user directly",
+        "description": "Disable and mark the user deleted, and permanently revoke its credentials. The retained ID cannot be restored/reused; history is not physically removed. Existing tunnels are not forcibly terminated. expected_revision is the whole-policy saved revision. Prefer a reserved user operation for exact result lookup. This direct route has no operation ID; do not automatically repeat after an uncertain response or error. JSON is bounded to 4096 bytes.",
+        "tags": ["Users"],
+        "security": [{ "Session": [], "Csrf": [] }],
+        "parameters": [{ "$ref": "#/components/parameters/Origin" }],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/UserRevisionInput" }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Saved change containing the retired user; credential and secret are null.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/PolicyChange" }
+              }
+            }
+          },
+          "default": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/api/v1/proxy/users/{id}/credentials": {
+      "parameters": [{ "$ref": "#/components/parameters/ResourceId" }],
+      "post": {
+        "operationId": "createLocalUserCredential",
+        "summary": "Issue a proxy credential for a user",
+        "description": "Create a separate proxy login and random 256-bit secret for a non-deleted user, not an administrator, automation or node identity. expected_revision is the whole-policy saved revision. The secret is returned once, never by a list or operation record; preserve it privately and keep it out of URLs, logs and browser storage. An error or missing response may follow a commit; there is no durable secret-delivery replay, so do not automatically create another credential. Local user-operation reservations exclude credentials. JSON is bounded to 4096 bytes.",
+        "tags": ["Credentials"],
+        "security": [{ "Session": [], "Csrf": [] }],
+        "parameters": [{ "$ref": "#/components/parameters/Origin" }],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/UserRevisionInput" }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Saved change containing public user/credential metadata and the one-time non-null secret. Saved is not a connectivity test.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/PolicyChange" }
+              }
+            }
+          },
+          "default": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/api/v1/proxy/credentials": {
+      "get": {
+        "operationId": "listLocalUserCredentials",
+        "summary": "Read one proxy credential metadata page",
+        "description": "Ascending credential-ID keyset pages, optionally restricted by user_id; default limit 25, maximum 50. Revoked credentials remain history; there is no include_deleted parameter. Each page observes its own policy revision, not a multi-page snapshot. Unknown/duplicate fields or raw queries over 1024 bytes fail. No secret or verifier is returned. F1 Automation cannot read credential metadata.",
+        "tags": ["Credentials"],
+        "security": [{ "Session": [] }],
+        "parameters": [
+          { "$ref": "#/components/parameters/PageAfter" },
+          { "$ref": "#/components/parameters/PageLimit" },
+          {
+            "name": "user_id",
+            "in": "query",
+            "required": false,
+            "description": "Restrict retained credential metadata to this user.",
+            "schema": { "$ref": "#/components/schemas/Id" }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Public metadata page. next_cursor is a credential ID, not a user search or operation-history cursor.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/CredentialPage" }
+              }
+            }
+          },
+          "default": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/api/v1/proxy/credentials/{id}/state": {
+      "parameters": [{ "$ref": "#/components/parameters/ResourceId" }],
+      "post": {
+        "operationId": "setLocalUserCredentialState",
+        "summary": "Enable or disable a proxy credential",
+        "description": "Set active for a non-revoked credential using the whole-policy saved revision. It does not enable its user, bypass user protocol/routing permissions or terminate existing tunnels. A revoked credential cannot be reactivated. No durable user-operation ID covers this write; do not automatically replay an uncertain result. JSON is bounded to 4096 bytes.",
+        "tags": ["Credentials"],
+        "security": [{ "Session": [], "Csrf": [] }],
+        "parameters": [{ "$ref": "#/components/parameters/Origin" }],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/UserStateInput" }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Saved change containing public metadata; secret is null.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/PolicyChange" }
+              }
+            }
+          },
+          "default": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/api/v1/proxy/credentials/{id}/rotate": {
+      "parameters": [{ "$ref": "#/components/parameters/ResourceId" }],
+      "post": {
+        "operationId": "rotateLocalUserCredential",
+        "summary": "Replace a proxy credential secret",
+        "description": "Keep the public ID/login and replace the secret, incrementing verifier_revision. The old secret is rejected for new authentication after publication; existing tunnels may finish normally. Rotation does not enable a disabled user/credential or revive a revoked credential. expected_revision is the whole-policy saved revision. The new secret is returned once and must not be logged. A lost response or error may follow a commit; never automatically replay rotation. JSON is bounded to 4096 bytes.",
+        "tags": ["Credentials"],
+        "security": [{ "Session": [], "Csrf": [] }],
+        "parameters": [{ "$ref": "#/components/parameters/Origin" }],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/UserRevisionInput" }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Saved change containing public metadata and the one-time non-null replacement secret.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/PolicyChange" }
+              }
+            }
+          },
+          "default": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/api/v1/proxy/credentials/{id}/revoke": {
+      "parameters": [{ "$ref": "#/components/parameters/ResourceId" }],
+      "post": {
+        "operationId": "revokeLocalUserCredential",
+        "summary": "Permanently revoke a proxy credential",
+        "description": "Disable and permanently revoke this credential using the whole-policy saved revision. Retained metadata cannot recover its secret or revive it. This affects new authentication, not forced termination of existing tunnels. No durable user-operation ID covers credential writes; do not automatically replay a lost or uncertain result. JSON is bounded to 4096 bytes.",
+        "tags": ["Credentials"],
+        "security": [{ "Session": [], "Csrf": [] }],
+        "parameters": [{ "$ref": "#/components/parameters/Origin" }],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/UserRevisionInput" }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Saved change containing public metadata; secret is null.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/PolicyChange" }
+              }
+            }
+          },
+          "default": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/api/v1/proxy/user-operations/context": {
+      "get": {
+        "operationId": "getLocalUserOperationContext",
+        "summary": "Read one local user-operation context snapshot",
+        "description": "Read node ID, whole-policy revision, ownership epoch and local ownership together after rechecking this administrator or schema 18 users:write key in the same snapshot. No credentials or controller identity are returned. local=false explains that local writes are blocked; this read changes no ownership. The snapshot is not future authorization: reservation and execution recheck the current caller, ownership and CAS. users:read alone is insufficient. Unknown query fields are rejected.",
+        "tags": ["User operations"],
+        "security": [{ "Session": [] }, { "Automation": [] }],
+        "responses": {
+          "200": {
+            "description": "One snapshot, not a promise that a later reservation will succeed.",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/OperationContext" } } }
+          },
+          "default": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/api/v1/proxy/user-operations": {
+      "get": {
+        "operationId": "listLocalUserOperations",
+        "summary": "Read this caller's local operation history",
+        "description": "Administrators require schema 16; users:write Automation requires schema 18. Return only this authenticated caller's retained records in descending sequence order, including reservations and terminal results. before is an exclusive sequence, not a policy revision or user ID; default limit 25, maximum 50. Unknown/duplicate fields and raw queries over 1024 bytes fail. Retention is at most 256 records per caller namespace and 4096 per node, including reservations, without a time-based promise. A rotated current key can read its same principal's earlier records; revoked, expired or superseded keys cannot. Original payload and secret are absent. The latest record is not proof of which request was lost; never automatically execute it or associate it with another form.",
+        "tags": ["User operations"],
+        "security": [{ "Session": [] }, { "Automation": [] }],
+        "parameters": [
+          {
+            "name": "before",
+            "in": "query",
+            "required": false,
+            "description": "Exclusive positive sequence bound from next_cursor, passed unchanged for older records.",
+            "schema": { "$ref": "#/components/schemas/Revision" }
+          },
+          { "$ref": "#/components/parameters/PageLimit" }
+        ],
+        "responses": {
+          "200": {
+            "description": "Bounded administrator history, without a policy snapshot revision or original payload.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/OperationPage" }
+              }
+            }
+          },
+          "default": { "$ref": "#/components/responses/Error" }
+        }
+      },
+      "post": {
+        "operationId": "reserveLocalUserOperation",
+        "summary": "Reserve a local user operation identity",
+        "description": "Administrators require schema 16; users:write Automation requires schema 18. Reserve a server-assigned ID for one non-secret local user change after rechecking the current caller, optional expected_node_id, local ownership, expected_epoch and whole-policy expected_revision in the real write transaction. A wrong node assertion fails with operation_conflict before allocating an ID or changing state. Reservation changes no users, policy or runtime publication. Its digest binds the validated change and expected revision/epoch; protocol order is immaterial, duplicates invalid. The optional node assertion does not change legacy payload digests. Credentials, secrets, client-selected operation IDs and remote changes are excluded. A lost response may leave a reservation without delivering its ID; inspect history without guessing the newest row is yours, and do not automatically reserve/execute another operation. Older servers reject the new field; do not remove it and retry after an error. JSON is bounded to 4096 bytes.",
+        "tags": ["User operations"],
+        "security": [{ "Session": [], "Csrf": [] }, { "Automation": [] }],
+        "parameters": [{ "$ref": "#/components/parameters/UserOperationOrigin" }],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/OperationInput" }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "New reserved record; no user change has executed.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/OperationReserved" }
+              }
+            }
+          },
+          "default": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/api/v1/proxy/user-operations/{id}": {
+      "parameters": [{ "$ref": "#/components/parameters/ResourceId" }],
+      "get": {
+        "operationId": "getLocalUserOperation",
+        "summary": "Read an exact local user operation result",
+        "description": "Administrators require schema 16; users:write Automation requires schema 18. Read the exact record for this node and caller, including after ownership changes. The ID is not a capability and cannot bypass current administrator/key authorization. New key generations retain principal ownership of older records; invalid, revoked or expired keys are rejected. No mutation is replayed, payload reconstructed or secret returned. Saved proves durable storage at saved_revision, not current user contents, runtime publication or connectivity. operation_not_queryable means missing, pruned or not queryable by this caller; it does not prove the operation never executed and must not trigger a replacement write.",
+        "tags": ["User operations"],
+        "security": [{ "Session": [] }, { "Automation": [] }],
+        "responses": {
+          "200": {
+            "description": "Exact retained reserved, saved or rejected record.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/OperationResult" }
+              }
+            }
+          },
+          "default": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/api/v1/proxy/user-operations/{id}/execute": {
+      "parameters": [{ "$ref": "#/components/parameters/ResourceId" }],
+      "post": {
+        "operationId": "executeLocalUserOperation",
+        "summary": "Execute one matching reserved user operation",
+        "description": "Administrators require schema 16; users:write Automation requires schema 18. Submit the same validated change and expected revision/epoch used to reserve this caller/node-bound ID. The real transaction rechecks current administrator or key generation, revocation, expiry and scope, then optional expected_node_id, even on terminal replay. A wrong node assertion fails with operation_conflict before execution or publication and cannot turn a known terminal result into permission to execute. Omission preserves legacy behavior; a correct assertion does not change the payload digest. Changed revision/epoch values or payload fail binding even for terminal records. Accepted policy and its saved result commit together. A matching terminal submission only returns history, without reapplying old policy or treating it as a new ownership/CAS check. Owner/CAS/business changes may persist rejection instead. Credentials are excluded. Publication or record-applied failure can occur after a saved commit; HTTP error, timeout or disconnect does not prove rejection. Query this exact ID to resolve uncertainty; do not automatically POST again. Older servers reject the new field; do not remove it and retry after an error. Execute never creates a missing ID. JSON is bounded to 4096 bytes.",
+        "tags": ["User operations"],
+        "security": [{ "Session": [], "Csrf": [] }, { "Automation": [] }],
+        "parameters": [{ "$ref": "#/components/parameters/UserOperationOrigin" }],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/OperationInput" }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Saved or rejected terminal metadata, including matching terminal replay. HTTP 200 alone does not mean saved; inspect state. Saved is not proof of runtime application.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/OperationTerminal" }
+              }
+            }
+          },
+          "default": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    }
+  },
+  "schemas": {
+    "OperationContext": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["node_id", "policy_revision", "expected_epoch", "local"],
+      "properties": {
+        "node_id": { "$ref": "#/components/schemas/Id" },
+        "policy_revision": { "$ref": "#/components/schemas/Revision" },
+        "expected_epoch": { "$ref": "#/components/schemas/Revision" },
+        "local": { "type": "boolean" }
+      }
+    },
+    "UserPolicyStatus": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "saved_revision",
+        "applied_revision",
+        "durable_applied_revision",
+        "proxy_running",
+        "user_count",
+        "credential_count"
+      ],
+      "description": "Lossless decimal-string versions. Non-null applied revisions are not newer than saved_revision; JSON Schema does not compare these dynamic numeric strings. Counts include retained identities, not active connections.",
+      "properties": {
+        "saved_revision": { "$ref": "#/components/schemas/Revision" },
+        "applied_revision": {
+          "description": "Current live publication, not a historical receipt.",
+          "oneOf": [
+            { "$ref": "#/components/schemas/Revision" },
+            { "type": "null" }
+          ]
+        },
+        "durable_applied_revision": {
+          "description": "Historical durable publication receipt, not current process readiness.",
+          "oneOf": [
+            { "$ref": "#/components/schemas/Revision" },
+            { "type": "null" }
+          ]
+        },
+        "proxy_running": { "type": "boolean" },
+        "user_count": { "type": "integer", "minimum": 0, "maximum": 1024 },
+        "credential_count": { "type": "integer", "minimum": 0, "maximum": 8192 }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": { "proxy_running": { "const": false } },
+            "required": ["proxy_running"]
+          },
+          "then": { "properties": { "applied_revision": { "type": "null" } } }
+        }
+      ]
+    },
+    "UserPolicyOwner": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["controller_node_id", "epoch", "last_terminal_command"],
+      "properties": {
+        "controller_node_id": {
+          "description": "Null means local ownership, not unknown ownership.",
+          "oneOf": [{ "$ref": "#/components/schemas/Id" }, { "type": "null" }]
+        },
+        "epoch": { "$ref": "#/components/schemas/Revision" },
+        "last_terminal_command": { "$ref": "#/components/schemas/Sequence" }
+      }
+    },
+    "UserPolicyOwnerInput": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["expected_epoch", "controller_node_id"],
+      "properties": {
+        "expected_epoch": { "$ref": "#/components/schemas/Revision" },
+        "controller_node_id": {
+          "description": "Explicit null requests local ownership. Omitting the field is invalid.",
+          "oneOf": [{ "$ref": "#/components/schemas/Id" }, { "type": "null" }]
+        }
+      }
+    },
+    "UserNameInput": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]+$",
+      "description": "1–128 UTF-8 bytes, unchanged by Unicode trim, without control characters. A display name is not identity and need not be unique. maxLength is a character bound; the server also enforces the byte limit."
+    },
+    "UserProtocolsInput": {
+      "type": "array",
+      "maxItems": 3,
+      "uniqueItems": true,
+      "items": { "$ref": "#/components/schemas/Protocol" },
+      "description": "Complete allowed protocol set. Empty is valid and permits no protocol; duplicates are rejected."
+    },
+    "UserInput": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "expected_revision",
+        "name",
+        "protocols",
+        "concurrent_limit"
+      ],
+      "properties": {
+        "expected_revision": {
+          "description": "Whole-policy saved revision, not user metadata revision.",
+          "$ref": "#/components/schemas/Revision"
+        },
+        "name": { "$ref": "#/components/schemas/UserNameInput" },
+        "protocols": { "$ref": "#/components/schemas/UserProtocolsInput" },
+        "concurrent_limit": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1000000
+        }
+      }
+    },
+    "UserRevisionInput": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["expected_revision"],
+      "properties": {
+        "expected_revision": {
+          "description": "Whole-policy saved revision, not a user/credential row revision.",
+          "$ref": "#/components/schemas/Revision"
+        }
+      }
+    },
+    "UserStateInput": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["expected_revision", "active"],
+      "properties": {
+        "expected_revision": { "$ref": "#/components/schemas/Revision" },
+        "active": { "type": "boolean" }
+      }
+    },
+    "UserSearchCursor": {
+      "type": "string",
+      "minLength": 102,
+      "maxLength": 102,
+      "pattern": "^us1_[A-Za-z0-9_-]{97}[AQgw]$",
+      "description": "Opaque canonical observation marker. The server also checks binary version, node, normalized query/options, positive policy revision and last ID. Shape alone is neither validity nor authority."
+    },
+    "UserSearchPage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["revision", "items", "next_cursor"],
+      "description": "Search page, also used by the target user-search projection. Rows ascend by ID, match the query and have revisions no newer than revision; deletion filtering follows the request. A non-null cursor requires a full page and binds node/query/options/revision. ID mode has at most one row and no cursor. These dynamic request/response relationships are not JSON Schema field comparisons.",
+      "properties": {
+        "revision": { "$ref": "#/components/schemas/Revision" },
+        "items": {
+          "type": "array",
+          "maxItems": 50,
+          "items": { "$ref": "#/components/schemas/User" }
+        },
+        "next_cursor": {
+          "oneOf": [
+            { "$ref": "#/components/schemas/UserSearchCursor" },
+            { "type": "null" }
+          ]
+        }
+      }
+    },
+    "OperationCreateUserChange": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["action", "name", "protocols", "concurrent_limit"],
+      "properties": {
+        "action": { "const": "create_user" },
+        "name": { "$ref": "#/components/schemas/UserNameInput" },
+        "protocols": { "$ref": "#/components/schemas/UserProtocolsInput" },
+        "concurrent_limit": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1000000
+        }
+      }
+    },
+    "OperationUpdateUserChange": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["action", "id", "name", "protocols", "concurrent_limit"],
+      "properties": {
+        "action": { "const": "update_user" },
+        "id": { "$ref": "#/components/schemas/Id" },
+        "name": { "$ref": "#/components/schemas/UserNameInput" },
+        "protocols": { "$ref": "#/components/schemas/UserProtocolsInput" },
+        "concurrent_limit": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1000000
+        }
+      }
+    },
+    "OperationSetUserActiveChange": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["action", "id", "active"],
+      "properties": {
+        "action": { "const": "set_user_active" },
+        "id": { "$ref": "#/components/schemas/Id" },
+        "active": { "type": "boolean" }
+      }
+    },
+    "OperationDeleteUserChange": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["action", "id"],
+      "properties": {
+        "action": { "const": "delete_user" },
+        "id": { "$ref": "#/components/schemas/Id" }
+      }
+    },
+    "OperationChange": {
+      "description": "Only four non-secret local user changes; not the wider remote policy/credential command vocabulary.",
+      "oneOf": [
+        { "$ref": "#/components/schemas/OperationCreateUserChange" },
+        { "$ref": "#/components/schemas/OperationUpdateUserChange" },
+        { "$ref": "#/components/schemas/OperationSetUserActiveChange" },
+        { "$ref": "#/components/schemas/OperationDeleteUserChange" }
+      ]
+    },
+    "OperationInput": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["expected_revision", "expected_epoch", "change"],
+      "description": "Freeze the change and revision/epoch values at reservation. Execute must match their canonical binding. Optional expected_node_id is a current-node assertion rechecked after authorization in the same transaction before reserve, execute or terminal replay; it does not alter existing payload digests. Omission preserves legacy clients, but explicit null is invalid. Older servers may reject the field; never remove it and retry automatically. Protocol order is immaterial but duplicates are invalid. The record does not return the payload.",
+      "properties": {
+        "expected_node_id": { "$ref": "#/components/schemas/Id" },
+        "expected_revision": { "$ref": "#/components/schemas/Revision" },
+        "expected_epoch": { "$ref": "#/components/schemas/Revision" },
+        "change": { "$ref": "#/components/schemas/OperationChange" }
+      }
+    },
+    "OperationRejection": {
+      "type": "string",
+      "enum": [
+        "invalid_policy",
+        "policy_conflict",
+        "resource_not_found",
+        "policy_capacity",
+        "resource_managed",
+        "owner_conflict"
+      ]
+    },
+    "OperationResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "node_id",
+        "sequence",
+        "expected_revision",
+        "expected_epoch",
+        "action",
+        "user_id",
+        "state",
+        "saved_revision",
+        "rejection"
+      ],
+      "description": "Non-secret actor/node-bound history. Saved has known user_id, null rejection and saved_revision equal to expected_revision plus one; JSON Schema does not compare these numeric strings. Before a create is saved its user_id is null; other actions retain the requested ID. Saved is not applied/tested. Sequence is a positive history identity, not timestamp or policy revision.",
+      "properties": {
+        "id": { "$ref": "#/components/schemas/Id" },
+        "node_id": { "$ref": "#/components/schemas/Id" },
+        "sequence": { "$ref": "#/components/schemas/Revision" },
+        "expected_revision": { "$ref": "#/components/schemas/Revision" },
+        "expected_epoch": { "$ref": "#/components/schemas/Revision" },
+        "action": {
+          "type": "string",
+          "enum": [
+            "create_user",
+            "update_user",
+            "set_user_active",
+            "delete_user"
+          ]
+        },
+        "user_id": {
+          "oneOf": [{ "$ref": "#/components/schemas/Id" }, { "type": "null" }]
+        },
+        "state": {
+          "type": "string",
+          "enum": ["reserved", "saved", "rejected"]
+        },
+        "saved_revision": {
+          "oneOf": [
+            { "$ref": "#/components/schemas/Revision" },
+            { "type": "null" }
+          ]
+        },
+        "rejection": {
+          "oneOf": [
+            { "$ref": "#/components/schemas/OperationRejection" },
+            { "type": "null" }
+          ]
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": { "state": { "const": "saved" } },
+            "required": ["state"]
+          },
+          "then": {
+            "properties": {
+              "user_id": { "$ref": "#/components/schemas/Id" },
+              "saved_revision": { "$ref": "#/components/schemas/Revision" },
+              "rejection": { "type": "null" }
+            }
+          },
+          "else": {
+            "properties": { "saved_revision": { "type": "null" } },
+            "if": {
+              "properties": { "action": { "const": "create_user" } },
+              "required": ["action"]
+            },
+            "then": { "properties": { "user_id": { "type": "null" } } },
+            "else": {
+              "properties": { "user_id": { "$ref": "#/components/schemas/Id" } }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": { "state": { "const": "reserved" } },
+            "required": ["state"]
+          },
+          "then": { "properties": { "rejection": { "type": "null" } } }
+        },
+        {
+          "if": {
+            "properties": { "state": { "const": "rejected" } },
+            "required": ["state"]
+          },
+          "then": {
+            "properties": {
+              "rejection": { "$ref": "#/components/schemas/OperationRejection" }
+            }
+          }
+        }
+      ]
+    },
+    "OperationReserved": {
+      "allOf": [
+        { "$ref": "#/components/schemas/OperationResult" },
+        { "type": "object", "properties": { "state": { "const": "reserved" } } }
+      ]
+    },
+    "OperationTerminal": {
+      "allOf": [
+        { "$ref": "#/components/schemas/OperationResult" },
+        {
+          "type": "object",
+          "properties": { "state": { "enum": ["saved", "rejected"] } }
+        }
+      ]
+    },
+    "OperationPage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["items", "next_cursor"],
+      "description": "Descending-sequence history for one administrator. A non-null cursor is the last row's sequence, passed as exclusive before. There is no policy revision envelope, original payload, credential or secret. Listing does not identify an earlier request whose reservation response was lost.",
+      "properties": {
+        "items": {
+          "type": "array",
+          "maxItems": 50,
+          "items": { "$ref": "#/components/schemas/OperationResult" }
+        },
+        "next_cursor": {
+          "oneOf": [
+            { "$ref": "#/components/schemas/Revision" },
+            { "type": "null" }
+          ]
+        }
+      }
+    }
+  }
+}

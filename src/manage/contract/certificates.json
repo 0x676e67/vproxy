@@ -1,0 +1,64 @@
+{
+  "paths": {
+    "/api/v1/tls/status": {
+      "get": {
+        "operationId": "browserTlsIdentityStatus",
+        "tags": ["TLS"],
+        "summary": "Read this process's actual loaded TLS identity metadata",
+        "description": "Session only. No query, including an empty query. Reads the installed manual management identity or current ACME normal publication, node mTLS identity, and up to sixteen managed listeners. No file, certificate cache or challenge identity is inspected; no issuance, reload, probe or remote operation is started. Snapshot readiness is separate from listener health. Times include both validity endpoints (RFC 5280 section 4.1.2.5); valid_now says nothing about trust, names, revocation or reachability. Unknown time or metadata is never healthy. No names, subjects, issuers, paths, keys, PEM/DER bytes, accounts or raw errors are returned. Existing /tls/acme remains unchanged. Timestamps are canonical signed i64 decimal seconds, not JavaScript numbers.",
+        "security": [{ "Session": [] }],
+        "x-vproxy-max-query-bytes": 0,
+        "x-vproxy-max-response-bytes": 16384,
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "One local snapshot; each entry uses the same observation time. Management first, node second, then unique configured proxy endpoints. Disabled node means no node listener; disabled proxies are plaintext HTTP/SOCKS5. Pending is only management ACME before normal publication; unavailable means metadata could not be read, not a TLS failure.",
+            "headers": { "Cache-Control": { "schema": { "type": "string", "const": "no-store" } } },
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/TlsIdentityStatus" } } }
+          },
+          "400": { "description": "invalid_query: no query accepted.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ApiError" } } } },
+          "503": { "description": "tls_status_unavailable: source missing or complete proxy bind publication unavailable. No partial healthy inventory is returned; outer deadline can instead return request_timeout.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ApiError" } } } },
+          "default": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    }
+  },
+  "schemas": {
+    "TlsUnixSeconds": {
+      "type": "string", "pattern": "^(0|-?[1-9][0-9]{0,18})$", "maxLength": 20,
+      "description": "Canonical signed i64 Unix seconds. Producer enforces -9223372036854775808 through 9223372036854775807; preserve exact decimals. Pre-epoch values are valid."
+    },
+    "TlsLeafMetadata": {
+      "type": "object", "additionalProperties": false,
+      "required": ["sha256", "not_before_unix_s", "not_after_unix_s"],
+      "properties": {
+        "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$", "description": "SHA-256 of the actual installed leaf DER; not a trust decision or a public key pin." },
+        "not_before_unix_s": { "$ref": "#/components/schemas/TlsUnixSeconds" },
+        "not_after_unix_s": { "$ref": "#/components/schemas/TlsUnixSeconds" }
+      }
+    },
+    "TlsIdentityEntry": {
+      "type": "object", "additionalProperties": false,
+      "required": ["role", "source", "id", "protocol", "state", "certificate", "valid_now"],
+      "description": "Only proxy entries have a non-null canonical endpoint id and protocol. Other roles have both null. Node sources and plaintext proxy sources are manual; encrypted Web proxies may follow the node's normal ACME identity across renewal, never a challenge identity. Non-loaded entries have null certificate/valid_now; loaded has metadata, and valid_now is null exactly when observation time is null. not_before <= not_after; valid_now equals the inclusive interval comparison. Management cannot be disabled; node/proxy cannot be pending. HTTP/SOCKS5 proxy entries are disabled; HTTPS/auto/MASQUE are loaded or unavailable.",
+      "properties": {
+        "role": { "type": "string", "enum": ["management", "node", "proxy"] },
+        "source": { "type": "string", "enum": ["manual", "acme"] },
+        "id": { "anyOf": [{ "$ref": "#/components/schemas/Id" }, { "type": "null" }] },
+        "protocol": { "anyOf": [{ "type": "string", "enum": ["http", "https", "socks5", "auto", "masque"] }, { "type": "null" }] },
+        "state": { "type": "string", "enum": ["disabled", "pending", "unavailable", "loaded"] },
+        "certificate": { "anyOf": [{ "$ref": "#/components/schemas/TlsLeafMetadata" }, { "type": "null" }] },
+        "valid_now": { "type": ["boolean", "null"] }
+      }
+    },
+    "TlsIdentityStatus": {
+      "type": "object", "additionalProperties": false,
+      "required": ["node_id", "observed_at_unix_s", "entries"],
+      "properties": {
+        "node_id": { "$ref": "#/components/schemas/Id" },
+        "observed_at_unix_s": { "anyOf": [{ "$ref": "#/components/schemas/TlsUnixSeconds" }, { "type": "null" }] },
+        "entries": { "type": "array", "minItems": 2, "maxItems": 18, "items": { "$ref": "#/components/schemas/TlsIdentityEntry" } }
+      }
+    }
+  }
+}

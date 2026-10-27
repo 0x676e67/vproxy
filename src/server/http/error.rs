@@ -15,6 +15,9 @@ pub enum Error {
     #[error("Forbidden")]
     Forbidden,
 
+    #[error("Proxy admission is unavailable")]
+    ServiceUnavailable,
+
     #[error(transparent)]
     Timeout(#[from] tokio::time::error::Elapsed),
 }

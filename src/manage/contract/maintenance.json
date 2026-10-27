@@ -1,0 +1,139 @@
+{
+  "paths": {
+    "/api/v1/proxy/maintenance": {
+      "get": {
+        "operationId": "localMaintenanceStatus", "tags": ["Maintenance"],
+        "summary": "Read saved admission and the current operation observation",
+        "description": "Session only; no query including an empty query. Runtime fields share one Reader observation and are jointly null when stopped, unavailable or inconsistent with saved policy. active_operations counts managed authorization leases, not sockets or flushed buffers. Zero does not permit a forced stop. Continue using normal protocol-driven graceful shutdown. No probe, polling, mutation or wait-for-drain is started.",
+        "security": [{"Session": []}], "parameters": [], "x-vproxy-max-query-bytes": 0,
+        "responses": {
+          "200": {"description": "Saved facts and optional current runtime observation.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/MaintenanceStatus"}}}},
+          "503": {"description": "management_upgrade_required or policy_unavailable; no healthy default.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ApiError"}}}},
+          "default": {"$ref": "#/components/responses/Error"}
+        }
+      },
+      "post": {
+        "operationId": "changeLocalAdmission", "tags": ["Maintenance"],
+        "summary": "Pause or resume admission for new managed proxy operations",
+        "description": "Session and CSRF only; schema19 required; no query. Administrator, expected node identity, local ownership epoch and policy CAS are rechecked in the commit transaction. Existing operations retain their leases; ordinary run listeners and management API availability are unchanged. Durable commit precedes complete Reader publication. After an explicit runtime quiesce, accepting=true is refused with proxy_restart_required; it cannot recreate stopped listeners. Response loss is an unknown write: do not automatically resubmit. A new status observation describes current facts, not proof that this request caused them. No force-stop, flush, restart or migration. Automation users:write does not grant maintenance authority.",
+        "security": [{"Session": [], "Csrf": []}], "parameters": [{"$ref": "#/components/parameters/Origin"}],
+        "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/MaintenanceInput"}}}},
+        "responses": {
+          "200": {"description": "Publication receipt; running was sampled at publication, not a new count observation.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/MaintenanceChange"}}}},
+          "default": {"$ref": "#/components/responses/Error"}
+        }
+      }
+    },
+    "/api/v1/targets/{id}/proxy/maintenance": {
+      "parameters": [{"$ref": "#/components/parameters/ResourceId"}],
+      "get": {
+        "operationId": "targetMaintenanceStatus", "tags": ["Maintenance"],
+        "summary": "Read the selected target's maintenance facts",
+        "description": "Session only; no query. Fixed node v5 over configured mTLS, current exact-DER peer/owner authorization and bounded budgets. Validate node, version, decimals and runtime relationships; retain target epoch/command/policy rollback floors. Older unsupported nodes fail explicitly, without falling back to local or target-delivery state. One observation, not a remote drain or probe.",
+        "security": [{"Session": []}], "parameters": [],
+        "responses": {
+          "200": {"description": "Validated target-issued facts.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/MaintenanceStatus"}}}},
+          "502": {"description": "node_protocol_unsupported or invalid/unavailable remote response.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ApiError"}}}},
+          "default": {"$ref": "#/components/responses/Error"}
+        }
+      }
+    },
+    "/api/v1/targets/{id}/maintenance/commands/refresh": {
+      "parameters": [{"$ref": "#/components/parameters/ResourceId"}],
+      "post": {
+        "operationId": "refreshTargetMaintenanceReceipt", "tags": ["Maintenance"],
+        "summary": "Read the original retained maintenance receipt",
+        "description": "Session and CSRF only; no query. The body binds the original job_id. A replaced slot or non-maintenance intent is refused before any receipt request. The selected target's current mTLS/owner authorization and original version5 receipt identity remain mandatory. This never resends a command, rotates a secret, waits for operations or proves transport drain.",
+        "security": [{"Session": [], "Csrf": []}], "parameters": [{"$ref": "#/components/parameters/Origin"}],
+        "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/TargetJobInput"}}}},
+        "responses": {
+          "200": {"description": "The same typed maintenance ticket with its observed receipt; no secrets.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/TargetJob"}}}},
+          "default": {"$ref": "#/components/responses/Error"}
+        }
+      }
+    },
+    "/api/v1/targets/{id}/maintenance/commands": {
+      "parameters": [{"$ref": "#/components/parameters/ResourceId"}],
+      "post": {
+        "operationId": "submitTargetMaintenanceCommand", "tags": ["Maintenance"],
+        "summary": "Submit one admission intent to the durable peer queue",
+        "description": "Session and CSRF only; no query. Version5 uses existing owner epoch, shared command order and policy CAS, distinct from pausing target delivery. Background delivery may retry the same retained command identity. Cancellation or 202 never authorizes a new command: inspect the original job/receipt or explicitly supersede. Saved/Applied mean durable acceptance/historical publication, not operation completion, flushed buffers or safe forced shutdown. No credential or secret is generated.",
+        "security": [{"Session": [], "Csrf": []}], "parameters": [{"$ref": "#/components/parameters/Origin"}],
+        "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/MaintenanceCommandInput"}}}},
+        "responses": {
+          "200": {"description": "Original ticket and validated first receipt; may be rejected or not yet applied.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/MaintenanceDeliveredSubmission"}}}},
+          "202": {"description": "Original durable ticket with response=null; first delivery unknown.", "headers": {"Location": {"schema": {"type": "string"}, "description": "Current per-target command ticket."}}, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/MaintenancePendingSubmission"}}}},
+          "default": {"$ref": "#/components/responses/Error"}
+        }
+      }
+    }
+  },
+  "schemas": {
+    "MaintenanceIntent": {
+      "type": "object", "additionalProperties": false, "required": ["accepting"],
+      "properties": {"accepting": {"type": "boolean"}},
+      "description": "Non-secret desired admission derived from the retained typed v5 intent, including unresolved/rejected jobs. Not live state or an applied receipt."
+    },
+    "MaintenanceOwnership": {
+      "type": "object", "additionalProperties": false, "required": ["controller_node_id", "epoch", "last_terminal_command"],
+      "properties": {"controller_node_id": {"$ref": "#/components/schemas/NullableId"}, "epoch": {"$ref": "#/components/schemas/Revision"}, "last_terminal_command": {"$ref": "#/components/schemas/Sequence"}}
+    },
+    "MaintenanceStatus": {
+      "type": "object", "additionalProperties": false,
+      "required": ["node_id", "ownership", "saved_revision", "durable_applied_revision", "running", "saved_accepting", "applied_revision", "runtime_accepting", "active_operations"],
+      "properties": {
+        "node_id": {"$ref": "#/components/schemas/Id"}, "ownership": {"$ref": "#/components/schemas/MaintenanceOwnership"},
+        "saved_revision": {"$ref": "#/components/schemas/Revision"}, "durable_applied_revision": {"$ref": "#/components/schemas/NullableRevision"},
+        "running": {"type": "boolean"}, "saved_accepting": {"type": "boolean"}, "applied_revision": {"$ref": "#/components/schemas/NullableRevision"},
+        "runtime_accepting": {"type": ["boolean", "null"]},
+        "active_operations": {"anyOf": [{"$ref": "#/components/schemas/Counter"}, {"type": "null"}]}
+      },
+      "oneOf": [
+        {"properties": {"applied_revision": {"type": "null"}, "runtime_accepting": {"type": "null"}, "active_operations": {"type": "null"}}},
+        {"properties": {"running": {"const": true}, "applied_revision": {"$ref": "#/components/schemas/Revision"}, "runtime_accepting": {"type": "boolean"}, "active_operations": {"type": "string"}}}
+      ],
+      "description": "Nullable keys are required. Durable applied<=saved. Known runtime requires running, applied=saved, runtime_accepting=saved_accepting. Otherwise all three runtime fields are null. No drained/force-stop safety conclusion."
+    },
+    "MaintenanceInput": {
+      "type": "object", "additionalProperties": false, "required": ["expected_node_id", "expected_revision", "expected_epoch", "accepting"],
+      "properties": {"expected_node_id": {"$ref": "#/components/schemas/Id"}, "expected_revision": {"$ref": "#/components/schemas/Revision"}, "expected_epoch": {"$ref": "#/components/schemas/Revision"}, "accepting": {"type": "boolean"}}
+    },
+    "MaintenanceChange": {
+      "type": "object", "additionalProperties": false, "required": ["saved_revision", "applied_revision", "running"],
+      "properties": {"saved_revision": {"$ref": "#/components/schemas/Revision"}, "applied_revision": {"$ref": "#/components/schemas/NullableRevision"}, "running": {"type": "boolean"}},
+      "oneOf": [
+        {"properties": {"running": {"const": false}, "applied_revision": {"type": "null"}}},
+        {"properties": {"running": {"const": true}, "applied_revision": {"$ref": "#/components/schemas/Revision"}}}
+      ],
+      "description": "applied=saved exactly when running at publication; no operation count or live drain claim."
+    },
+    "MaintenanceMutation": {
+      "type": "object", "additionalProperties": false, "required": ["action", "accepting"],
+      "properties": {"action": {"const": "set_admission"}, "accepting": {"type": "boolean"}}
+    },
+    "MaintenanceCommandInput": {
+      "type": "object", "additionalProperties": false, "required": ["expected_target_revision", "controller_epoch", "command_id", "expected_policy_revision", "mutation"],
+      "properties": {"expected_target_revision": {"$ref": "#/components/schemas/Revision"}, "controller_epoch": {"$ref": "#/components/schemas/Revision"}, "command_id": {"$ref": "#/components/schemas/Revision"}, "expected_policy_revision": {"$ref": "#/components/schemas/Revision"}, "mutation": {"$ref": "#/components/schemas/MaintenanceMutation"}}
+    },
+    "MaintenanceReceipt": {
+      "type": "object", "additionalProperties": false, "required": ["controller_epoch", "command_id", "status", "policy_revision", "rejection", "user_id", "credential_id"],
+      "properties": {"controller_epoch": {"$ref": "#/components/schemas/Revision"}, "command_id": {"$ref": "#/components/schemas/Revision"}, "status": {"enum": ["saved", "applied", "rejected"]}, "policy_revision": {"$ref": "#/components/schemas/NullableRevision"}, "rejection": {"enum": [null, "invalid_policy", "policy_conflict", "resource_not_found", "policy_capacity"]}, "user_id": {"type": "null"}, "credential_id": {"type": "null"}},
+      "oneOf": [
+        {"properties": {"status": {"enum": ["saved", "applied"]}, "policy_revision": {"$ref": "#/components/schemas/Revision"}, "rejection": {"type": "null"}}},
+        {"properties": {"status": {"const": "rejected"}, "policy_revision": {"type": "null"}, "rejection": {"type": "string"}}}
+      ]
+    },
+    "MaintenanceCommandReply": {
+      "type": "object", "additionalProperties": false, "required": ["receipt", "replayed", "user", "credential", "secret", "secret_available"],
+      "properties": {"receipt": {"$ref": "#/components/schemas/MaintenanceReceipt"}, "replayed": {"type": "boolean"}, "user": {"type": "null"}, "credential": {"type": "null"}, "secret": {"type": "null"}, "secret_available": {"const": false}}
+    },
+    "MaintenanceDeliveredSubmission": {
+      "type": "object", "additionalProperties": false, "required": ["job", "response"],
+      "properties": {"job": {"$ref": "#/components/schemas/TargetJob"}, "response": {"$ref": "#/components/schemas/MaintenanceCommandReply"}}
+    },
+    "MaintenancePendingSubmission": {
+      "type": "object", "additionalProperties": false, "required": ["job", "response"],
+      "properties": {"job": {"$ref": "#/components/schemas/TargetJob"}, "response": {"type": "null"}}
+    }
+  }
+}

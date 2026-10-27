@@ -1,0 +1,495 @@
+{
+  "paths": {
+    "/api/v1/proxy/endpoints": {
+      "get": {
+        "operationId": "localProxyEndpoints",
+        "summary": "Read local proxy listener destinations",
+        "description": "No query parameters. Descriptive startup listeners and explicit effective public_address only. A wildcard bind, server IP or management URL is never substituted for a missing public address. This read does not probe reachability or reveal credentials.",
+        "security": [{ "Session": [] }],
+        "responses": {
+          "200": {
+            "description": "Configured endpoints and observed runtime flag",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/EndpointCatalog" }
+              }
+            }
+          },
+          "default": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/api/v1/targets/{id}/proxy/endpoints": {
+      "get": {
+        "operationId": "targetProxyEndpoints",
+        "summary": "Read a registered target's proxy destinations",
+        "description": "No query parameters. Uses the registered target and its current exact-DER authorization, not a supplied URL. Unsupported remote endpoint inventory returns remote_endpoints_unsupported (502). It is not a connectivity test.",
+        "security": [{ "Session": [] }],
+        "parameters": [{ "$ref": "#/components/parameters/ResourceId" }],
+        "responses": {
+          "200": {
+            "description": "Validated target endpoint inventory",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/EndpointCatalog" }
+              }
+            }
+          },
+          "default": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/api/v1/proxy/endpoint-settings": {
+      "get": {
+        "operationId": "localEndpointSettings",
+        "summary": "Read persistent public-address settings",
+        "description": "No query parameters. Metadata has an independent revision and startup inventory generation. Detached overrides are historical and cannot create listeners.",
+        "security": [{ "Session": [] }],
+        "responses": {
+          "200": {
+            "description": "Local metadata and immutable listener descriptions",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EndpointSettingsCatalog"
+                }
+              }
+            }
+          },
+          "default": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/api/v1/proxy/endpoint-settings/{id}": {
+      "put": {
+        "operationId": "changeLocalEndpoint",
+        "summary": "Set a listener's advertised public address",
+        "description": "No query parameters. id is a listener identity, never an array index. expected_revision is the metadata revision, not policy CAS; generation must match the current startup inventory. Inherit removes an override, hidden suppresses advertisement, custom stores a validated host:port. A detached override can only be removed through inherit. This does not change a socket, firewall, certificate, policy revision or proxy readiness. Read settings to reconcile a lost response before writing again.",
+        "security": [{ "Session": [], "Csrf": [] }],
+        "parameters": [
+          { "$ref": "#/components/parameters/ResourceId" },
+          { "$ref": "#/components/parameters/Origin" }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/EndpointChangeInput" }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Saved metadata catalog, not a reachability result",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EndpointSettingsCatalog"
+                }
+              }
+            }
+          },
+          "default": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/api/v1/targets/{id}/proxy/endpoint-settings": {
+      "get": {
+        "operationId": "targetEndpointSettings",
+        "summary": "Read a target's versioned public-address settings",
+        "description": "No query parameters. Version-four endpoint management is negotiated independently of old inventory. remote_endpoint_management_unsupported (502) is not a missing listener or permission grant.",
+        "security": [{ "Session": [] }],
+        "parameters": [{ "$ref": "#/components/parameters/ResourceId" }],
+        "responses": {
+          "200": {
+            "description": "Validated target settings",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EndpointSettingsCatalog"
+                }
+              }
+            }
+          },
+          "default": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/api/v1/targets/{id}/proxy/endpoint-commands": {
+      "post": {
+        "operationId": "submitTargetEndpointChange",
+        "summary": "Submit one persistent target metadata command",
+        "description": "No query parameters. expected_target_revision is the local target configuration CAS; controller_epoch/command_id share the node's command sequence with policy commands. expected_metadata_revision is independent of policy revision. Actor, destination node, protocol version and resource are derived by the server. The first response retains this job_id even if a later command replaces the target's current job. A 200 reply can contain a terminal rejection; saved metadata never means proxy policy applied. After 202 or a lost reply, use that job identity and explicit refresh rather than issuing a different command blindly.",
+        "security": [{ "Session": [], "Csrf": [] }],
+        "parameters": [
+          { "$ref": "#/components/parameters/ResourceId" },
+          { "$ref": "#/components/parameters/Origin" }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/EndpointRemoteInput" }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "A correlated remote receipt is available, saved or rejected",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EndpointDeliveredSubmission"
+                }
+              }
+            }
+          },
+          "202": {
+            "description": "Saved local ticket; remote result is pending or unknown",
+            "headers": {
+              "Location": {
+                "description": "Relative /api/v1/targets/{id}/command; correlate its job_id before using the current job",
+                "schema": { "type": "string" }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EndpointPendingSubmission"
+                }
+              }
+            }
+          },
+          "default": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/api/v1/targets/{id}/proxy/endpoint-command/refresh": {
+      "post": {
+        "operationId": "refreshTargetEndpointCommand",
+        "summary": "Refresh one known target metadata job",
+        "description": "No query parameters. Requires the exact job_id, current target and authorization. Refresh reads the version-four receipt; it is not a new metadata mutation or permission to repeat a terminal command.",
+        "security": [{ "Session": [], "Csrf": [] }],
+        "parameters": [
+          { "$ref": "#/components/parameters/ResourceId" },
+          { "$ref": "#/components/parameters/Origin" }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/EndpointRefreshInput" }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Current state of the correlated ticket",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/TargetJob" }
+              }
+            }
+          },
+          "default": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    }
+  },
+  "schemas": {
+    "ListenerProtocol": {
+      "type": "string",
+      "enum": ["http", "https", "socks5", "masque", "auto"],
+      "description": "Listener transport, distinct from user protocol permissions. auto remains auto in metadata; there is no auto:// client URL."
+    },
+    "ListenerBind": {
+      "type": "string",
+      "description": "Canonical numeric SocketAddr with nonzero port, bracketed for IPv6. Web-managed listeners change through service control; startup-file listeners require restart. Bind metadata is not automatically a client destination."
+    },
+    "PublicAddress": {
+      "type": "string",
+      "minLength": 3,
+      "maxLength": 259,
+      "description": "Canonical credential-free ASCII host:port, with explicit decimal port 1..65535 and bracketed IPv6. DNS names are lower-case labels without trailing dot. No scheme, userinfo, URI parts, whitespace, IDNA, legacy numeric-IP spellings, unspecified/multicast/broadcast address. The API performs semantic validation without DNS lookup; a valid claim is not proof of reachability, TLS coverage or egress identity."
+    },
+    "NullablePublicAddress": {
+      "anyOf": [
+        { "$ref": "#/components/schemas/PublicAddress" },
+        { "type": "null" }
+      ]
+    },
+    "EndpointGeneration": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$",
+      "description": "Digest of this node's current sorted startup listener identities and configured public-address defaults. Not a policy revision or an address reachability proof."
+    },
+    "EndpointSelection": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["mode"],
+          "properties": { "mode": { "const": "inherit" } }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["mode"],
+          "properties": { "mode": { "const": "hidden" } }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["mode", "public_address"],
+          "properties": {
+            "mode": { "const": "custom" },
+            "public_address": { "$ref": "#/components/schemas/PublicAddress" }
+          }
+        }
+      ],
+      "description": "inherit uses the current startup default; hidden explicitly advertises nothing; custom uses this validated address. Omission and null are not inherit."
+    },
+    "EndpointListener": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["protocol", "bind", "public_address"],
+      "properties": {
+        "protocol": { "$ref": "#/components/schemas/ListenerProtocol" },
+        "bind": { "$ref": "#/components/schemas/ListenerBind" },
+        "public_address": {
+          "$ref": "#/components/schemas/NullablePublicAddress"
+        }
+      }
+    },
+    "EndpointCatalog": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["node_id", "proxy_running", "listeners"],
+      "properties": {
+        "node_id": { "$ref": "#/components/schemas/Id" },
+        "proxy_running": { "type": "boolean" },
+        "listeners": {
+          "type": "array",
+          "maxItems": 16,
+          "items": { "$ref": "#/components/schemas/EndpointListener" }
+        }
+      },
+      "description": "proxy_running=false may retain configured listeners. A running proxy has at least one listener. A null public_address remains unadvertised, even for a concrete bind."
+    },
+    "EndpointSettingListener": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "protocol",
+        "bind",
+        "configured_public_address",
+        "selection",
+        "public_address"
+      ],
+      "properties": {
+        "id": { "$ref": "#/components/schemas/Id" },
+        "protocol": { "$ref": "#/components/schemas/ListenerProtocol" },
+        "bind": { "$ref": "#/components/schemas/ListenerBind" },
+        "configured_public_address": {
+          "$ref": "#/components/schemas/NullablePublicAddress"
+        },
+        "selection": { "$ref": "#/components/schemas/EndpointSelection" },
+        "public_address": {
+          "$ref": "#/components/schemas/NullablePublicAddress"
+        }
+      },
+      "description": "id is bound to node/protocol/bind, independent of array order. Effective public_address follows selection: inherit uses configured_public_address, custom uses its value, hidden yields null."
+    },
+    "EndpointDetachedSetting": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "protocol", "bind", "selection"],
+      "properties": {
+        "id": { "$ref": "#/components/schemas/Id" },
+        "protocol": { "$ref": "#/components/schemas/ListenerProtocol" },
+        "bind": { "$ref": "#/components/schemas/ListenerBind" },
+        "selection": {
+          "allOf": [
+            { "$ref": "#/components/schemas/EndpointSelection" },
+            { "not": { "properties": { "mode": { "const": "inherit" } } } }
+          ]
+        }
+      },
+      "description": "Historical override for a listener absent from this startup configuration. It does not create a listener or client endpoint."
+    },
+    "EndpointSettingsCatalog": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "node_id",
+        "proxy_running",
+        "revision",
+        "generation",
+        "listeners",
+        "detached"
+      ],
+      "properties": {
+        "node_id": { "$ref": "#/components/schemas/Id" },
+        "proxy_running": { "type": "boolean" },
+        "revision": { "$ref": "#/components/schemas/Revision" },
+        "generation": { "$ref": "#/components/schemas/EndpointGeneration" },
+        "listeners": {
+          "type": "array",
+          "maxItems": 16,
+          "items": { "$ref": "#/components/schemas/EndpointSettingListener" }
+        },
+        "detached": {
+          "type": "array",
+          "maxItems": 256,
+          "items": { "$ref": "#/components/schemas/EndpointDetachedSetting" }
+        }
+      },
+      "description": "Metadata revision and inventory generation have their own CAS domain. Listener IDs are unique across current and detached lists; at most 256 non-inherit overrides in total. Neither a newer revision nor proxy_running proves public reachability."
+    },
+    "EndpointReference": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["listener_id", "generation"],
+      "properties": {
+        "listener_id": { "$ref": "#/components/schemas/Id" },
+        "generation": { "$ref": "#/components/schemas/EndpointGeneration" }
+      }
+    },
+    "EndpointMutation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["listener_id", "generation", "selection"],
+      "properties": {
+        "listener_id": { "$ref": "#/components/schemas/Id" },
+        "generation": { "$ref": "#/components/schemas/EndpointGeneration" },
+        "selection": { "$ref": "#/components/schemas/EndpointSelection" }
+      }
+    },
+    "EndpointChangeInput": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["expected_revision", "generation", "selection"],
+      "properties": {
+        "expected_revision": { "$ref": "#/components/schemas/Revision" },
+        "generation": { "$ref": "#/components/schemas/EndpointGeneration" },
+        "selection": { "$ref": "#/components/schemas/EndpointSelection" }
+      }
+    },
+    "EndpointRemoteInput": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "expected_target_revision",
+        "controller_epoch",
+        "command_id",
+        "expected_metadata_revision",
+        "mutation"
+      ],
+      "properties": {
+        "expected_target_revision": { "$ref": "#/components/schemas/Revision" },
+        "controller_epoch": { "$ref": "#/components/schemas/Revision" },
+        "command_id": { "$ref": "#/components/schemas/Revision" },
+        "expected_metadata_revision": {
+          "$ref": "#/components/schemas/Revision"
+        },
+        "mutation": { "$ref": "#/components/schemas/EndpointMutation" }
+      }
+    },
+    "EndpointRefreshInput": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["job_id"],
+      "properties": { "job_id": { "$ref": "#/components/schemas/Id" } }
+    },
+    "MetadataReceipt": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "controller_epoch",
+        "command_id",
+        "status",
+        "metadata_revision",
+        "rejection",
+        "listener_id",
+        "generation"
+      ],
+      "properties": {
+        "controller_epoch": { "$ref": "#/components/schemas/Revision" },
+        "command_id": { "$ref": "#/components/schemas/Revision" },
+        "status": { "enum": ["saved", "rejected"] },
+        "metadata_revision": {
+          "$ref": "#/components/schemas/NullableRevision"
+        },
+        "rejection": {
+          "type": ["string", "null"],
+          "enum": [
+            null,
+            "invalid_endpoint",
+            "endpoint_revision_changed",
+            "endpoint_configuration_changed",
+            "endpoint_capacity"
+          ]
+        },
+        "listener_id": { "$ref": "#/components/schemas/NullableId" },
+        "generation": {
+          "anyOf": [
+            { "$ref": "#/components/schemas/EndpointGeneration" },
+            { "type": "null" }
+          ]
+        }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "status": { "const": "saved" } } },
+          "then": {
+            "properties": {
+              "metadata_revision": { "$ref": "#/components/schemas/Revision" },
+              "rejection": { "type": "null" },
+              "listener_id": { "$ref": "#/components/schemas/Id" },
+              "generation": {
+                "$ref": "#/components/schemas/EndpointGeneration"
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "metadata_revision": { "type": "null" },
+              "rejection": { "type": "string" },
+              "listener_id": { "type": "null" },
+              "generation": { "type": "null" }
+            }
+          }
+        }
+      ],
+      "description": "Exact command receipt. A saved metadata receipt has no policy_revision or runtime-applied claim. Rejected receipts never carry saved listener/generation/revision fields."
+    },
+    "MetadataCommandReply": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["receipt", "replayed"],
+      "properties": {
+        "receipt": { "$ref": "#/components/schemas/MetadataReceipt" },
+        "replayed": { "type": "boolean" }
+      }
+    },
+    "EndpointDeliveredSubmission": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["job", "response"],
+      "properties": {
+        "job": { "$ref": "#/components/schemas/TargetJob" },
+        "response": { "$ref": "#/components/schemas/MetadataCommandReply" }
+      }
+    },
+    "EndpointPendingSubmission": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["job", "response"],
+      "properties": {
+        "job": { "$ref": "#/components/schemas/TargetJob" },
+        "response": { "type": "null" }
+      }
+    }
+  }
+}

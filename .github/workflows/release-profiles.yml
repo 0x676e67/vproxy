@@ -1,0 +1,326 @@
+name: Release profiles
+
+on:
+  workflow_call:
+    outputs:
+      cross-tag:
+        description: Validated proxy, API, and Web archive tag
+        value: ${{ jobs.cross.outputs.tag }}
+      package-version:
+        description: Cargo package version used for CLI checks
+        value: ${{ jobs.cross.outputs.version }}
+      cross-artifact:
+        description: Exact artifact name emitted by the producing build attempt
+        value: ${{ jobs.cross.outputs.artifact-name }}
+  workflow_dispatch:
+  push:
+    branches: ["main"]
+    paths:
+      - "src/**"
+      - "web/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "build.rs"
+      - ".gitignore"
+      - ".gitattributes"
+      - ".github/build.sh"
+      - ".github/zig-cc.sh"
+      - ".github/cross_*.py"
+      - ".github/proxy_runtime*.py"
+      - ".github/install.sh"
+      - ".github/install_test.py"
+      - ".github/release_profiles*.py"
+      - ".github/workflows/release-profiles.yml"
+      - ".github/workflows/ci.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  installer:
+    name: Installer offline checks (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 5
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@e797f83bcb11b83ae66e0230d6156d7c80228e7c # v6.0.0
+        with:
+          python-version: "3.12"
+      - name: Check shell entry and offline failure boundaries
+        shell: bash
+        run: |
+          bash -n .github/install.sh
+          bash .github/install.sh --help
+          python3 .github/install_test.py
+
+  cross-script:
+    name: Cross-release script failure checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@e797f83bcb11b83ae66e0230d6156d7c80228e7c # v6.0.0
+        with:
+          python-version: "3.12"
+      - name: Check Bash syntax and build failures without compiling
+        run: |
+          bash -n .github/build.sh
+          bash -n .github/zig-cc.sh
+          python .github/release_profiles_cross_test.py -v
+          python .github/cross_tools_test.py -v
+          python .github/cross_artifacts_test.py -v
+          python .github/proxy_runtime_test.py -v
+
+  cross:
+    name: Build and check three profiles for nine targets
+    needs: cross-script
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    outputs:
+      tag: ${{ steps.names.outputs.tag }}
+      version: ${{ steps.names.outputs.version }}
+      artifact-name: ${{ steps.names.outputs.artifact-name }}
+    env:
+      CARGO_BUILD_JOBS: "2"
+      CARGO_INCREMENTAL: "0"
+      RUSTUP_TOOLCHAIN: "1.97.0"
+      RUSTUP_AUTO_INSTALL: "0"
+      CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER: x86_64-w64-mingw32-gcc-posix
+      CARGO_TARGET_I686_PC_WINDOWS_GNU_LINKER: i686-w64-mingw32-gcc-posix
+      CC_x86_64_pc_windows_gnu: x86_64-w64-mingw32-gcc-posix
+      CC_i686_pc_windows_gnu: i686-w64-mingw32-gcc-posix
+      AWS_LC_SYS_USE_SYSTEM: "0"
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@e797f83bcb11b83ae66e0230d6156d7c80228e7c # v6.0.0
+        with:
+          python-version: "3.12"
+      - uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1
+        with:
+          toolchain: "1.97.0"
+          target: x86_64-pc-windows-gnu,i686-pc-windows-gnu,x86_64-apple-darwin,aarch64-apple-darwin,x86_64-unknown-linux-musl,aarch64-unknown-linux-musl,armv7-unknown-linux-musleabihf,arm-unknown-linux-musleabihf,i686-unknown-linux-musl
+          # Preserve the locally tested flags. Strict Clippy remains a separate
+          # gate; cross-linker SDK/deprecation diagnostics stay visible here.
+          rustflags: ""
+      - name: Select archive tag and package version
+        id: names
+        shell: bash
+        run: |
+          set -euo pipefail
+          version=$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["package"]["version"])')
+          [[ $version =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]]
+          if [[ $GITHUB_REF_TYPE == tag ]]; then
+            [[ $GITHUB_REF_NAME == "v$version" ]]
+            tag=$version
+          else
+            tag=validation-$GITHUB_SHA
+          fi
+          printf 'tag=%s\nversion=%s\n' "$tag" "$version" >> "$GITHUB_OUTPUT"
+          printf 'artifact-name=profile-cross-%s-%s\n' "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" >> "$GITHUB_OUTPUT"
+      - name: Install the tested MinGW and NASM versions
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends --no-upgrade -y \
+            gcc-mingw-w64-x86-64-posix=13.2.0-6ubuntu1+26.1 \
+            gcc-mingw-w64-i686-posix=13.2.0-6ubuntu1+26.1 \
+            nasm=2.16.01-1build1
+          for compiler in gcc-mingw-w64-x86-64-posix gcc-mingw-w64-i686-posix; do
+            [[ $(dpkg-query -W -f='${Version}' "$compiler") == 13.2.0-6ubuntu1+26.1 ]]
+          done
+          x86_64-w64-mingw32-gcc-posix --version
+          i686-w64-mingw32-gcc-posix --version
+          [[ $(dpkg-query -W -f='${Version}' nasm) == 2.16.01-1build1 ]]
+          nasm -v | grep -Fx 'NASM version 2.16.01'
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      # The embedded bundle is built once in the producing checkout. Its
+      # manifest hashes these exact source bytes, including line endings.
+      - name: Build Web bundle for all cross targets
+        shell: bash
+        working-directory: web
+        run: |
+          npm ci
+          npm run build
+      - name: Prepare SHA-pinned cross tools and build
+        shell: bash
+        env:
+          VPROXY_ARCHIVE_TAG: ${{ steps.names.outputs.tag }}
+        run: |
+          set -euo pipefail
+          python .github/cross_tools.py --directory "$RUNNER_TEMP/cross-tools"
+          source "$RUNNER_TEMP/cross-tools/environment.sh"
+          rustc --version | grep -E '^rustc 1\.97\.0 '
+          os=all profiles=all tag="$VPROXY_ARCHIVE_TAG" bash .github/build.sh
+      - name: Inspect all profiles and run the Linux x64 payloads
+        env:
+          VPROXY_ARCHIVE_TAG: ${{ steps.names.outputs.tag }}
+          VPROXY_PACKAGE_VERSION: ${{ steps.names.outputs.version }}
+        run: >-
+          python .github/cross_artifacts.py --artifacts bin
+          --work-dir "${{ runner.temp }}/cross-check"
+          --tag "$VPROXY_ARCHIVE_TAG" --version "$VPROXY_PACKAGE_VERSION" --profiles all --runtime linux --proxy-runtime
+      - name: Retain Linux archive/runtime diagnostics
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: cross-runtime-linux-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/cross-check/report.json
+            ${{ runner.temp }}/cross-check/*/version.log
+            ${{ runner.temp }}/cross-check/*/help.log
+            ${{ runner.temp }}/cross-check/*/notices-help.log
+            ${{ runner.temp }}/cross-check/*/serve-help.log
+            ${{ runner.temp }}/cross-check/*/proxy-runtime/**
+          if-no-files-found: ignore
+          retention-days: 7
+      # Publish consumers receive these same 27 archives and 27 checksums.
+      # Native package diagnostics remain separate and are not promoted.
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ${{ steps.names.outputs.artifact-name }}
+          path: bin/
+          if-no-files-found: error
+          retention-days: 7
+
+  cross-runtime:
+    name: Run checked profile payloads (${{ matrix.runtime }})
+    needs: cross
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            runtime: windows
+          - os: macos-latest
+            runtime: macos
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@e797f83bcb11b83ae66e0230d6156d7c80228e7c # v6.0.0
+        with:
+          python-version: "3.12"
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: ${{ needs.cross.outputs.artifact-name }}
+          path: ${{ runner.temp }}/profile-cross
+      - name: Inspect archives and run only compatible payloads
+        shell: bash
+        env:
+          VPROXY_ARCHIVE_TAG: ${{ needs.cross.outputs.tag }}
+          VPROXY_PACKAGE_VERSION: ${{ needs.cross.outputs.version }}
+          VPROXY_RUNTIME: ${{ matrix.runtime }}
+        run: |
+          set -euo pipefail
+          proxy_checks=()
+          if [[ $VPROXY_RUNTIME == windows ]]; then
+            proxy_checks=(--proxy-runtime)
+          fi
+          python .github/cross_artifacts.py --artifacts "$RUNNER_TEMP/profile-cross" \
+            --work-dir "$RUNNER_TEMP/cross-runtime" \
+            --tag "$VPROXY_ARCHIVE_TAG" --version "$VPROXY_PACKAGE_VERSION" \
+            --profiles all --runtime "$VPROXY_RUNTIME" "${proxy_checks[@]}"
+      - name: Retain archive/runtime diagnostics
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: cross-runtime-${{ matrix.runtime }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/cross-runtime/report.json
+            ${{ runner.temp }}/cross-runtime/*/version.log
+            ${{ runner.temp }}/cross-runtime/*/help.log
+            ${{ runner.temp }}/cross-runtime/*/notices-help.log
+            ${{ runner.temp }}/cross-runtime/*/serve-help.log
+            ${{ runner.temp }}/cross-runtime/*/proxy-runtime/**
+          if-no-files-found: ignore
+          retention-days: 7
+
+  package:
+    name: Package (${{ matrix.os }})
+    needs: cross-script
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      max-parallel: 3
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    env:
+      CARGO_BUILD_JOBS: "2"
+      CARGO_INCREMENTAL: "0"
+      PYTHONDONTWRITEBYTECODE: "1"
+      AWS_LC_SYS_USE_SYSTEM: "0"
+
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1
+        with:
+          toolchain: "1.97.0"
+
+      - uses: actions/setup-python@e797f83bcb11b83ae66e0230d6156d7c80228e7c # v6.0.0
+        with:
+          python-version: "3.12"
+
+      - name: Test package checker
+        run: python .github/release_profiles_test.py -v
+
+      # Check both Node-free variants before generating any frontend assets.
+      # Builds are serial per host so they can safely share one Cargo cache.
+      - name: Package proxy-only
+        shell: bash
+        run: python .github/release_profiles.py --mode proxy --work-dir "$RUNNER_TEMP/release-proxy" --cache-dir "$RUNNER_TEMP/release-cache"
+
+      - name: Package API-only
+        shell: bash
+        run: python .github/release_profiles.py --mode api --work-dir "$RUNNER_TEMP/release-api" --cache-dir "$RUNNER_TEMP/release-cache"
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      # Build on each host: the manifest hashes exact source bytes, including
+      # checkout line endings. No bundle is taken from another run or platform.
+      - name: Build API Web bundle
+        shell: bash
+        working-directory: web
+        run: |
+          npm ci
+          npm run build
+
+      - name: Package embedded Web
+        shell: bash
+        run: python .github/release_profiles.py --mode web --work-dir "$RUNNER_TEMP/release-web" --cache-dir "$RUNNER_TEMP/release-cache"
+
+      # These are diagnostic workflow artifacts, not a GitHub Release or a
+      # crates.io publication. Checksums provide integrity, not a signature.
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: release-check-${{ matrix.os }}
+          path: |
+            ${{ runner.temp }}/release-proxy/artifacts/
+            ${{ runner.temp }}/release-api/artifacts/
+            ${{ runner.temp }}/release-web/artifacts/
+          if-no-files-found: error
+          retention-days: 7

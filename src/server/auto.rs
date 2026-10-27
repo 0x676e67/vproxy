@@ -1,14 +1,14 @@
-use std::path::PathBuf;
+use std::{path::PathBuf, sync::Arc};
 
 use tokio::{
     io::ReadBuf,
     net::{TcpListener, TcpSocket},
+    sync::Semaphore,
 };
 
 use super::{
-    Acceptor, Context, Handle, Server, drain_connections,
+    Acceptor, Context, Handle, Server, drain_connections, drain_permits,
     http::{HttpAcceptor, accept::DefaultAcceptor, tls::RustlsAcceptor},
-    log_connection_result,
     socks::Socks5Acceptor,
 };
 
@@ -18,6 +18,8 @@ use super::{
 /// to the appropriate protocol handler based on the first few bytes of the connection.
 pub struct AutoDetectServer {
     listener: TcpListener,
+    limit: Arc<Semaphore>,
+    capacity: u32,
     acceptor: (
         Socks5Acceptor,
         HttpAcceptor<DefaultAcceptor>,
@@ -26,11 +28,45 @@ pub struct AutoDetectServer {
 }
 
 impl AutoDetectServer {
+    /// Inspect the actual HTTPS branch while leaving the plaintext branches
+    /// and per-connection protocol detection unchanged.
+    #[cfg(feature = "management")]
+    pub(super) fn certificate_leaf(&self) -> Option<&[u8]> {
+        self.acceptor.2.certificate_leaf()
+    }
+
+    /// Inspect the bound socket for fixtures that request port zero.
+    #[cfg(test)]
+    pub(super) fn local_addr(&self) -> std::io::Result<std::net::SocketAddr> {
+        self.listener.local_addr()
+    }
+
     /// Creates a new [`AutoDetectServer`] with the given context.
     pub fn new<P>(ctx: Context, tls_cert: P, tls_key: P) -> std::io::Result<AutoDetectServer>
     where
         P: Into<Option<PathBuf>>,
     {
+        Self::with_acceptor(ctx, move |http| http.with_https(tls_cert, tls_key))
+    }
+
+    /// Keep all three detection branches on their original socket/capacity,
+    /// using the managed HTTPS identity already prepared before runtime start.
+    #[cfg(feature = "management")]
+    pub(crate) fn from_identity(
+        ctx: Context,
+        identity: super::tls::Identity,
+    ) -> std::io::Result<Self> {
+        Self::with_acceptor(ctx, move |http| http.with_identity(identity))
+    }
+
+    fn with_acceptor(
+        ctx: Context,
+        https: impl FnOnce(
+            HttpAcceptor<DefaultAcceptor>,
+        ) -> std::io::Result<HttpAcceptor<RustlsAcceptor>>,
+    ) -> std::io::Result<Self> {
+        let capacity = ctx.concurrent;
+        let limit = super::connection_limit(ctx.concurrent)?;
         let socket = if ctx.bind.is_ipv4() {
             TcpSocket::new_v4()?
         } else {
@@ -41,16 +77,16 @@ impl AutoDetectServer {
         socket.set_reuseaddr(true)?;
         socket.bind(ctx.bind)?;
         socket.listen(ctx.concurrent).and_then(|listener| {
-            HttpAcceptor::new(ctx.clone())
-                .with_https(tls_cert, tls_key)
-                .map(|https_acceptor| AutoDetectServer {
-                    listener,
-                    acceptor: (
-                        Socks5Acceptor::new(ctx.clone()),
-                        HttpAcceptor::new(ctx),
-                        https_acceptor,
-                    ),
-                })
+            https(HttpAcceptor::new(ctx.clone())).map(|https_acceptor| AutoDetectServer {
+                listener,
+                limit,
+                capacity,
+                acceptor: (
+                    Socks5Acceptor::new(ctx.clone()),
+                    HttpAcceptor::new(ctx),
+                    https_acceptor,
+                ),
+            })
         })
     }
 }
@@ -63,15 +99,20 @@ impl Server for AutoDetectServer {
         );
         let mut connections = tokio::task::JoinSet::new();
 
-        loop {
+        let result = loop {
             tokio::select! {
-                _ = handle.wait_graceful_shutdown() => break,
+                biased;
+                _ = handle.wait_graceful_shutdown() => break Ok(()),
                 result = connections.join_next(), if !connections.is_empty() => {
-                    if let Some(result) = result {
-                        log_connection_result(result, "auto");
+                    if let Some(Err(error)) = result {
+                        break Err(std::io::Error::other(error));
                     }
                 }
-                conn = AutoDetectServer::incoming(&mut self.listener) => {
+                conn = AutoDetectServer::incoming(&mut self.listener, &self.limit) => {
+                    let (conn, permit) = match conn {
+                        Ok(conn) => conn,
+                        Err(error) => break Err(error),
+                    };
                     let acceptor = self.acceptor.clone();
                     let connection_handle = handle.clone();
                     connections.spawn_on(async move {
@@ -87,18 +128,30 @@ impl Server for AutoDetectServer {
                         };
                         if peeked.is_ok() {
                             match protocol[0] {
-                                0x05 => acceptor.0.accept(conn, connection_handle).await,
-                                0x00..0x41 => acceptor.2.accept(conn, connection_handle).await,
-                                _ => acceptor.1.accept(conn, connection_handle).await,
+                                0x05 => {
+                                    let _permit = permit;
+                                    acceptor.0.accept(conn, connection_handle).await;
+                                }
+                                0x00..0x41 => acceptor.2.with_connection_permit(permit)
+                                    .accept(conn, connection_handle).await,
+                                _ => acceptor.1.with_connection_permit(permit)
+                                    .accept(conn, connection_handle).await,
                             }
                         }
-                    }, &pingora_runtime::current_handle());
+                    }, handle.runtime_handle());
                 }
             }
+        };
+        drop(self.listener);
+        if result.is_err() {
+            handle.request_graceful_shutdown();
         }
-        drain_connections(&mut connections, "auto").await;
-        self.acceptor.1.shutdown().await;
-        self.acceptor.2.shutdown().await;
-        Ok(())
+        let connections = drain_connections(&mut connections, "auto", &handle).await;
+        let (http, https) = tokio::join!(
+            self.acceptor.1.shutdown(&handle),
+            self.acceptor.2.shutdown(&handle),
+        );
+        let permits = drain_permits(&self.limit, self.capacity, &handle).await;
+        result.and(connections).and(http).and(https).and(permits)
     }
 }

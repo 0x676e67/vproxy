@@ -1,0 +1,68 @@
+export default {
+  "alertEvents.title": "事件历史",
+  "alertEvents.conflict": "问题状态已变化，请重新读取后再确认。",
+  "alertEvents.storeCapacity":
+    "历史存储已达到容量上限，请先核对原确认结果，再进行后续操作。",
+  "alertEvents.scope":
+    "读取本管理节点的持久记录，包含启用后台采集后留存的观察。来源 ID 表示被观察节点；选择来源只筛选本地记录，不会联系该节点或读取其历史。",
+  "alertEvents.warning":
+    "历史不能证明当前健康。确认仅标记某次状态已查看，不会修复问题。",
+  "alertEvents.refresh": "读取最新事件",
+  "alertEvents.eventId": "原始事件 ID",
+  "alertEvents.exactHint": "原事件 ID 在本管理节点的全部来源中精确查询。",
+  "alertEvents.observer": "观察管理节点",
+  "alertEvents.lookup": "查找事件",
+  "alertEvents.invalidId": "请输入无前导零的正十进制事件 ID。",
+  "alertEvents.missing":
+    "该记录未留存。记录缺失或已裁剪，不能证明事件从未发生。",
+  "alertEvents.trimmed":
+    "更早的事件已因保留上限移除，对应问题记录可能仍被保留。",
+  "alertEvents.empty": "此页没有留存事件",
+  "alertEvents.sequence": "事件序号",
+  "alertEvents.episode": "问题记录",
+  "alertEvents.transition": "留存变化",
+  "alertEvents.transition.opened": "发现问题",
+  "alertEvents.transition.reason_changed": "原因变化",
+  "alertEvents.transition.recovered": "观测到恢复",
+  "alertEvents.transition.unmonitored": "监控结束",
+  "alertEvents.transition.acknowledged": "状态已确认",
+  "alertEvents.recorded": "记录时间",
+  "alertEvents.boot": "观测进程 ID",
+  "alertEvents.incident": "原始告警 ID",
+  "alertEvents.endReason": "监控结束原因",
+  "alertEvents.end.source_unmonitored": "观测来源停止",
+  "alertEvents.end.monitor_restarted": "管理进程重启",
+  "alertEvents.unknownTime": "未知",
+  "alertEvents.outsideDate": "Unix 毫秒：{value}（超出可显示日期范围）",
+  "alertEvents.openEpisode": "查看并确认",
+  "alertEvents.episodeTitle": "留存的问题记录",
+  "alertEvents.episodeHint":
+    "这里是原问题最新留存的状态，不会执行新的健康检查。",
+  "alertEvents.latest": "最新状态序号",
+  "alertEvents.acknowledged": "最新状态已确认",
+  "alertEvents.unacknowledged": "最新状态未确认",
+  "alertEvents.previousAck": "已确认过先前状态",
+  "alertEvents.ackSequence": "上次确认的状态",
+  "alertEvents.ackBy": "留存的确认管理员",
+  "alertEvents.ackAt": "留存的确认时间",
+  "alertEvents.ack": "标记已读",
+  "alertEvents.confirm": "将这次状态标记为已读？",
+  "alertEvents.confirmHint": "不会结束告警、恢复监控或重试任务。",
+  "alertEvents.unknown": "确认结果未知。请读取原问题记录，不要重新发送请求。",
+  "alertEvents.confirming": "正在提交确认",
+  "alertEvents.readOriginal": "读取原问题记录",
+  "alertEvents.covered": "原状态已被确认，但不能据此认定是哪次请求完成了确认。",
+  "alertEvents.advanced": "问题已有后续状态。结束本次核对不会确认这个新状态。",
+  "alertEvents.finish": "结束本次核对",
+  "alertEvents.finishHint":
+    "仅删除本浏览器的提醒。原请求结果可能仍未知，不会重新发送任何请求。",
+  "alertEvents.missingReview":
+    "原请求结果仍未知，历史已不可查询。结束本次核对仅删除本浏览器的提醒，不会撤销确认，也不会重发。",
+  "alertEvents.storage":
+    "浏览器核对存储不可用，暂不能确认状态，历史读取仍可使用。",
+  "alertEvents.capacity":
+    "核对存储已满，请先处理已有确认结果，再开始新的确认。",
+  "alertEvents.badge": "未读通知：{count}",
+  "alertEvents.badgeUnknown": "未确认问题数量未知",
+  "alertEvents.badgeHint": "在事件历史中标记已读后移除提醒，不会修复告警",
+};

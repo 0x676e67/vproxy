@@ -427,16 +427,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn escapes_systemd_expansion_markers() {
-        let mut value = "100%-$TOKEN".to_owned();
-        escape_systemd_expansions(&mut value);
-        assert_eq!(value, "100%%-$$TOKEN");
-    }
-
-    #[test]
-    fn leaves_plain_arguments_unchanged() {
-        let mut value = "127.0.0.1:1080".to_owned();
-        escape_systemd_expansions(&mut value);
-        assert_eq!(value, "127.0.0.1:1080");
+    fn escapes_expansion_markers_and_preserves_plain_arguments() {
+        for (input, expected) in [
+            ("100%-$TOKEN", "100%%-$$TOKEN"),
+            ("127.0.0.1:1080", "127.0.0.1:1080"),
+        ] {
+            let mut value = input.to_owned();
+            escape_systemd_expansions(&mut value);
+            assert_eq!(value, expected);
+        }
     }
 }

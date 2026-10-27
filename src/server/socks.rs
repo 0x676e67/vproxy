@@ -12,6 +12,7 @@ use bytes::BytesMut;
 use tokio::{
     io::AsyncWriteExt,
     net::{TcpListener, TcpStream, UdpSocket},
+    sync::Semaphore,
 };
 use tracing::{Level, instrument};
 
@@ -26,8 +27,13 @@ use self::{
     error::Error,
     proto::{Address, Reply, UdpHeader},
 };
-use super::{Acceptor, Context, Handle, Server, drain_connections, io, log_connection_result};
+use super::{Acceptor, Context, Handle, Server, drain_connections, io};
 use crate::connect::{Connector, TcpConnector, UdpConnector};
+#[cfg(feature = "management")]
+use crate::{
+    server::auth::Authenticated,
+    traffic::{Direction, Io, Meter},
+};
 
 /// SOCKS5 acceptor.
 #[derive(Clone)]
@@ -39,6 +45,7 @@ pub struct Socks5Acceptor {
 /// SOCKS5 server.
 pub struct Socks5Server {
     listener: TcpListener,
+    limit: Arc<Semaphore>,
     acceptor: Socks5Acceptor,
 }
 
@@ -47,10 +54,7 @@ pub struct Socks5Server {
 impl Socks5Acceptor {
     /// Create a new [`Socks5Acceptor`] instance.
     pub fn new(ctx: Context) -> Self {
-        let auth = match (ctx.auth.username, ctx.auth.password) {
-            (Some(username), Some(password)) => AuthAdaptor::password(username, password),
-            _ => AuthAdaptor::no(),
-        };
+        let auth = AuthAdaptor::from_source(ctx.auth);
 
         Socks5Acceptor {
             auth: Arc::new(auth),
@@ -76,8 +80,15 @@ impl Acceptor for Socks5Acceptor {
 // ===== impl Socks5Server =====
 
 impl Socks5Server {
+    /// Inspect the bound socket for fixtures that request port zero.
+    #[cfg(test)]
+    pub(super) fn local_addr(&self) -> std::io::Result<SocketAddr> {
+        self.listener.local_addr()
+    }
+
     /// Create a new [`Socks5Server`] instance.
     pub fn new(ctx: Context) -> std::io::Result<Self> {
+        let limit = super::connection_limit(ctx.concurrent)?;
         let socket = if ctx.bind.is_ipv4() {
             tokio::net::TcpSocket::new_v4()?
         } else {
@@ -89,6 +100,7 @@ impl Socks5Server {
         socket.bind(ctx.bind)?;
         socket.listen(ctx.concurrent).map(|listener| Socks5Server {
             listener,
+            limit,
             acceptor: Socks5Acceptor::new(ctx),
         })
     }
@@ -102,24 +114,40 @@ impl Server for Socks5Server {
         );
         let mut connections = tokio::task::JoinSet::new();
 
-        loop {
+        let result = loop {
             tokio::select! {
-                _ = handle.wait_graceful_shutdown() => break,
+                biased;
+                _ = handle.wait_graceful_shutdown() => break Ok(()),
                 result = connections.join_next(), if !connections.is_empty() => {
-                    if let Some(result) = result {
-                        log_connection_result(result, "SOCKS5");
+                    if let Some(Err(error)) = result {
+                        break Err(std::io::Error::other(error));
                     }
                 }
-                conn = Socks5Server::incoming(&mut self.listener) => {
-                    connections.spawn_on(
-                        self.acceptor.clone().accept(conn, handle.clone()),
-                        &pingora_runtime::current_handle(),
-                    );
+                conn = Socks5Server::incoming(&mut self.listener, &self.limit) => {
+                    let (conn, permit) = match conn {
+                        Ok(conn) => conn,
+                        Err(error) => break Err(error),
+                    };
+                    let acceptor = self.acceptor.clone();
+                    let connection_handle = handle.clone();
+                    connections.spawn_on(async move {
+                        // Includes authentication, BIND waiting and the entire
+                        // UDP association, not just its first reply.
+                        let _permit = permit;
+                        acceptor.accept(conn, connection_handle).await;
+                    }, handle.runtime_handle());
                 }
             }
+        };
+        // Refuse new TCP sessions before waiting on CONNECT/BIND or the TCP
+        // control connection that owns a UDP association (RFC 1928 §6).
+        // https://www.rfc-editor.org/rfc/rfc1928.html#section-6
+        drop(self.listener);
+        if result.is_err() {
+            handle.request_graceful_shutdown();
         }
-        drain_connections(&mut connections, "SOCKS5").await;
-        Ok(())
+        let drained = drain_connections(&mut connections, "SOCKS5", &handle).await;
+        result.and(drained)
     }
 }
 
@@ -128,7 +156,7 @@ async fn handle(
     socket_addr: SocketAddr,
     connector: Connector,
 ) -> std::io::Result<()> {
-    let (conn, extension) = match conn.authenticate().await {
+    let (conn, authenticated) = match conn.authenticate().await {
         Ok(authenticated) => authenticated,
         Err(error) => {
             if error.is_rejected() {
@@ -139,24 +167,84 @@ async fn handle(
         }
     };
 
-    match conn.wait_request().await? {
+    let extension = authenticated.extension;
+    let connector = connector.with_source(authenticated.source);
+    let result = match conn.wait_request().await? {
         ClientConnection::UdpAssociate(associate, address) => {
-            handle_udp(associate, address, connector.udp(extension)).await
+            if authenticated.explicit_preset() {
+                // The command is implemented, but this TCP-only request is
+                // denied by policy (RFC 1928 section 6, REP 0x02).
+                // https://www.rfc-editor.org/rfc/rfc1928.html#section-6
+                associate
+                    .reject(Reply::ConnectionNotAllowed, Address::unspecified())
+                    .await?;
+                return Ok(());
+            }
+            handle_udp(
+                associate,
+                address,
+                connector.udp(extension),
+                #[cfg(feature = "management")]
+                &authenticated,
+            )
+            .await
         }
         ClientConnection::Connect(connect, address) => {
-            handle_connect(connect, address, connector.tcp(extension)).await
+            let extension = match authenticated.tcp_extension() {
+                Ok(extension) => extension,
+                Err(_) => {
+                    connect
+                        .reject(Reply::ConnectionNotAllowed, Address::unspecified())
+                        .await?;
+                    return Ok(());
+                }
+            };
+            if connector.require_profile(extension).is_err() {
+                // Backend availability is a local implementation failure, not
+                // an invented peer protocol error or a silent native retry.
+                connect
+                    .reject(Reply::GeneralFailure, Address::unspecified())
+                    .await?;
+                return Ok(());
+            }
+            handle_connect(
+                connect,
+                address,
+                connector.tcp(extension),
+                #[cfg(feature = "management")]
+                &authenticated,
+            )
+            .await
         }
         ClientConnection::Bind(bind, address) => {
-            handle_bind(bind, address, connector.tcp(extension)).await
+            if authenticated.explicit_preset() {
+                bind.reject(Reply::ConnectionNotAllowed, Address::unspecified())
+                    .await?;
+                return Ok(());
+            }
+            handle_bind(
+                bind,
+                address,
+                connector.tcp(extension),
+                #[cfg(feature = "management")]
+                &authenticated,
+            )
+            .await
         }
-    }
+    };
+    // BIND's wait and the complete UDP association belong to this admission,
+    // not just the authentication handshake or its first successful reply.
+    #[cfg(feature = "management")]
+    drop(authenticated);
+    result
 }
 
-#[instrument(skip(connect, connector), level = Level::DEBUG)]
+#[instrument(skip_all, fields(?address), level = Level::DEBUG)]
 async fn handle_connect(
     connect: Connect<connect::NeedReply>,
     address: Address,
     connector: TcpConnector<'_>,
+    #[cfg(feature = "management")] authenticated: &Authenticated,
 ) -> std::io::Result<()> {
     let outbound = match address {
         Address::SocketAddress(addr) => {
@@ -181,6 +269,11 @@ async fn handle_connect(
                 }
             };
             let mut inbound = connect.succeed(Address::from(bound_addr)).await?;
+            // The SOCKS reply is outside the payload writer. Both codec
+            // pre-read bytes and later copy writes use the same accepted-byte
+            // boundary, including partial progress before an error or cancel.
+            #[cfg(feature = "management")]
+            let mut outbound = Io::new(&mut outbound, authenticated.meter(Direction::Upload));
             {
                 let pending = inbound.take_pending_data();
                 if !pending.is_empty() {
@@ -188,7 +281,12 @@ async fn handle_connect(
                 }
             }
 
-            match io::copy_bidirectional(inbound.transport_mut()?, &mut outbound).await {
+            let inbound = inbound.transport_mut()?;
+            #[cfg(feature = "management")]
+            let mut inbound = Io::new(inbound, authenticated.meter(Direction::Download));
+            #[cfg(feature = "management")]
+            let inbound = &mut inbound;
+            match io::copy_bidirectional(inbound, &mut outbound).await {
                 Ok((from_client, from_server)) => {
                     tracing::info!(
                         "[SOCKS5][CONNECT] client wrote {} bytes and received {} bytes",
@@ -229,11 +327,12 @@ fn reply_for_connect_error(error: &std::io::Error) -> Reply {
 const MAX_UDP_DATAGRAM_SIZE: usize = u16::MAX as usize;
 const MAX_BIND_EARLY_DATA: usize = 64 * 1024;
 
-#[instrument(skip(associate, connector), level = Level::DEBUG)]
+#[instrument(skip_all, fields(?address), level = Level::DEBUG)]
 async fn handle_udp(
     associate: UdpAssociate<associate::NeedReply>,
     address: Address,
     connector: UdpConnector<'_>,
+    #[cfg(feature = "management")] authenticated: &Authenticated,
 ) -> std::io::Result<()> {
     let local_ip = match associate.local_addr() {
         Ok(address) => address.ip(),
@@ -292,6 +391,10 @@ async fn handle_udp(
     let mut src_port = 0;
     let mut buffer = vec![0_u8; MAX_UDP_DATAGRAM_SIZE];
     let mut response_buffer = BytesMut::new();
+    #[cfg(feature = "management")]
+    let upload = authenticated.meter(Direction::Upload);
+    #[cfg(feature = "management")]
+    let download = authenticated.meter(Direction::Download);
 
     loop {
         let ready = tokio::select! {
@@ -320,8 +423,9 @@ async fn handle_udp(
                     src_ip,
                     &mut src_port,
                     &connector,
-                    &preferred_outbound,
-                    fallback_outbound.as_ref(),
+                    (&preferred_outbound, fallback_outbound.as_ref()),
+                    #[cfg(feature = "management")]
+                    upload.as_ref(),
                 )
                 .await
             }
@@ -333,6 +437,8 @@ async fn handle_udp(
                     &mut response_buffer,
                     src_ip,
                     src_port,
+                    #[cfg(feature = "management")]
+                    download.as_ref(),
                 )
                 .await
             }
@@ -347,6 +453,8 @@ async fn handle_udp(
                     &mut response_buffer,
                     src_ip,
                     src_port,
+                    #[cfg(feature = "management")]
+                    download.as_ref(),
                 )
                 .await
             }
@@ -375,8 +483,8 @@ async fn forward_udp_request(
     expected_ip: IpAddr,
     client_port: &mut u16,
     connector: &UdpConnector<'_>,
-    preferred_outbound: &UdpSocket,
-    fallback_outbound: Option<&UdpSocket>,
+    outbound: (&UdpSocket, Option<&UdpSocket>),
+    #[cfg(feature = "management")] meter: Option<&Meter>,
 ) -> Result<(), Error> {
     let (len, source) = match inbound.as_ref().try_recv_from(buffer) {
         Ok(packet) => packet,
@@ -404,7 +512,8 @@ async fn forward_udp_request(
 
     *client_port = source.port();
     let packet = &buffer[header_len..len];
-    match header.address {
+    let (preferred_outbound, fallback_outbound) = outbound;
+    let _sent = match header.address {
         Address::SocketAddress(target) => {
             tracing::trace!(
                 "[SOCKS5][UDP] {source} -> {target} forwarding packet, size {}",
@@ -412,7 +521,7 @@ async fn forward_udp_request(
             );
             connector
                 .send_packet(packet, target, preferred_outbound, fallback_outbound)
-                .await?;
+                .await?
         }
         Address::DomainAddress(domain, port) => {
             tracing::trace!(
@@ -426,8 +535,17 @@ async fn forward_udp_request(
                     preferred_outbound,
                     fallback_outbound,
                 )
-                .await?;
+                .await?
         }
+    };
+    // A UDP send accepts an entire datagram or fails. Keep the original error
+    // behavior, but never interpret a short/unknown return as a complete packet.
+    // Only DATA is payload; the RFC 1928 section 7 relay header is excluded.
+    #[cfg(feature = "management")]
+    if _sent == packet.len()
+        && let Some(meter) = meter
+    {
+        meter.add(packet.len());
     }
     Ok(())
 }
@@ -439,6 +557,7 @@ async fn forward_udp_response(
     response_buffer: &mut BytesMut,
     client_ip: IpAddr,
     client_port: u16,
+    #[cfg(feature = "management")] meter: Option<&Meter>,
 ) -> Result<(), Error> {
     let (len, remote) = match outbound.try_recv_from(buffer) {
         Ok(packet) => packet,
@@ -450,9 +569,17 @@ async fn forward_udp_response(
     }
     let client = SocketAddr::new(client_ip, client_port);
     tracing::trace!("[SOCKS5][UDP] {client} <- {remote} feedback to incoming, packet size {len}");
-    inbound
+    let _sent = inbound
         .send_to_buffered(&buffer[..len], 0, remote.into(), client, response_buffer)
         .await?;
+    // send_to_buffered already subtracts the SOCKS header from its result.
+    // Failed/oversized responses and packets without a client port add nothing.
+    #[cfg(feature = "management")]
+    if _sent == len
+        && let Some(meter) = meter
+    {
+        meter.add(len);
+    }
     Ok(())
 }
 
@@ -526,11 +653,12 @@ fn ip_addresses_match(left: IpAddr, right: IpAddr) -> bool {
 ///   |<---Data transfer-------|<---Forward data--------|
 ///   |                        |                        |
 /// ```
-#[instrument(skip(bind, address, connector), level = Level::DEBUG)]
+#[instrument(skip_all, level = Level::DEBUG)]
 async fn handle_bind(
     bind: Bind<bind::NeedFirstReply>,
     address: Address,
     connector: TcpConnector<'_>,
+    #[cfg(feature = "management")] authenticated: &Authenticated,
 ) -> std::io::Result<()> {
     let listen_ip = match connector.socket_addr(|| bind.local_addr().map(|socket| socket.ip())) {
         Ok(address) => address,
@@ -646,6 +774,10 @@ async fn handle_bind(
 
     match inbound.succeed(Address::from(outbound_addr)).await {
         Ok(mut inbound) => {
+            // Neither BIND reply nor data merely buffered while waiting for
+            // the peer is traffic. Count only successful writes after reply 2.
+            #[cfg(feature = "management")]
+            let mut outbound = Io::new(&mut outbound, authenticated.meter(Direction::Upload));
             {
                 let pending = inbound.take_pending_data();
                 if !pending.is_empty() {
@@ -656,7 +788,15 @@ async fn handle_bind(
                 outbound.write_all(&early_data).await?;
             }
             drop(early_data);
-            match io::copy_bidirectional(inbound.transport_mut()?, &mut outbound).await {
+            let copied = {
+                let inbound = inbound.transport_mut()?;
+                #[cfg(feature = "management")]
+                let mut inbound = Io::new(inbound, authenticated.meter(Direction::Download));
+                #[cfg(feature = "management")]
+                let inbound = &mut inbound;
+                io::copy_bidirectional(inbound, &mut outbound).await
+            };
+            match copied {
                 Ok((from_client, from_server)) => {
                     tracing::info!(
                         "[SOCKS5][BIND] client wrote {} bytes and received {} bytes",
@@ -877,6 +1017,7 @@ mod tests {
         target_host: &str,
         auth: AuthAdaptor,
         credentials: Option<(&str, &str)>,
+        selected_source: bool,
     ) {
         const REQUESTS: usize = 32;
 
@@ -886,7 +1027,10 @@ mod tests {
         let target_port = target_listener.local_addr().unwrap().port();
         let target_task = tokio::spawn(async move {
             loop {
-                let (mut stream, _) = target_listener.accept().await.unwrap();
+                let (mut stream, peer) = target_listener.accept().await.unwrap();
+                if selected_source {
+                    assert_eq!(peer.ip(), "127.0.0.2".parse::<std::net::IpAddr>().unwrap());
+                }
                 tokio::spawn(async move {
                     let mut request = Vec::with_capacity(512);
                     loop {
@@ -914,7 +1058,19 @@ mod tests {
             .await
             .unwrap();
         let proxy_addr = proxy_listener.local_addr().unwrap();
-        let connector = test_connector();
+        let connector = if selected_source {
+            Connector::new(
+                Some("192.0.2.1/32".parse().unwrap()),
+                None,
+                None,
+                3,
+                #[cfg(any(target_os = "android", target_os = "fuchsia", target_os = "linux"))]
+                None,
+                None,
+            )
+        } else {
+            test_connector()
+        };
         let auth = Arc::new(auth);
         let proxy_task = tokio::spawn(async move {
             loop {
@@ -935,7 +1091,8 @@ mod tests {
             }
             None => format!("{proxy_scheme}://{proxy_addr}"),
         };
-        let client = reqwest::Client::builder()
+        let client = crate::oneself::test_http_client_builder()
+            .unwrap()
             .proxy(reqwest::Proxy::all(proxy_url).unwrap())
             .pool_max_idle_per_host(REQUESTS)
             .build()
@@ -966,12 +1123,12 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn reqwest_socks5_connect_is_concurrent_and_interoperable() {
-        run_reqwest_interop("socks5", "127.0.0.1", AuthAdaptor::no(), None).await;
+        run_reqwest_interop("socks5", "127.0.0.1", AuthAdaptor::no(), None, false).await;
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn reqwest_socks5h_connect_is_concurrent_and_interoperable() {
-        run_reqwest_interop("socks5h", "localhost", AuthAdaptor::no(), None).await;
+        run_reqwest_interop("socks5h", "localhost", AuthAdaptor::no(), None, false).await;
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -981,8 +1138,371 @@ mod tests {
             "localhost",
             AuthAdaptor::password("codec-user", "codec-password"),
             Some(("codec-user", "codec-password")),
+            false,
         )
         .await;
+    }
+
+    #[cfg(feature = "management")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn reqwest_managed_socks5_credentials_are_interoperable() {
+        use crate::access::{
+            Reader,
+            tests::{ROUTED_LOGIN as LOGIN, routed_policy as policy, secret},
+        };
+        let reader = Reader::new(policy(1, 64)).unwrap();
+        let secret = String::from_utf8(secret()).unwrap();
+        run_reqwest_interop(
+            "socks5h",
+            "localhost",
+            AuthAdaptor::Managed(reader),
+            Some((LOGIN, &secret)),
+            true,
+        )
+        .await;
+    }
+
+    #[cfg(feature = "management")]
+    #[tokio::test]
+    async fn managed_socks5_holds_lease_during_bind_wait_and_udp_control_lifetime() {
+        use crate::access::{
+            Protocol, Reader,
+            tests::{ROUTED_LOGIN as LOGIN, routed_policy as policy, secret},
+        };
+        tokio::time::timeout(Duration::from_secs(10), async {
+            for command in [0x02, 0x03] {
+                let reader = Reader::new(policy(1, 1)).unwrap();
+                let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+                let address = listener.local_addr().unwrap();
+                let auth = Arc::new(AuthAdaptor::Managed(reader.clone()));
+                let server = tokio::spawn(async move {
+                    let (stream, peer) = listener.accept().await.unwrap();
+                    handle(
+                        IncomingConnection::new(stream, auth),
+                        peer,
+                        Connector::new(
+                            Some("192.0.2.1/32".parse().unwrap()),
+                            None,
+                            None,
+                            3,
+                            #[cfg(any(
+                                target_os = "android",
+                                target_os = "fuchsia",
+                                target_os = "linux"
+                            ))]
+                            None,
+                            None,
+                        ),
+                    )
+                    .await
+                });
+                let mut client = TcpStream::connect(address).await.unwrap();
+                client.write_all(&[5, 1, 2]).await.unwrap();
+                let mut response = [0; 2];
+                client.read_exact(&mut response).await.unwrap();
+                assert_eq!(response, [5, 2]);
+                let password = secret();
+                let mut credentials = vec![1, u8::try_from(LOGIN.len()).unwrap()];
+                credentials.extend_from_slice(LOGIN.as_bytes());
+                credentials.push(u8::try_from(password.len()).unwrap());
+                credentials.extend_from_slice(&password);
+                client.write_all(&credentials).await.unwrap();
+                client.read_exact(&mut response).await.unwrap();
+                assert_eq!(response, [1, 0]);
+                write_socks5_request(
+                    &mut client,
+                    command,
+                    &Address::from("0.0.0.0:0".parse::<SocketAddr>().unwrap()),
+                )
+                .await;
+                let (reply, bound) = read_socks5_reply(&mut client).await;
+                assert_eq!(reply, Reply::Succeeded);
+                let Address::SocketAddress(bound) = bound else {
+                    panic!("expected socket reply")
+                };
+                if command == 0x02 {
+                    assert_eq!(bound.ip(), "127.0.0.2".parse::<std::net::IpAddr>().unwrap());
+                } else {
+                    let target = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+                    let target_addr = target.local_addr().unwrap();
+                    let echo = tokio::spawn(async move {
+                        let mut bytes = [0; 32];
+                        let (size, peer) = target.recv_from(&mut bytes).await.unwrap();
+                        assert_eq!(peer.ip(), "127.0.0.2".parse::<std::net::IpAddr>().unwrap());
+                        target.send_to(&bytes[..size], peer).await.unwrap();
+                    });
+                    let udp = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+                    udp.send_to(
+                        &udp_relay_packet(0, Address::from(target_addr), b"managed source"),
+                        bound,
+                    )
+                    .await
+                    .unwrap();
+                    assert_udp_relay_response(
+                        &udp,
+                        bound,
+                        Address::from(target_addr),
+                        b"managed source",
+                    )
+                    .await;
+                    echo.await.unwrap();
+                }
+                assert!(matches!(
+                    reader.authenticate(LOGIN, &password, Protocol::Http),
+                    Err(crate::access::Error::Capacity)
+                ));
+                reader.publish(policy(2, 1)).unwrap();
+                assert!(matches!(
+                    reader.authenticate(LOGIN, &password, Protocol::Socks5),
+                    Err(crate::access::Error::Capacity)
+                ));
+                client.shutdown().await.unwrap();
+                drop(client);
+                let _ = server.await.unwrap();
+                assert!(
+                    reader
+                        .authenticate(LOGIN, &password, Protocol::Socks5)
+                        .is_ok()
+                );
+            }
+        })
+        .await
+        .expect("managed SOCKS5 admission must end with its control connection");
+    }
+
+    #[cfg(feature = "management")]
+    async fn metered_socks5_connection() -> (
+        TcpStream,
+        tokio::task::JoinHandle<std::io::Result<()>>,
+        crate::access::Reader,
+    ) {
+        use crate::access::{
+            Reader,
+            tests::{ROUTED_LOGIN as LOGIN, routed_policy, secret},
+        };
+
+        let reader = Reader::new(routed_policy(1, 8)).unwrap();
+        let auth = Arc::new(AuthAdaptor::Managed(reader.clone()));
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (stream, peer) = listener.accept().await?;
+            handle(
+                IncomingConnection::new(stream, auth),
+                peer,
+                test_connector(),
+            )
+            .await
+        });
+        let mut client = TcpStream::connect(address).await.unwrap();
+        client.write_all(&[5, 1, 2]).await.unwrap();
+        let mut reply = [0; 2];
+        client.read_exact(&mut reply).await.unwrap();
+        assert_eq!(reply, [5, 2]);
+
+        let password = secret();
+        let mut credentials = vec![1, u8::try_from(LOGIN.len()).unwrap()];
+        credentials.extend_from_slice(LOGIN.as_bytes());
+        credentials.push(u8::try_from(password.len()).unwrap());
+        credentials.extend_from_slice(&password);
+        client.write_all(&credentials).await.unwrap();
+        client.read_exact(&mut reply).await.unwrap();
+        assert_eq!(reply, [1, 0]);
+        (client, server, reader)
+    }
+
+    #[cfg(feature = "management")]
+    fn socks5_traffic(reader: &crate::access::Reader) -> crate::traffic::Snapshot {
+        let snapshots = reader.traffic_registry().snapshot().unwrap();
+        let matching = snapshots
+            .iter()
+            .filter(|series| series.protocol == crate::access::Protocol::Socks5)
+            .collect::<Vec<_>>();
+        assert_eq!(matching.len(), 1);
+        matching[0].value
+    }
+
+    #[cfg(feature = "management")]
+    fn assert_socks5_traffic(reader: &crate::access::Reader, upload: u64, download: u64) {
+        assert_eq!(
+            socks5_traffic(reader),
+            crate::traffic::Snapshot {
+                upload,
+                download,
+                saturated: false,
+            }
+        );
+    }
+
+    #[cfg(feature = "management")]
+    #[tokio::test]
+    async fn managed_socks5_connect_counts_live_payload_once_and_retains_it_after_cancel() {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let (mut client, server, reader) = metered_socks5_connection().await;
+            assert_socks5_traffic(&reader, 0, 0);
+
+            let mut request = socks5_request(1, &Address::from(address));
+            request.extend_from_slice(b"prefetched-");
+            client.write_all(&request).await.unwrap();
+            assert_eq!(read_socks5_reply(&mut client).await.0, Reply::Succeeded);
+            let (mut target, peer) = listener.accept().await.unwrap();
+            assert_eq!(peer.ip(), "127.0.0.2".parse::<IpAddr>().unwrap());
+            let mut pending = [0; 11];
+            target.read_exact(&mut pending).await.unwrap();
+            assert_eq!(&pending, b"prefetched-");
+
+            let upload = vec![0x61; 32_769];
+            client.write_all(&upload).await.unwrap();
+            let mut received = vec![0; upload.len()];
+            target.read_exact(&mut received).await.unwrap();
+            assert_eq!(received, upload);
+            let download = vec![0x62; 16_387];
+            target.write_all(&download).await.unwrap();
+            let mut received = vec![0; download.len()];
+            client.read_exact(&mut received).await.unwrap();
+            assert_eq!(received, download);
+            assert_socks5_traffic(&reader, 32_780, 16_387);
+
+            // Publication and the last flow disappearing must not erase bytes
+            // already accepted while the tunnel was still open.
+            reader
+                .publish(crate::access::tests::routed_policy(2, 8))
+                .unwrap();
+            server.abort();
+            assert!(server.await.unwrap_err().is_cancelled());
+            assert_socks5_traffic(&reader, 32_780, 16_387);
+        })
+        .await
+        .unwrap();
+    }
+
+    #[cfg(feature = "management")]
+    #[tokio::test]
+    async fn managed_socks5_bind_counts_only_payload_after_second_reply() {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            let (mut client, server, reader) = metered_socks5_connection().await;
+            let target = TcpSocket::new_v4().unwrap();
+            target.bind("127.0.0.1:0".parse().unwrap()).unwrap();
+            let address = target.local_addr().unwrap();
+            let mut request = socks5_request(2, &Address::from(address));
+            request.extend_from_slice(b"prefetched-");
+            client.write_all(&request).await.unwrap();
+            let (reply, bound) = read_socks5_reply(&mut client).await;
+            assert_eq!(reply, Reply::Succeeded);
+            let Address::SocketAddress(bound) = bound else {
+                panic!("expected BIND socket address");
+            };
+            client.write_all(b"early-").await.unwrap();
+            // Before a peer exists, buffering DATA and the first reply are not
+            // successful forwarding. No timing/sleep assumption is needed.
+            assert_socks5_traffic(&reader, 0, 0);
+            let mut target = target.connect(bound).await.unwrap();
+            assert_eq!(read_socks5_reply(&mut client).await.0, Reply::Succeeded);
+            let mut early = [0; 17];
+            target.read_exact(&mut early).await.unwrap();
+            assert_eq!(&early, b"prefetched-early-");
+
+            client.write_all(b"late").await.unwrap();
+            let mut late = [0; 4];
+            target.read_exact(&mut late).await.unwrap();
+            assert_eq!(&late, b"late");
+            target.write_all(b"return payload").await.unwrap();
+            let mut response = [0; 14];
+            client.read_exact(&mut response).await.unwrap();
+            assert_eq!(&response, b"return payload");
+            assert_socks5_traffic(&reader, 21, 14);
+            client.shutdown().await.unwrap();
+            target.shutdown().await.unwrap();
+            server.await.unwrap().unwrap();
+            assert_socks5_traffic(&reader, 21, 14);
+        })
+        .await
+        .unwrap();
+    }
+
+    #[cfg(feature = "management")]
+    #[tokio::test]
+    async fn managed_socks5_udp_counts_accepted_payload_not_headers_or_dropped_packets() {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            let remote = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+            let address = remote.local_addr().unwrap();
+            let udp = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+            let unauthorized = UdpSocket::bind("127.0.0.3:0").await.unwrap();
+            let (mut client, server, reader) = metered_socks5_connection().await;
+            write_udp_associate_request(&mut client, &Address::from(udp.local_addr().unwrap()))
+                .await;
+            let (reply, relay) = read_socks5_reply(&mut client).await;
+            assert_eq!(reply, Reply::Succeeded);
+            let Address::SocketAddress(relay) = relay else {
+                panic!("expected UDP relay socket address");
+            };
+            assert_socks5_traffic(&reader, 0, 0);
+
+            let invalid = udp_relay_packet(0, Address::from(address), b"unauthorized");
+            unauthorized.send_to(&invalid, relay).await.unwrap();
+            udp.send_to(&[0, 0, 0, 1, 127], relay).await.unwrap();
+            udp.send_to(
+                &udp_relay_packet(1, Address::from(address), b"fragment"),
+                relay,
+            )
+            .await
+            .unwrap();
+            udp.send_to(
+                &udp_relay_packet(0, Address::from(address), b"upload payload"),
+                relay,
+            )
+            .await
+            .unwrap();
+            let mut buffer = vec![0; MAX_UDP_DATAGRAM_SIZE];
+            let (length, source) = remote.recv_from(&mut buffer).await.unwrap();
+            assert_eq!(&buffer[..length], b"upload payload");
+            assert_eq!(source.ip(), "127.0.0.2".parse::<IpAddr>().unwrap());
+            remote.send_to(b"download payload", source).await.unwrap();
+            assert_udp_relay_response(&udp, relay, Address::from(address), b"download payload")
+                .await;
+            assert_socks5_traffic(&reader, 14, 16);
+
+            client.shutdown().await.unwrap();
+            server.await.unwrap().unwrap();
+            assert_socks5_traffic(&reader, 14, 16);
+
+            // Exercise a real send failure separately: two back-to-back UDP
+            // packets near the receive-buffer limit could drop a sentinel and
+            // make a relay-loop barrier timing dependent. A fresh readable
+            // socket lets this call observe the oversized response directly.
+            let outbound = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+            let inbound = AssociatedUdpSocket::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+            let authorized = reader
+                .authenticate(
+                    crate::access::tests::ROUTED_LOGIN,
+                    &crate::access::tests::secret(),
+                    crate::access::Protocol::Socks5,
+                )
+                .unwrap();
+            let meter = authorized.lease.meter(Direction::Download);
+            remote
+                .send_to(&vec![0x5a; 65_507], outbound.local_addr().unwrap())
+                .await
+                .unwrap();
+            outbound.readable().await.unwrap();
+            let mut response_buffer = BytesMut::new();
+            let error = forward_udp_response(
+                &inbound,
+                &outbound,
+                &mut buffer,
+                &mut response_buffer,
+                udp.local_addr().unwrap().ip(),
+                udp.local_addr().unwrap().port(),
+                Some(&meter),
+            )
+            .await;
+            assert!(error.is_err());
+            assert_socks5_traffic(&reader, 14, 16);
+        })
+        .await
+        .unwrap();
     }
 
     #[tokio::test]
@@ -1562,5 +2082,122 @@ mod tests {
             .await
             .unwrap()
         );
+    }
+}
+
+#[cfg(test)]
+mod preset_tests {
+    //! Command-stage tests: SOCKS authentication precedes knowing TCP vs UDP/BIND.
+
+    use super::*;
+    use std::time::Duration;
+    use tokio::io::AsyncReadExt as _;
+
+    async fn command(
+        auth: AuthAdaptor,
+        username: &str,
+        password: &[u8],
+        command: u8,
+        expected: u8,
+    ) {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let server = tokio::spawn(async move {
+                let (stream, peer) = listener.accept().await.unwrap();
+                handle(
+                    IncomingConnection::new(stream, Arc::new(auth)),
+                    peer,
+                    Connector::new(
+                        None,
+                        None,
+                        None,
+                        1,
+                        #[cfg(any(
+                            target_os = "android",
+                            target_os = "fuchsia",
+                            target_os = "linux"
+                        ))]
+                        None,
+                        None,
+                    ),
+                )
+                .await
+                .unwrap();
+            });
+            let mut stream = TcpStream::connect(address).await.unwrap();
+            stream.write_all(&[5, 1, 2]).await.unwrap();
+            let mut method = [0; 2];
+            stream.read_exact(&mut method).await.unwrap();
+            assert_eq!(method, [5, 2]);
+            let mut authentication = vec![1, u8::try_from(username.len()).unwrap()];
+            authentication.extend_from_slice(username.as_bytes());
+            authentication.push(u8::try_from(password.len()).unwrap());
+            authentication.extend_from_slice(password);
+            stream.write_all(&authentication).await.unwrap();
+            stream.read_exact(&mut method).await.unwrap();
+            assert_eq!(
+                method,
+                [1, 0],
+                "authentication does not know the command yet"
+            );
+            stream
+                .write_all(&[5, command, 0, 1, 127, 0, 0, 1, 0, 0])
+                .await
+                .unwrap();
+            let mut reply = [0; 10];
+            stream.read_exact(&mut reply).await.unwrap();
+            assert_eq!(&reply[..4], &[5, expected, 0, 1]);
+            if expected != 0 {
+                assert_eq!(stream.read(&mut method).await.unwrap(), 0);
+            }
+            drop(stream);
+            server.await.unwrap();
+        })
+        .await
+        .expect("preset command must finish and release its admission");
+    }
+
+    #[tokio::test]
+    async fn explicit_tcp_device_on_udp_or_passive_bind_is_a_ruleset_denial() {
+        for operation in [2, 3] {
+            command(
+                AuthAdaptor::password("user", "password"),
+                "user-device-linux",
+                b"password",
+                operation,
+                2,
+            )
+            .await;
+        }
+    }
+
+    #[cfg(feature = "management")]
+    #[tokio::test]
+    async fn managed_tcp_default_does_not_change_udp_or_bind_but_requires_backend_for_connect() {
+        use crate::access::{
+            Reader,
+            tests::{LOGIN, policy, secret},
+        };
+        for (operation, expected) in [(1, 1), (2, 0), (3, 0)] {
+            let mut data = policy(1, 1);
+            data.presets.users[0].default_preset = Some(crate::ebpf::Profile::Linux);
+            data.presets.users[0].allowed_presets = vec![crate::ebpf::Profile::Linux];
+            let reader = Reader::new(data).unwrap();
+            command(
+                AuthAdaptor::Managed(reader.clone()),
+                LOGIN,
+                &secret(),
+                operation,
+                expected,
+            )
+            .await;
+            assert!(
+                reader
+                    .authenticate(LOGIN, &secret(), crate::access::Protocol::Socks5)
+                    .is_ok(),
+                "command teardown must release its lease"
+            );
+        }
     }
 }

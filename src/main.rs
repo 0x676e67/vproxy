@@ -4,9 +4,14 @@
 #![cfg_attr(test, deny(warnings))]
 #![cfg_attr(not(test), warn(unused_crate_dependencies))]
 
+#[cfg(feature = "management")]
+mod access;
 mod connect;
+mod ebpf;
 mod error;
 mod ext;
+#[cfg(feature = "management")]
+mod manage;
 mod oneself;
 mod rand;
 #[cfg(target_os = "linux")]
@@ -15,6 +20,11 @@ mod server;
 mod state;
 #[cfg(target_os = "linux")]
 mod systemd;
+#[cfg(feature = "management")]
+mod traffic;
+#[cfg(windows)]
+#[path = "manage/files/windows.rs"]
+mod windows_files;
 
 use std::{net::SocketAddr, path::PathBuf};
 
@@ -58,6 +68,11 @@ struct Opt {
 pub enum Commands {
     /// Run server
     Run(Box<BootArgs>),
+
+    /// Manage persistent node state and the HTTPS management API
+    #[cfg(feature = "management")]
+    #[command(subcommand)]
+    Manage(Box<manage::Command>),
 
     /// Manage the systemd service
     #[cfg(target_os = "linux")]
@@ -170,9 +185,9 @@ pub struct BootArgs {
     )]
     bind: SocketAddr,
 
-    /// Maximum concurrent active connections.
-    /// Protects resource exhaustion. Raise cautiously.
-    /// e.g. 128.
+    /// Per-listener accepted TCP connection limit (MASQUE: CONNECT-UDP tunnels).
+    /// TCP saturation waits before accept; auto shares one budget across protocols.
+    /// Must be positive. This is separate from managed per-user limits.
     #[arg(long, short = 'c', default_value = "1024", verbatim_doc_comment)]
     concurrent: u32,
 
@@ -222,12 +237,30 @@ pub struct BootArgs {
     #[arg(long, default_value = "true", verbatim_doc_comment)]
     reuseaddr: Option<bool>,
 
+    #[command(flatten)]
+    ebpf: ebpf::Args,
+
     #[command(subcommand)]
     proxy: Proxy,
 }
 
+impl BootArgs {
+    /// Load attachments before worker creation and retain the returned owner in
+    /// the Connector. This performs no kernel operation for native defaults.
+    pub(crate) fn profile_config(&self) -> std::io::Result<ebpf::Config> {
+        self.ebpf.load()
+    }
+}
+
 #[derive(Subcommand, Clone)]
 pub enum Oneself {
+    /// Print licensing text embedded in this executable without external state
+    #[cfg_attr(
+        feature = "web-ui",
+        command(about = "Print the project license and embedded Web template notice")
+    )]
+    #[cfg_attr(not(feature = "web-ui"), command(about = "Print the project license"))]
+    Notices,
     /// Download and install updates to the proxy server
     Update,
     /// Uninstall proxy server
@@ -257,6 +290,8 @@ fn main() -> Result<()> {
     let opt = Opt::parse();
     match opt.commands {
         Commands::Run(args) => server::run(*args),
+        #[cfg(feature = "management")]
+        Commands::Manage(command) => manage::run(*command).map_err(Into::into),
         #[cfg(target_os = "linux")]
         Commands::Systemd(command) => match command {
             SystemdCommand::Start(args) => systemd::start(*args, systemd_server_arguments()),
@@ -266,6 +301,7 @@ fn main() -> Result<()> {
             SystemdCommand::Status => systemd::status(),
         },
         Commands::Oneself { command } => match command {
+            Oneself::Notices => oneself::notices(),
             Oneself::Update => oneself::update(),
             Oneself::Uninstall => oneself::uninstall(),
         },

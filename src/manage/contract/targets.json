@@ -1,0 +1,1724 @@
+{
+  "paths": {
+    "/api/v1/targets": {
+      "get": {
+        "operationId": "listTargets",
+        "tags": ["Targets"],
+        "summary": "List locally registered targets",
+        "description": "Reads local registration metadata, not current remote health. Query is at most 1024 bytes; malformed percent/UTF-8 encoding, unknown or duplicate decoded parameters are rejected. No implicit remote discovery. q filters before pagination; keep q and include_retired unchanged on subsequent pages. Pages are not a revision-bound multi-request snapshot.",
+        "security": [{ "Session": [] }],
+        "parameters": [
+          { "$ref": "#/components/parameters/PageAfter" },
+          {
+            "name": "limit",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 25,
+              "default": 25
+            }
+          },
+          {
+            "name": "include_retired",
+            "in": "query",
+            "schema": { "type": "boolean", "default": false }
+          },
+          {
+            "name": "q",
+            "in": "query",
+            "description": "Optional literal substring of registered name, node origin, server IP or node ID. At most 256 UTF-8 bytes, no control characters; outer whitespace is trimmed and an empty value disables filtering. ASCII-case-insensitive except node IDs. A complete numeric IP also matches canonical spelling. No wildcard or remote lookup.",
+            "schema": { "type": "string", "maxLength": 256 }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "One local registry page.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/TargetPage" }
+              }
+            }
+          },
+          "default": { "$ref": "#/components/responses/Error" }
+        }
+      },
+      "post": {
+        "operationId": "registerTarget",
+        "tags": ["Targets"],
+        "summary": "Register an already enrolled target",
+        "description": "No query is accepted. The selected node must be an active enrolled peer with an unrevoked certificate, not this node. Registration does not enroll a certificate, grant remote ownership or test connectivity.",
+        "security": [{ "Session": [], "Csrf": [] }],
+        "parameters": [{ "$ref": "#/components/parameters/Origin" }],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/TargetRegisterInput" }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Registration saved locally.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Target" }
+              }
+            }
+          },
+          "default": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/api/v1/targets/{id}": {
+      "parameters": [{ "$ref": "#/components/parameters/ResourceId" }],
+      "get": {
+        "operationId": "getTarget",
+        "tags": ["Targets"],
+        "summary": "Read one local target registration",
+        "description": "No query is accepted. Observed counters are historical rollback floors, not live health.",
+        "security": [{ "Session": [] }],
+        "responses": {
+          "200": {
+            "description": "Local target metadata.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Target" }
+              }
+            }
+          },
+          "default": { "$ref": "#/components/responses/Error" }
+        }
+      },
+      "put": {
+        "operationId": "configureTarget",
+        "tags": ["Targets"],
+        "summary": "Change a target registration",
+        "description": "No query is accepted. Requires the current local target revision and no pending or blocked job. This changes local metadata, not the remote policy or certificate grant.",
+        "security": [{ "Session": [], "Csrf": [] }],
+        "parameters": [{ "$ref": "#/components/parameters/Origin" }],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/TargetConfigureInput" }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Updated local registration.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Target" }
+              }
+            }
+          },
+          "default": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/api/v1/targets/{id}/state": {
+      "parameters": [{ "$ref": "#/components/parameters/ResourceId" }],
+      "post": {
+        "operationId": "setTargetState",
+        "tags": ["Targets"],
+        "summary": "Pause or reactivate local target delivery",
+        "description": "No query is accepted. Requires the current target revision. Pausing stops future admission, not a request already accepted by the target; the original uncertain job is retained.",
+        "security": [{ "Session": [], "Csrf": [] }],
+        "parameters": [{ "$ref": "#/components/parameters/Origin" }],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/TargetStateInput" }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Local target state saved.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Target" }
+              }
+            }
+          },
+          "default": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/api/v1/targets/{id}/retire": {
+      "parameters": [{ "$ref": "#/components/parameters/ResourceId" }],
+      "post": {
+        "operationId": "retireTarget",
+        "tags": ["Targets"],
+        "summary": "Retire a local target registration",
+        "description": "No query is accepted. Requires the current target revision. Retirement is a reversible local delivery marker, not remote deletion or proof that an earlier command stopped. Preserves observation floors and the current job.",
+        "security": [{ "Session": [], "Csrf": [] }],
+        "parameters": [{ "$ref": "#/components/parameters/Origin" }],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/TargetRevisionInput" }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Local retirement saved.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Target" }
+              }
+            }
+          },
+          "default": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/api/v1/targets/{id}/policy": {
+      "parameters": [{ "$ref": "#/components/parameters/ResourceId" }],
+      "get": {
+        "operationId": "getTargetPolicy",
+        "tags": ["Targets"],
+        "summary": "Read the selected target's policy status",
+        "description": "No query is accepted. Uses the registered mTLS origin and current owner authorization. Persists rollback observations locally. Remote login rejection is not a browser-session rejection and never selects this node instead.",
+        "security": [{ "Session": [] }],
+        "responses": {
+          "200": {
+            "description": "Verified remote policy status, without a node-protocol envelope.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/TargetPolicy" }
+              }
+            }
+          },
+          "default": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/api/v1/targets/{id}/users": {
+      "parameters": [{ "$ref": "#/components/parameters/ResourceId" }],
+      "get": {
+        "operationId": "listTargetUsers",
+        "tags": ["Targets"],
+        "summary": "Read a target user page",
+        "description": "At most 1024 query bytes; unknown or duplicate parameters are rejected. Uses current remote owner authorization. Legacy pagination is not a coherent multi-request snapshot.",
+        "security": [{ "Session": [] }],
+        "parameters": [
+          { "$ref": "#/components/parameters/PageAfter" },
+          { "$ref": "#/components/parameters/PageLimit" },
+          { "$ref": "#/components/parameters/IncludeDeleted" }
+        ],
+        "responses": {
+          "200": {
+            "description": "Target-issued user metadata; no credentials or secrets.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/UserPage" }
+              }
+            }
+          },
+          "default": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/api/v1/targets/{id}/users/search": {
+      "parameters": [{ "$ref": "#/components/parameters/ResourceId" }],
+      "get": {
+        "operationId": "searchTargetUsers",
+        "tags": ["Targets"],
+        "summary": "Search target user metadata",
+        "description": "Requires mode and q. Strict form decoding rejects unknown, duplicate or malformed parameters and queries over 1024 bytes. Name matching uses Unicode lowercase, not normalization or full case folding. An id search forbids after. Continuations bind node, revision, mode, term, include_deleted and limit; stale snapshots return 409 user_search_changed. An older peer returns 502 user_search_unsupported; no local fallback.",
+        "security": [{ "Session": [] }],
+        "parameters": [
+          {
+            "name": "mode",
+            "in": "query",
+            "required": true,
+            "schema": { "type": "string", "enum": ["name", "id"] }
+          },
+          {
+            "name": "q",
+            "in": "query",
+            "required": true,
+            "description": "Nonempty, at most 128 UTF-8 bytes, no leading/trailing whitespace or control characters. With mode=id, a canonical node-local user ID.",
+            "schema": { "type": "string", "minLength": 1, "maxLength": 128 }
+          },
+          {
+            "name": "after",
+            "in": "query",
+            "description": "Opaque, bound search continuation; not a legacy resource-ID cursor. Forbidden for mode=id.",
+            "schema": { "$ref": "#/components/schemas/UserSearchCursor" }
+          },
+          { "$ref": "#/components/parameters/PageLimit" },
+          { "$ref": "#/components/parameters/IncludeDeleted" }
+        ],
+        "responses": {
+          "200": {
+            "description": "Target-issued search page.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/UserSearchPage" }
+              }
+            }
+          },
+          "default": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/api/v1/targets/{id}/credentials": {
+      "parameters": [{ "$ref": "#/components/parameters/ResourceId" }],
+      "get": {
+        "operationId": "listTargetCredentials",
+        "tags": ["Targets"],
+        "summary": "Read target credential metadata",
+        "description": "At most 1024 query bytes; unknown or duplicate parameters are rejected. Current owner authorization is required. Public login metadata only: no verifier or recoverable secret.",
+        "security": [{ "Session": [] }],
+        "parameters": [
+          { "$ref": "#/components/parameters/PageAfter" },
+          { "$ref": "#/components/parameters/PageLimit" },
+          {
+            "name": "user_id",
+            "in": "query",
+            "schema": { "$ref": "#/components/schemas/Id" }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Target-issued credential metadata page.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/CredentialPage" }
+              }
+            }
+          },
+          "default": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/api/v1/targets/{id}/commands": {
+      "parameters": [{ "$ref": "#/components/parameters/ResourceId" }],
+      "post": {
+        "operationId": "submitTargetPolicyCommand",
+        "tags": ["Targets"],
+        "summary": "Submit one fixed user or credential command",
+        "description": "No query is accepted. Commits one durable intent before remote delivery. The current target revision, observed owner epoch, next terminal command ID and policy revision must match. Only the first successful delivery may return a one-time secret. A 200 response may contain a saved or rejected receipt and does not imply application. A 202 means the first delivery result is unknown; inspect the ticket, do not invent a new command or assume failure.",
+        "security": [{ "Session": [], "Csrf": [] }],
+        "parameters": [{ "$ref": "#/components/parameters/Origin" }],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/TargetCommandInput" }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "First verified delivery reply, including its actual receipt status.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    { "$ref": "#/components/schemas/PolicySubmission" },
+                    {
+                      "properties": {
+                        "response": {
+                          "$ref": "#/components/schemas/PolicyCommandReply"
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "202": {
+            "description": "Intent is durable; no first delivery reply is available within seven seconds. response is null. The supervised delivery may still complete.",
+            "headers": {
+              "Location": {
+                "description": "The current local ticket endpoint /api/v1/targets/{id}/command.",
+                "schema": { "type": "string" }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    { "$ref": "#/components/schemas/PolicySubmission" },
+                    { "properties": { "response": { "type": "null" } } }
+                  ]
+                }
+              }
+            }
+          },
+          "default": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/api/v1/targets/{id}/command": {
+      "parameters": [{ "$ref": "#/components/parameters/ResourceId" }],
+      "get": {
+        "operationId": "getTargetCommand",
+        "tags": ["Targets"],
+        "summary": "Read the current durable target ticket",
+        "description": "No query is accepted. Returns null when no ticket exists. This is the current per-target slot, not a lookup by arbitrary historical job ID. No request body or secret is returned. Saved and applied are distinct; applied is historical publication, not current reachability.",
+        "security": [{ "Session": [] }],
+        "responses": {
+          "200": {
+            "description": "The current non-secret ticket, or null.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    { "$ref": "#/components/schemas/TargetJob" },
+                    { "type": "null" }
+                  ]
+                }
+              }
+            }
+          },
+          "default": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/api/v1/targets/{id}/command/retry": {
+      "parameters": [{ "$ref": "#/components/parameters/ResourceId" }],
+      "post": {
+        "operationId": "retryTargetCommand",
+        "tags": ["Targets"],
+        "summary": "Retry the same unresolved ticket",
+        "description": "No query is accepted. Requires the exact current pending or blocked job_id and an active, authorized target without rollback detection. Resets scheduling/backoff but preserves the original command identity and payload. Terminal outcomes cannot be retried and old secrets cannot be recovered.",
+        "security": [{ "Session": [], "Csrf": [] }],
+        "parameters": [{ "$ref": "#/components/parameters/Origin" }],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/TargetJobInput" }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Original ticket rescheduled, not proof of remote application.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/TargetJob" }
+              }
+            }
+          },
+          "default": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/api/v1/targets/{id}/command/supersede": {
+      "parameters": [{ "$ref": "#/components/parameters/ResourceId" }],
+      "post": {
+        "operationId": "supersedeTargetCommand",
+        "tags": ["Targets"],
+        "summary": "Retire an unresolved ticket's uncertainty",
+        "description": "No query is accepted. Requires the exact current pending or blocked job_id. A trusted newer epoch or terminal high-water observation must prove the old command slot is spent. Supersession is not proof that the earlier mutation applied and does not replay it.",
+        "security": [{ "Session": [], "Csrf": [] }],
+        "parameters": [{ "$ref": "#/components/parameters/Origin" }],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/TargetJobInput" }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Ticket marked superseded locally.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/TargetJob" }
+              }
+            }
+          },
+          "default": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/api/v1/targets/{id}/command/refresh": {
+      "parameters": [{ "$ref": "#/components/parameters/ResourceId" }],
+      "post": {
+        "operationId": "refreshTargetCommand",
+        "tags": ["Targets"],
+        "summary": "Refresh the current ticket's remote receipt",
+        "description": "No query is accepted. Requires the empty JSON object, not job_id. Reads the current ticket's original protocol receipt under current remote ownership. Does not replay its mutation or recover a secret. A saved receipt can become applied after a target restart.",
+        "security": [{ "Session": [], "Csrf": [] }],
+        "parameters": [{ "$ref": "#/components/parameters/Origin" }],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/Empty" }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Current durable ticket after receipt refresh.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/TargetJob" }
+              }
+            }
+          },
+          "default": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/api/v1/targets/{id}/command/user-result": {
+      "parameters": [{ "$ref": "#/components/parameters/ResourceId" }],
+      "post": {
+        "operationId": "recoverTargetUserResult",
+        "tags": ["Targets"],
+        "summary": "Recover one retained creation's non-secret user ID",
+        "description": "No query is accepted. Requires the exact current job_id of a CreateUser intent in pending, blocked, saved or applied state. Reads its original version-one receipt through the registered mTLS target under current peer and owner authorization, then rechecks the local target and job before saving receipt metadata. It sends no mutation, allocates no command and recovers no credential or secret. A 200 identifies the historical created user, not its current state or reachability; use the same target's exact-ID user search separately. A changed job returns 409. A missing or pruned receipt leaves the creation result unknown; do not submit another creation to recover it. A verified rejection records a terminal rejected ticket and has no recoverable user; read the local ticket to inspect that rejection.",
+        "security": [{ "Session": [], "Csrf": [] }],
+        "parameters": [{ "$ref": "#/components/parameters/Origin" }],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/TargetJobInput" }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Verified historical creation identity and the exact refreshed ticket; no user object, credential or secret.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/TargetUserResult" }
+              }
+            }
+          },
+          "default": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/api/v1/targets/{id}/proxy/prefixes": {
+      "parameters": [{ "$ref": "#/components/parameters/ResourceId" }],
+      "get": {
+        "operationId": "listTargetPrefixes",
+        "tags": ["Targets"],
+        "summary": "Read target prefix inventory",
+        "description": "At most 1024 query bytes; only distinct after and limit are accepted. Prefix registration is inventory, not proof of routing or health.",
+        "security": [{ "Session": [] }],
+        "parameters": [
+          { "$ref": "#/components/parameters/PageAfter" },
+          { "$ref": "#/components/parameters/PageLimit" }
+        ],
+        "responses": {
+          "200": {
+            "description": "Target-issued bounded prefix page.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/PrefixPage" }
+              }
+            }
+          },
+          "default": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/api/v1/targets/{id}/proxy/addresses": {
+      "parameters": [{ "$ref": "#/components/parameters/ResourceId" }],
+      "get": {
+        "operationId": "listTargetAddresses",
+        "tags": ["Targets"],
+        "summary": "Read target address inventory",
+        "description": "At most 1024 query bytes; only distinct after and limit are accepted. No local fallback and no new health probe.",
+        "security": [{ "Session": [] }],
+        "parameters": [
+          { "$ref": "#/components/parameters/PageAfter" },
+          { "$ref": "#/components/parameters/PageLimit" }
+        ],
+        "responses": {
+          "200": {
+            "description": "Target-issued bounded address page.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/AddressPage" }
+              }
+            }
+          },
+          "default": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/api/v1/targets/{id}/proxy/addresses/{resource}": {
+      "parameters": [
+        { "$ref": "#/components/parameters/ResourceId" },
+        {
+          "name": "resource",
+          "in": "path",
+          "required": true,
+          "schema": { "$ref": "#/components/schemas/Id" }
+        }
+      ],
+      "get": {
+        "operationId": "getTargetAddress",
+        "tags": ["Targets"],
+        "summary": "Read one exact target address",
+        "description": "Administrator session only. Both path IDs must be canonical; they select a locally enrolled target and an exact address ID. No query string is accepted, including an empty query. Reuses the current target owner, registered TLS identity and bounded remote read. Returns the policy revision and address from one target snapshot, including retired addresses. No local fallback or new health probe is performed.",
+        "security": [{ "Session": [] }],
+        "x-vproxy-max-query-bytes": 0,
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "Verified target policy snapshot containing the exact requested address.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/AddressView" }
+              }
+            }
+          },
+          "404": {
+            "description": "resource_not_found: either the locally registered target does not exist, or the verified target supports lookup but has no address with this ID. Confirm the target registration before interpreting this as a missing address. Retired addresses remain readable.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ApiError" }
+              }
+            }
+          },
+          "502": {
+            "description": "address_lookup_unsupported only when an older target returns its fixed 404 not_found for the lookup route. Other remote failures retain their fixed public codes; authentication, upgrade and malformed-response failures are not reclassified as unsupported or as a missing address.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ApiError" }
+              }
+            }
+          },
+          "default": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/api/v1/targets/{id}/proxy/pools": {
+      "parameters": [{ "$ref": "#/components/parameters/ResourceId" }],
+      "get": {
+        "operationId": "listTargetPools",
+        "tags": ["Targets"],
+        "summary": "Read target pool inventory",
+        "description": "At most 1024 query bytes; only distinct after and limit are accepted. Pool pages contain member counts, not an inline membership list.",
+        "security": [{ "Session": [] }],
+        "parameters": [
+          { "$ref": "#/components/parameters/PageAfter" },
+          { "$ref": "#/components/parameters/PageLimit" }
+        ],
+        "responses": {
+          "200": {
+            "description": "Target-issued bounded pool page.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/PoolPage" }
+              }
+            }
+          },
+          "default": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/api/v1/targets/{id}/proxy/pools/{resource}/members": {
+      "parameters": [
+        { "$ref": "#/components/parameters/ResourceId" },
+        {
+          "name": "resource",
+          "in": "path",
+          "required": true,
+          "schema": { "$ref": "#/components/schemas/Id" }
+        }
+      ],
+      "get": {
+        "operationId": "listTargetPoolMembers",
+        "tags": ["Targets"],
+        "summary": "Read target pool member IDs",
+        "description": "At most 1024 query bytes; only distinct after and limit are accepted. Both path components are bounded resource IDs, never an arbitrary outbound path.",
+        "security": [{ "Session": [] }],
+        "parameters": [
+          { "$ref": "#/components/parameters/PageAfter" },
+          { "$ref": "#/components/parameters/PageLimit" }
+        ],
+        "responses": {
+          "200": {
+            "description": "Target-issued page of address IDs.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/PoolMembersPage" }
+              }
+            }
+          },
+          "default": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/api/v1/targets/{id}/proxy/users/{resource}/routing": {
+      "parameters": [
+        { "$ref": "#/components/parameters/ResourceId" },
+        {
+          "name": "resource",
+          "in": "path",
+          "required": true,
+          "schema": { "$ref": "#/components/schemas/Id" }
+        }
+      ],
+      "get": {
+        "operationId": "getTargetUserRouting",
+        "tags": ["Targets"],
+        "summary": "Read one target user's routing grant",
+        "description": "No query is accepted. A current target owner read, not a grant of authority to change routing.",
+        "security": [{ "Session": [] }],
+        "responses": {
+          "200": {
+            "description": "Target policy revision and finite user routing grant.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/RoutePermissionView" }
+              }
+            }
+          },
+          "default": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/api/v1/targets/{id}/proxy/health": {
+      "parameters": [{ "$ref": "#/components/parameters/ResourceId" }],
+      "get": {
+        "operationId": "getTargetHealth",
+        "tags": ["Targets"],
+        "summary": "Read existing target health observations",
+        "description": "At most 1024 query bytes; only distinct after and limit are accepted. Default limit 10, maximum 16. Reads node-local timed observations; it does not start a probe, change routing or establish Internet/UDP reachability.",
+        "security": [{ "Session": [] }],
+        "parameters": [
+          { "$ref": "#/components/parameters/PageAfter" },
+          {
+            "name": "limit",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 16,
+              "default": 10
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Target-issued observation page with age and catalog provenance.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/HealthPage" }
+              }
+            }
+          },
+          "default": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/api/v1/targets/{id}/routing/commands": {
+      "parameters": [{ "$ref": "#/components/parameters/ResourceId" }],
+      "post": {
+        "operationId": "submitTargetRoutingCommand",
+        "tags": ["Targets"],
+        "summary": "Submit one finite target IPAM command",
+        "description": "No query is accepted. This separate version-two action vocabulary uses the same durable per-target ticket, owner epoch, command ordering and policy CAS as user commands. No arbitrary probe URL, host route or shell command is accepted. A 200 may mean saved or rejected; a 202 has an unknown first delivery result. Inspect the original ticket rather than submitting a new mutation.",
+        "security": [{ "Session": [], "Csrf": [] }],
+        "parameters": [{ "$ref": "#/components/parameters/Origin" }],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/RoutingCommandInput" }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Verified first delivery receipt; not necessarily applied.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    { "$ref": "#/components/schemas/RoutingSubmission" },
+                    {
+                      "properties": {
+                        "response": {
+                          "$ref": "#/components/schemas/RoutingCommandReply"
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "202": {
+            "description": "Durable intent with response=null; delivery may still finish.",
+            "headers": {
+              "Location": {
+                "description": "The current local /api/v1/targets/{id}/command ticket.",
+                "schema": { "type": "string" }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    { "$ref": "#/components/schemas/RoutingSubmission" },
+                    { "properties": { "response": { "type": "null" } } }
+                  ]
+                }
+              }
+            }
+          },
+          "default": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/api/v1/targets/{id}/proxy/presets": {
+      "parameters": [{ "$ref": "#/components/parameters/ResourceId" }],
+      "get": {
+        "operationId": "getTargetPresetCatalog",
+        "tags": ["Targets"],
+        "summary": "Read the target's actual preset backend capability",
+        "description": "No query is accepted. The catalog describes the target process's actual startup engine, not OS guesses or a permission grant. Ready does not prove that every preset is usable on a particular TCP route.",
+        "security": [{ "Session": [] }],
+        "responses": {
+          "200": {
+            "description": "Verified target preset capability.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/PresetCatalog" }
+              }
+            }
+          },
+          "default": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/api/v1/targets/{id}/proxy/users/{resource}/presets": {
+      "parameters": [
+        { "$ref": "#/components/parameters/ResourceId" },
+        {
+          "name": "resource",
+          "in": "path",
+          "required": true,
+          "schema": { "$ref": "#/components/schemas/Id" }
+        }
+      ],
+      "get": {
+        "operationId": "getTargetUserPresets",
+        "tags": ["Targets"],
+        "summary": "Read one target user's preset grant",
+        "description": "No query is accepted. A node-local user identity and current owner authorization are required.",
+        "security": [{ "Session": [] }],
+        "responses": {
+          "200": {
+            "description": "Target policy revision and user preset grant.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/UserPresetsView" }
+              }
+            }
+          },
+          "default": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/api/v1/targets/{id}/proxy/pools/{resource}/presets": {
+      "parameters": [
+        { "$ref": "#/components/parameters/ResourceId" },
+        {
+          "name": "resource",
+          "in": "path",
+          "required": true,
+          "schema": { "$ref": "#/components/schemas/Id" }
+        }
+      ],
+      "get": {
+        "operationId": "getTargetPoolPreset",
+        "tags": ["Targets"],
+        "summary": "Read one target pool's suggested preset",
+        "description": "No query is accepted. A pool default does not grant a user permission and does not affect UDP or passive sockets.",
+        "security": [{ "Session": [] }],
+        "responses": {
+          "200": {
+            "description": "Target policy revision and pool default.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/PoolPresetView" }
+              }
+            }
+          },
+          "default": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/api/v1/targets/{id}/preset/commands": {
+      "parameters": [{ "$ref": "#/components/parameters/ResourceId" }],
+      "post": {
+        "operationId": "submitTargetPresetCommand",
+        "tags": ["Targets"],
+        "summary": "Submit one fixed target preset change",
+        "description": "No query is accepted. Only the version-three built-in preset vocabulary is accepted; no device template or kernel code. Shares policy CAS and the same per-target durable command queue. A 200 receipt may be saved or rejected; a 202 means the first delivery result is unknown. Neither proves a successful proxy connection.",
+        "security": [{ "Session": [], "Csrf": [] }],
+        "parameters": [{ "$ref": "#/components/parameters/Origin" }],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/PresetCommandInput" }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Verified first delivery receipt; inspect its status.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    { "$ref": "#/components/schemas/PresetSubmission" },
+                    {
+                      "properties": {
+                        "response": {
+                          "$ref": "#/components/schemas/PresetCommandReply"
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "202": {
+            "description": "Durable intent with response=null; delivery may still finish.",
+            "headers": {
+              "Location": {
+                "description": "The current local /api/v1/targets/{id}/command ticket.",
+                "schema": { "type": "string" }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    { "$ref": "#/components/schemas/PresetSubmission" },
+                    { "properties": { "response": { "type": "null" } } }
+                  ]
+                }
+              }
+            }
+          },
+          "default": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    }
+  },
+  "schemas": {
+    "TargetOrigin": {
+      "type": "string",
+      "format": "uri",
+      "minLength": 1,
+      "maxLength": 300,
+      "description": "Canonical https://authority, exactly the URL origin serialization: no userinfo, path (including trailing slash), query, fragment, zero port, noncanonical host or explicit default port. A locally registered destination, not browser-supplied trust."
+    },
+    "TargetServerIp": {
+      "description": "Numeric display IP only. Rejects unspecified, multicast and IPv4 limited broadcast, including IPv4-mapped ranges. Private and loopback addresses are permitted. Does not establish TLS identity, reachability or proxy egress.",
+      "anyOf": [
+        { "type": "string", "format": "ipv4" },
+        { "type": "string", "format": "ipv6" },
+        { "type": "null" }
+      ]
+    },
+    "Target": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "node_id",
+        "name",
+        "origin",
+        "server_ip",
+        "active",
+        "retired",
+        "revision",
+        "observed_epoch",
+        "observed_command",
+        "observed_policy_revision",
+        "rollback_detected"
+      ],
+      "properties": {
+        "node_id": { "$ref": "#/components/schemas/Id" },
+        "name": { "$ref": "#/components/schemas/Name" },
+        "origin": { "$ref": "#/components/schemas/TargetOrigin" },
+        "server_ip": { "$ref": "#/components/schemas/TargetServerIp" },
+        "active": { "type": "boolean" },
+        "retired": { "type": "boolean" },
+        "revision": { "$ref": "#/components/schemas/Revision" },
+        "observed_epoch": { "$ref": "#/components/schemas/NullableRevision" },
+        "observed_command": {
+          "anyOf": [
+            { "$ref": "#/components/schemas/Sequence" },
+            { "type": "null" }
+          ]
+        },
+        "observed_policy_revision": {
+          "$ref": "#/components/schemas/NullableRevision"
+        },
+        "rollback_detected": { "type": "boolean" }
+      },
+      "description": "Controller-local registration. Observed values are historical rollback floors, never live remote status."
+    },
+    "TargetPage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["items", "next_cursor", "controller_available"],
+      "properties": {
+        "items": {
+          "type": "array",
+          "maxItems": 25,
+          "items": { "$ref": "#/components/schemas/Target" }
+        },
+        "next_cursor": { "$ref": "#/components/schemas/NullableId" },
+        "controller_available": { "type": "boolean" }
+      }
+    },
+    "TargetRegisterInput": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["node_id", "origin", "active"],
+      "properties": {
+        "node_id": { "$ref": "#/components/schemas/Id" },
+        "origin": { "$ref": "#/components/schemas/TargetOrigin" },
+        "active": { "type": "boolean" },
+        "server_ip": { "$ref": "#/components/schemas/TargetServerIp" }
+      },
+      "description": "New enrollment is not performed here. Omitted server_ip stores null for a new registration; null explicitly clears the display metadata."
+    },
+    "TargetConfigureInput": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["expected_revision", "origin", "active"],
+      "properties": {
+        "expected_revision": { "$ref": "#/components/schemas/Revision" },
+        "origin": { "$ref": "#/components/schemas/TargetOrigin" },
+        "active": { "type": "boolean" },
+        "server_ip": { "$ref": "#/components/schemas/TargetServerIp" }
+      },
+      "description": "Omitting server_ip preserves the saved display value; null clears it. Target revision CAS is separate from remote policy CAS."
+    },
+    "TargetStateInput": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["expected_revision", "active"],
+      "properties": {
+        "expected_revision": { "$ref": "#/components/schemas/Revision" },
+        "active": { "type": "boolean" }
+      }
+    },
+    "TargetRevisionInput": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["expected_revision"],
+      "properties": {
+        "expected_revision": { "$ref": "#/components/schemas/Revision" }
+      }
+    },
+    "TargetPolicy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "controller_node_id",
+        "controller_epoch",
+        "last_terminal_command",
+        "saved_revision",
+        "applied_revision",
+        "durable_applied_revision",
+        "proxy_running",
+        "user_count",
+        "credential_count"
+      ],
+      "properties": {
+        "controller_node_id": { "$ref": "#/components/schemas/NullableId" },
+        "controller_epoch": { "$ref": "#/components/schemas/Revision" },
+        "last_terminal_command": { "$ref": "#/components/schemas/Sequence" },
+        "saved_revision": { "$ref": "#/components/schemas/Revision" },
+        "applied_revision": { "$ref": "#/components/schemas/NullableRevision" },
+        "durable_applied_revision": {
+          "$ref": "#/components/schemas/NullableRevision"
+        },
+        "proxy_running": { "type": "boolean" },
+        "user_count": { "type": "integer", "minimum": 0, "maximum": 1024 },
+        "credential_count": { "type": "integer", "minimum": 0, "maximum": 8192 }
+      },
+      "description": "Target-owned status. Saved is a durable candidate; applied is this target process's live Reader. Durable applied is historical and cannot prove current availability."
+    },
+    "TargetMutation": {
+      "description": "Closed version-one command vocabulary. New routing or preset actions must use their separate command routes.",
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["action", "name", "protocols", "concurrent_limit"],
+          "properties": {
+            "action": { "const": "create_user" },
+            "name": { "$ref": "#/components/schemas/Name" },
+            "protocols": {
+              "type": "array",
+              "maxItems": 3,
+              "uniqueItems": true,
+              "items": { "$ref": "#/components/schemas/Protocol" }
+            },
+            "concurrent_limit": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 1000000
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["action", "id", "name", "protocols", "concurrent_limit"],
+          "properties": {
+            "action": { "const": "update_user" },
+            "id": { "$ref": "#/components/schemas/Id" },
+            "name": { "$ref": "#/components/schemas/Name" },
+            "protocols": {
+              "type": "array",
+              "maxItems": 3,
+              "uniqueItems": true,
+              "items": { "$ref": "#/components/schemas/Protocol" }
+            },
+            "concurrent_limit": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 1000000
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["action", "id", "active"],
+          "properties": {
+            "action": { "const": "set_user_active" },
+            "id": { "$ref": "#/components/schemas/Id" },
+            "active": { "type": "boolean" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["action", "id"],
+          "properties": {
+            "action": { "const": "delete_user" },
+            "id": { "$ref": "#/components/schemas/Id" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["action", "user_id"],
+          "properties": {
+            "action": { "const": "create_credential" },
+            "user_id": { "$ref": "#/components/schemas/Id" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["action", "id", "active"],
+          "properties": {
+            "action": { "const": "set_credential_active" },
+            "id": { "$ref": "#/components/schemas/Id" },
+            "active": { "type": "boolean" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["action", "id"],
+          "properties": {
+            "action": { "const": "rotate_credential" },
+            "id": { "$ref": "#/components/schemas/Id" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["action", "id"],
+          "properties": {
+            "action": { "const": "revoke_credential" },
+            "id": { "$ref": "#/components/schemas/Id" }
+          }
+        }
+      ]
+    },
+    "TargetCommandInput": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "expected_target_revision",
+        "controller_epoch",
+        "command_id",
+        "expected_policy_revision",
+        "mutation"
+      ],
+      "properties": {
+        "expected_target_revision": { "$ref": "#/components/schemas/Revision" },
+        "controller_epoch": { "$ref": "#/components/schemas/Revision" },
+        "command_id": { "$ref": "#/components/schemas/Revision" },
+        "expected_policy_revision": { "$ref": "#/components/schemas/Revision" },
+        "mutation": { "$ref": "#/components/schemas/TargetMutation" }
+      }
+    },
+    "RoutingCommandInput": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "expected_target_revision",
+        "controller_epoch",
+        "command_id",
+        "expected_policy_revision",
+        "mutation"
+      ],
+      "properties": {
+        "expected_target_revision": { "$ref": "#/components/schemas/Revision" },
+        "controller_epoch": { "$ref": "#/components/schemas/Revision" },
+        "command_id": { "$ref": "#/components/schemas/Revision" },
+        "expected_policy_revision": { "$ref": "#/components/schemas/Revision" },
+        "mutation": { "$ref": "#/components/schemas/RoutingMutation" }
+      }
+    },
+    "PresetCommandInput": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "expected_target_revision",
+        "controller_epoch",
+        "command_id",
+        "expected_policy_revision",
+        "mutation"
+      ],
+      "properties": {
+        "expected_target_revision": { "$ref": "#/components/schemas/Revision" },
+        "controller_epoch": { "$ref": "#/components/schemas/Revision" },
+        "command_id": { "$ref": "#/components/schemas/Revision" },
+        "expected_policy_revision": { "$ref": "#/components/schemas/Revision" },
+        "mutation": { "$ref": "#/components/schemas/PresetMutation" }
+      }
+    },
+    "RoutingReceiptReference": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "id"],
+      "properties": {
+        "kind": {
+          "type": "string",
+          "enum": ["prefix", "address", "pool", "permission"]
+        },
+        "id": { "$ref": "#/components/schemas/Id" }
+      },
+      "description": "Durable non-secret identity. A permission reference uses the user ID, not a synthetic routing object."
+    },
+    "PresetReceiptReference": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "id"],
+      "properties": {
+        "kind": { "type": "string", "enum": ["user", "pool"] },
+        "id": { "$ref": "#/components/schemas/Id" }
+      }
+    },
+    "PolicyReceipt": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "controller_epoch",
+        "command_id",
+        "status",
+        "policy_revision",
+        "rejection",
+        "user_id",
+        "credential_id"
+      ],
+      "properties": {
+        "controller_epoch": { "$ref": "#/components/schemas/Revision" },
+        "command_id": { "$ref": "#/components/schemas/Revision" },
+        "status": {
+          "type": "string",
+          "enum": ["saved", "applied", "rejected"]
+        },
+        "policy_revision": { "$ref": "#/components/schemas/NullableRevision" },
+        "rejection": {
+          "enum": [
+            null,
+            "invalid_policy",
+            "policy_conflict",
+            "resource_not_found",
+            "policy_capacity"
+          ]
+        },
+        "user_id": { "$ref": "#/components/schemas/NullableId" },
+        "credential_id": { "$ref": "#/components/schemas/NullableId" },
+        "routing": { "$ref": "#/components/schemas/RoutingReceiptReference" },
+        "preset": { "$ref": "#/components/schemas/PresetReceiptReference" }
+      },
+      "allOf": [
+        { "not": { "required": ["routing", "preset"] } },
+        {
+          "if": { "properties": { "status": { "const": "rejected" } } },
+          "then": {
+            "properties": {
+              "policy_revision": { "type": "null" },
+              "rejection": { "type": "string" },
+              "user_id": { "type": "null" },
+              "credential_id": { "type": "null" }
+            },
+            "not": {
+              "anyOf": [{ "required": ["routing"] }, { "required": ["preset"] }]
+            }
+          },
+          "else": {
+            "properties": {
+              "policy_revision": { "$ref": "#/components/schemas/Revision" },
+              "rejection": { "type": "null" }
+            }
+          }
+        }
+      ],
+      "description": "Replayable terminal command metadata, never a secret recovery mechanism. Version is not serialized. Applied is historical publication of this exact command; optional routing/preset references are omitted when absent, not serialized as null."
+    },
+    "TargetRoutingEntity": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "data"],
+          "properties": {
+            "kind": { "const": "prefix" },
+            "data": { "$ref": "#/components/schemas/Prefix" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "data"],
+          "properties": {
+            "kind": { "const": "address" },
+            "data": { "$ref": "#/components/schemas/Address" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "data"],
+          "properties": {
+            "kind": { "const": "pool" },
+            "data": { "$ref": "#/components/schemas/Pool" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "data"],
+          "properties": {
+            "kind": { "const": "permission" },
+            "data": { "$ref": "#/components/schemas/RoutePermission" }
+          }
+        }
+      ],
+      "description": "First-acceptance resource projection. Replay does not reconstruct a potentially newer entity."
+    },
+    "TargetPresetEntity": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "value"],
+          "properties": {
+            "kind": { "const": "user" },
+            "value": { "$ref": "#/components/schemas/UserPreset" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "value"],
+          "properties": {
+            "kind": { "const": "pool" },
+            "value": { "$ref": "#/components/schemas/PoolPreset" }
+          }
+        }
+      ]
+    },
+    "PolicyCommandReply": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "receipt",
+        "replayed",
+        "user",
+        "credential",
+        "secret",
+        "secret_available"
+      ],
+      "properties": {
+        "receipt": { "$ref": "#/components/schemas/PolicyReceipt" },
+        "replayed": { "type": "boolean" },
+        "user": {
+          "anyOf": [{ "$ref": "#/components/schemas/User" }, { "type": "null" }]
+        },
+        "credential": {
+          "anyOf": [
+            { "$ref": "#/components/schemas/Credential" },
+            { "type": "null" }
+          ]
+        },
+        "secret": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 43,
+              "maxLength": 43,
+              "pattern": "^[A-Za-z0-9_-]{43}$"
+            },
+            { "type": "null" }
+          ]
+        },
+        "secret_available": { "type": "boolean" }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "secret_available": { "const": true } } },
+          "then": {
+            "properties": {
+              "secret": { "type": "string" },
+              "credential": { "$ref": "#/components/schemas/Credential" }
+            }
+          },
+          "else": { "properties": { "secret": { "type": "null" } } }
+        },
+        {
+          "if": {
+            "anyOf": [
+              { "properties": { "replayed": { "const": true } } },
+              {
+                "properties": {
+                  "receipt": {
+                    "properties": { "status": { "const": "rejected" } }
+                  }
+                }
+              }
+            ]
+          },
+          "then": {
+            "properties": {
+              "user": { "type": "null" },
+              "credential": { "type": "null" },
+              "secret": { "type": "null" },
+              "secret_available": { "const": false }
+            }
+          }
+        }
+      ],
+      "description": "One-time secret appears only on a first successful create/rotate credential delivery. Replayed or rejected replies have null user, credential and secret. Secret_available equals secret presence; a receipt/ticket cannot reproduce it."
+    },
+    "RoutingCommandReply": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "receipt",
+        "replayed",
+        "user",
+        "credential",
+        "secret",
+        "secret_available"
+      ],
+      "properties": {
+        "receipt": { "$ref": "#/components/schemas/PolicyReceipt" },
+        "replayed": { "type": "boolean" },
+        "user": { "type": "null" },
+        "credential": { "type": "null" },
+        "secret": { "type": "null" },
+        "secret_available": { "const": false },
+        "routing": { "$ref": "#/components/schemas/TargetRoutingEntity" }
+      },
+      "allOf": [
+        {
+          "if": {
+            "anyOf": [
+              { "properties": { "replayed": { "const": true } } },
+              {
+                "properties": {
+                  "receipt": {
+                    "properties": { "status": { "const": "rejected" } }
+                  }
+                }
+              }
+            ]
+          },
+          "then": { "not": { "required": ["routing"] } }
+        }
+      ],
+      "description": "Routing is a non-secret first-acceptance projection and is omitted on replay or rejection, not null. No user or credential is fabricated for an IPAM change."
+    },
+    "PresetCommandReply": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "receipt",
+        "replayed",
+        "user",
+        "credential",
+        "secret",
+        "secret_available"
+      ],
+      "properties": {
+        "receipt": { "$ref": "#/components/schemas/PolicyReceipt" },
+        "replayed": { "type": "boolean" },
+        "user": { "type": "null" },
+        "credential": { "type": "null" },
+        "secret": { "type": "null" },
+        "secret_available": { "const": false },
+        "presets": { "$ref": "#/components/schemas/TargetPresetEntity" }
+      },
+      "allOf": [
+        {
+          "if": {
+            "anyOf": [
+              { "properties": { "replayed": { "const": true } } },
+              {
+                "properties": {
+                  "receipt": {
+                    "properties": { "status": { "const": "rejected" } }
+                  }
+                }
+              }
+            ]
+          },
+          "then": { "not": { "required": ["presets"] } }
+        }
+      ],
+      "description": "Presets is omitted on replay or rejection, not null. A preset change cannot return proxy credentials or prove a TCP connection succeeded."
+    },
+    "PolicySubmission": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["job", "response"],
+      "properties": {
+        "job": { "$ref": "#/components/schemas/TargetJob" },
+        "response": {
+          "anyOf": [
+            { "$ref": "#/components/schemas/PolicyCommandReply" },
+            { "type": "null" }
+          ]
+        }
+      },
+      "description": "200 has a first reply, whose receipt may be saved/applied/rejected. 202 has response=null; the durable intent remains pending or may already have advanced. Cancellation or a missing HTTP reply does not prove the target did not commit."
+    },
+    "RoutingSubmission": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["job", "response"],
+      "properties": {
+        "job": { "$ref": "#/components/schemas/TargetJob" },
+        "response": {
+          "anyOf": [
+            { "$ref": "#/components/schemas/RoutingCommandReply" },
+            { "type": "null" }
+          ]
+        }
+      },
+      "description": "The first response can be lost after acceptance. Recover by the original ticket and command identity; never assume a null reply means no mutation."
+    },
+    "PresetSubmission": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["job", "response"],
+      "properties": {
+        "job": { "$ref": "#/components/schemas/TargetJob" },
+        "response": {
+          "anyOf": [
+            { "$ref": "#/components/schemas/PresetCommandReply" },
+            { "type": "null" }
+          ]
+        }
+      }
+    },
+    "TargetJobInput": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["job_id"],
+      "properties": { "job_id": { "$ref": "#/components/schemas/Id" } }
+    },
+    "TargetUserResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["job", "user_id"],
+      "properties": {
+        "job": {
+          "allOf": [
+            { "$ref": "#/components/schemas/TargetJob" },
+            {
+              "required": ["user_creation"],
+              "properties": {
+                "user_creation": { "const": true },
+                "state": { "enum": ["saved", "applied"] }
+              }
+            }
+          ]
+        },
+        "user_id": { "$ref": "#/components/schemas/Id" }
+      },
+      "description": "The historical non-secret ID returned by the exact retained CreateUser receipt. Does not contain current user metadata or any credential, verifier or secret."
+    },
+    "TargetJob": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "node_id",
+        "job_id",
+        "controller_epoch",
+        "command_id",
+        "expected_policy_revision",
+        "state",
+        "policy_revision",
+        "outcome_code",
+        "attempts",
+        "next_attempt"
+      ],
+      "properties": {
+        "node_id": { "$ref": "#/components/schemas/Id" },
+        "job_id": { "$ref": "#/components/schemas/Id" },
+        "controller_epoch": { "$ref": "#/components/schemas/Revision" },
+        "command_id": { "$ref": "#/components/schemas/Revision" },
+        "expected_policy_revision": {
+          "$ref": "#/components/schemas/NullableRevision"
+        },
+        "state": {
+          "type": "string",
+          "enum": [
+            "pending",
+            "blocked",
+            "saved",
+            "applied",
+            "rejected",
+            "superseded"
+          ]
+        },
+        "policy_revision": { "$ref": "#/components/schemas/NullableRevision" },
+        "outcome_code": {
+          "enum": [
+            null,
+            "remote_rejected",
+            "node_permission_or_state",
+            "node_unavailable"
+          ]
+        },
+        "attempts": { "type": "integer", "minimum": 0, "maximum": 4294967295 },
+        "next_attempt": {
+          "$ref": "#/components/schemas/Sequence",
+          "description": "Unix seconds as a canonical decimal i64 string; zero means no scheduled delay."
+        },
+        "user_creation": {
+          "type": "boolean",
+          "default": false,
+          "description": "Derived from the retained typed CreateUser intent, not proof that its receipt or current user still exists. Current servers include this field; older servers omit it, which readers treat as false."
+        },
+        "routing": { "$ref": "#/components/schemas/RoutingReceiptReference" },
+        "preset": { "$ref": "#/components/schemas/PresetReceiptReference" },
+        "maintenance": { "$ref": "#/components/schemas/MaintenanceIntent" },
+        "resource": { "const": "proxy_endpoints" },
+        "expected_metadata_revision": {
+          "$ref": "#/components/schemas/Revision"
+        },
+        "metadata_revision": {
+          "$ref": "#/components/schemas/NullableRevision"
+        },
+        "endpoint": { "$ref": "#/components/schemas/EndpointReference" }
+      },
+      "allOf": [
+        {
+          "if": {
+            "required": ["user_creation"],
+            "properties": { "user_creation": { "const": true } }
+          },
+          "then": {
+            "not": {
+              "anyOf": [
+                { "required": ["resource"] },
+                { "required": ["routing"] },
+                { "required": ["preset"] },
+                { "required": ["maintenance"] }
+              ]
+            }
+          }
+        },
+        {
+          "if": { "required": ["maintenance"] },
+          "then": {
+            "properties": { "user_creation": { "const": false } },
+            "not": {
+              "anyOf": [
+                { "required": ["resource"] },
+                { "required": ["routing"] },
+                { "required": ["preset"] }
+              ]
+            }
+          }
+        }
+      ],
+      "oneOf": [
+        {
+          "properties": {
+            "expected_policy_revision": {
+              "$ref": "#/components/schemas/Revision"
+            }
+          },
+          "not": {
+            "anyOf": [
+              { "required": ["resource"] },
+              { "required": ["expected_metadata_revision"] },
+              { "required": ["metadata_revision"] },
+              { "required": ["endpoint"] }
+            ]
+          }
+        },
+        {
+          "required": [
+            "resource",
+            "expected_metadata_revision",
+            "metadata_revision",
+            "endpoint"
+          ],
+          "properties": {
+            "expected_policy_revision": { "type": "null" },
+            "policy_revision": { "type": "null" },
+            "state": {
+              "enum": ["pending", "blocked", "saved", "rejected", "superseded"]
+            }
+          },
+          "not": {
+            "anyOf": [
+              { "required": ["routing"] },
+              { "required": ["preset"] },
+              { "required": ["maintenance"] }
+            ]
+          }
+        }
+      ],
+      "description": "Current durable, non-secret per-target ticket. No full mutation payload or secret. A v5 intent additionally includes maintenance.accepting, derived from the retained typed command even when unresolved or rejected; other jobs omit it. Maintenance excludes user_creation=true and endpoint/routing/preset references. The endpoint branch flattens resource/metadata CAS/endpoint fields; policy omits them. Other references are omitted when absent. Pending/blocked are unresolved, saved is durable remote acceptance, applied is historical publication rather than drained operations, and superseded does not establish the earlier outcome."
+    }
+  }
+}

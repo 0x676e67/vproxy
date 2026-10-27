@@ -1,60 +1,97 @@
-use base64::Engine;
-use http::{HeaderMap, header};
+use http::HeaderMap;
 
-use super::{Error, Extension};
+use super::Error;
+use crate::server::auth::{self, Authenticated, Service, Source, basic_credentials};
 
-/// Enum representing different types of authenticators.
+/// HTTP credential decoding over the explicit legacy or managed admission source.
 #[derive(Clone)]
-pub enum Authenticator {
-    /// No authentication with an IP whitelist.
-    None,
-    /// Password authentication with a username, password, and IP whitelist.
-    Password { username: String, password: String },
-}
+pub(super) struct Authenticator(pub(super) Source);
 
 impl Authenticator {
-    pub async fn authenticate(&self, headers: &HeaderMap) -> Result<Extension, Error> {
-        match self {
-            Authenticator::None => Ok(Extension::default()),
-            Authenticator::Password {
-                username, password, ..
-            } => {
-                let parse_basic_auth = |headers: &HeaderMap| -> Option<String> {
-                    let basic_auth = headers
-                        .get(header::PROXY_AUTHORIZATION)
-                        .and_then(|hv| hv.to_str().ok())
-                        .and_then(|s| s.strip_prefix("Basic "))?;
+    pub(super) async fn authenticate(&self, headers: &HeaderMap) -> Result<Authenticated, Error> {
+        let credentials = self
+            .0
+            .requires_password()
+            .then(|| basic_credentials(headers))
+            .flatten();
+        self.0
+            .authenticate(
+                credentials.as_ref().map(|value| value.username()),
+                credentials
+                    .as_ref()
+                    .map(|value| value.password().as_bytes()),
+                Service::Http,
+            )
+            .await
+            .and_then(|mut authenticated| {
+                authenticated.extension = authenticated.tcp_extension()?;
+                Ok(authenticated)
+            })
+            .map_err(|error| match error {
+                // Missing, partial and wrong proxy credentials all receive a
+                // fresh challenge, unlike a valid identity denied by policy.
+                // https://www.rfc-editor.org/rfc/rfc9110.html#section-11.4
+                auth::Error::InvalidCredentials => Error::ProxyAuthenticationRequired,
+                auth::Error::Unavailable => Error::ServiceUnavailable,
+                auth::Error::Denied => Error::Forbidden,
+                #[cfg(feature = "management")]
+                auth::Error::Capacity => Error::ServiceUnavailable,
+            })
+    }
+}
 
-                    let auth_bytes = base64::engine::general_purpose::STANDARD
-                        .decode(basic_auth.as_bytes())
-                        .ok()?;
+#[cfg(test)]
+mod tests {
+    use base64::Engine;
+    use http::{HeaderValue, header::PROXY_AUTHORIZATION};
 
-                    String::from_utf8(auth_bytes).ok()
-                };
+    use super::*;
 
-                // Parse username and password from headers
-                let auth_str =
-                    parse_basic_auth(headers).ok_or(Error::ProxyAuthenticationRequired)?;
-                // Find last ':' index
-                let last_colon_index = auth_str
-                    .rfind(':')
-                    .ok_or(Error::ProxyAuthenticationRequired)?;
-                let (auth_username, auth_password) = auth_str.split_at(last_colon_index);
-                let auth_password = &auth_password[1..];
+    #[tokio::test]
+    async fn authentication_uses_basic_decoding_and_preserves_extensions() {
+        let encoded =
+            base64::engine::general_purpose::STANDARD.encode("user-session-client-a:pass:word");
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            PROXY_AUTHORIZATION,
+            HeaderValue::from_str(&format!("bAsIc   {encoded}")).expect("valid credentials header"),
+        );
+        let authenticator = Authenticator(Source::Legacy(crate::AuthMode {
+            username: Some("user".to_owned()),
+            password: Some("pass:word".to_owned()),
+        }));
+        assert!(matches!(
+            authenticator.authenticate(&headers).await,
+            Ok(Authenticated {
+                extension: crate::ext::Extension::Session(_),
+                ..
+            })
+        ));
 
-                // Check if the username and password are correct
-                let is_equal = auth_username.starts_with(username) && auth_password.eq(password);
+        headers.append(
+            PROXY_AUTHORIZATION,
+            HeaderValue::from_static("Basic dXNlcjpwYXNzOndvcmQ="),
+        );
+        assert!(matches!(
+            authenticator.authenticate(&headers).await,
+            Err(Error::ProxyAuthenticationRequired)
+        ));
+    }
 
-                // Check credentials
-                if is_equal {
-                    let extensions = Extension::try_from(username, auth_username)
-                        .await
-                        .map_err(|_| Error::Forbidden)?;
-                    Ok(extensions)
-                } else {
-                    Err(Error::Forbidden)
-                }
-            }
-        }
+    #[tokio::test]
+    async fn invalid_password_requires_a_new_proxy_challenge() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            PROXY_AUTHORIZATION,
+            HeaderValue::from_static("Basic dXNlcjp3cm9uZw=="),
+        );
+        let authenticator = Authenticator(Source::Legacy(crate::AuthMode {
+            username: Some("user".to_owned()),
+            password: Some("password".to_owned()),
+        }));
+        assert!(matches!(
+            authenticator.authenticate(&headers).await,
+            Err(Error::ProxyAuthenticationRequired)
+        ));
     }
 }

@@ -1,0 +1,1817 @@
+{
+  "paths": {
+    "/api/v1/proxy/prefixes": {
+      "get": {
+        "operationId": "routingListPrefixes",
+        "tags": ["IP inventory"],
+        "summary": "List registered IP prefixes",
+        "description": "Each page is one snapshot, not a multi-page snapshot token. Only after and limit are accepted; duplicate or unknown query keys are rejected.",
+        "security": [{ "Session": [] }],
+        "parameters": [
+          { "$ref": "#/components/parameters/PageAfter" },
+          { "$ref": "#/components/parameters/PageLimit" }
+        ],
+        "responses": {
+          "200": {
+            "description": "Registered metadata, not an OS configuration or health assertion.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/PrefixPage" }
+              }
+            }
+          },
+          "default": { "$ref": "#/components/responses/Error" }
+        }
+      },
+      "post": {
+        "operationId": "routingCreatePrefix",
+        "tags": ["IP inventory"],
+        "summary": "Register an IP prefix",
+        "description": "Policy CAS write; does not configure interfaces or routes. A lost or failed response may follow commit: do not automatically repeat it.",
+        "security": [{ "Session": [], "Csrf": [] }],
+        "parameters": [{ "$ref": "#/components/parameters/Origin" }],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/RoutingPrefixInput" }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Saved policy and affected entity; not a reachability test.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/RoutingChange" }
+              }
+            }
+          },
+          "default": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/api/v1/proxy/prefixes/{id}/retire": {
+      "parameters": [{ "$ref": "#/components/parameters/ResourceId" }],
+      "post": {
+        "operationId": "routingRetirePrefix",
+        "tags": ["IP inventory"],
+        "summary": "Retire a registered prefix",
+        "description": "Retirement preserves identity and history. Policy CAS write; do not repeat an unknown outcome.",
+        "security": [{ "Session": [], "Csrf": [] }],
+        "parameters": [{ "$ref": "#/components/parameters/Origin" }],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/RoutingRevisionInput" }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Saved policy and affected entity.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/RoutingChange" }
+              }
+            }
+          },
+          "default": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/api/v1/proxy/addresses": {
+      "get": {
+        "operationId": "routingListAddresses",
+        "tags": ["IP inventory"],
+        "summary": "List registered concrete addresses",
+        "description": "Only after and limit are accepted. The revision does not pin later pages.",
+        "security": [{ "Session": [] }],
+        "parameters": [
+          { "$ref": "#/components/parameters/PageAfter" },
+          { "$ref": "#/components/parameters/PageLimit" }
+        ],
+        "responses": {
+          "200": {
+            "description": "Bounded inventory metadata.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/AddressPage" }
+              }
+            }
+          },
+          "default": { "$ref": "#/components/responses/Error" }
+        }
+      },
+      "post": {
+        "operationId": "routingCreateAddress",
+        "tags": ["IP inventory"],
+        "summary": "Register a concrete address",
+        "description": "The address must already be usable on this node. Registration does not configure an interface or prove health. Policy CAS write; do not repeat an unknown outcome.",
+        "security": [{ "Session": [], "Csrf": [] }],
+        "parameters": [{ "$ref": "#/components/parameters/Origin" }],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/RoutingAddressInput" }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Saved policy and affected entity.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/RoutingChange" }
+              }
+            }
+          },
+          "default": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/api/v1/proxy/addresses/{id}": {
+      "parameters": [{ "$ref": "#/components/parameters/ResourceId" }],
+      "get": {
+        "operationId": "routingGetAddress",
+        "tags": ["IP inventory"],
+        "summary": "Read one registered concrete address",
+        "description": "Administrator session only. The path ID must be canonical. No query string is accepted, including an empty query. Returns the policy revision and exact address from one snapshot, including retired addresses. This reads registered metadata and does not probe health or configure the operating system.",
+        "security": [{ "Session": [] }],
+        "x-vproxy-max-query-bytes": 0,
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "One policy snapshot containing the requested address, including its current admission state.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/AddressView" }
+              }
+            }
+          },
+          "404": {
+            "description": "resource_not_found: no address with this exact ID exists in the snapshot. Retirement alone does not produce this error.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ApiError" }
+              }
+            }
+          },
+          "default": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/api/v1/proxy/addresses/{id}/state": {
+      "parameters": [{ "$ref": "#/components/parameters/ResourceId" }],
+      "post": {
+        "operationId": "routingSetAddressState",
+        "tags": ["IP inventory"],
+        "summary": "Change address admission state",
+        "description": "Draining stops new selections; retirement is permanent. Policy CAS write; existing flows are not a health measurement, and an unknown outcome must not be repeated.",
+        "security": [{ "Session": [], "Csrf": [] }],
+        "parameters": [{ "$ref": "#/components/parameters/Origin" }],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/RoutingStateInput" }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Saved policy and affected entity.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/RoutingChange" }
+              }
+            }
+          },
+          "default": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/api/v1/proxy/pools": {
+      "get": {
+        "operationId": "routingListPools",
+        "tags": ["IP inventory"],
+        "summary": "List address pools",
+        "description": "Only after and limit are accepted. Membership is returned by its separate bounded resource, not inlined here.",
+        "security": [{ "Session": [] }],
+        "parameters": [
+          { "$ref": "#/components/parameters/PageAfter" },
+          { "$ref": "#/components/parameters/PageLimit" }
+        ],
+        "responses": {
+          "200": {
+            "description": "Bounded pool metadata.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/PoolPage" }
+              }
+            }
+          },
+          "default": { "$ref": "#/components/responses/Error" }
+        }
+      },
+      "post": {
+        "operationId": "routingCreatePool",
+        "tags": ["IP inventory"],
+        "summary": "Create an explicit single-family pool",
+        "description": "Does not expand a CIDR, discover addresses or alter routing. Policy CAS write; do not repeat an unknown outcome.",
+        "security": [{ "Session": [], "Csrf": [] }],
+        "parameters": [{ "$ref": "#/components/parameters/Origin" }],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/RoutingPoolInput" }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Saved policy and affected entity.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/RoutingChange" }
+              }
+            }
+          },
+          "default": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/api/v1/proxy/pools/{id}/state": {
+      "parameters": [{ "$ref": "#/components/parameters/ResourceId" }],
+      "post": {
+        "operationId": "routingSetPoolState",
+        "tags": ["IP inventory"],
+        "summary": "Change pool admission state",
+        "description": "Policy CAS write; retirement is permanent and does not delete history. Do not repeat an unknown outcome.",
+        "security": [{ "Session": [], "Csrf": [] }],
+        "parameters": [{ "$ref": "#/components/parameters/Origin" }],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/RoutingStateInput" }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Saved policy and affected entity.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/RoutingChange" }
+              }
+            }
+          },
+          "default": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/api/v1/proxy/pools/{id}/members": {
+      "parameters": [{ "$ref": "#/components/parameters/ResourceId" }],
+      "get": {
+        "operationId": "routingListPoolMembers",
+        "tags": ["IP inventory"],
+        "summary": "List a pool's address IDs",
+        "description": "Only after and limit are accepted. A page observes one policy revision; it does not pin later pages.",
+        "security": [{ "Session": [] }],
+        "parameters": [
+          { "$ref": "#/components/parameters/PageAfter" },
+          { "$ref": "#/components/parameters/PageLimit" }
+        ],
+        "responses": {
+          "200": {
+            "description": "Bounded address-ID page.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/PoolMembersPage" }
+              }
+            }
+          },
+          "default": { "$ref": "#/components/responses/Error" }
+        }
+      },
+      "post": {
+        "operationId": "routingAddPoolMember",
+        "tags": ["IP inventory"],
+        "summary": "Add an existing address to a pool",
+        "description": "Address family must match the pool. Policy CAS write; do not repeat an unknown outcome.",
+        "security": [{ "Session": [], "Csrf": [] }],
+        "parameters": [{ "$ref": "#/components/parameters/Origin" }],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/RoutingMemberInput" }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Saved policy and affected pool metadata.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/RoutingChange" }
+              }
+            }
+          },
+          "default": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/api/v1/proxy/pools/{id}/members/remove": {
+      "parameters": [{ "$ref": "#/components/parameters/ResourceId" }],
+      "post": {
+        "operationId": "routingRemovePoolMember",
+        "tags": ["IP inventory"],
+        "summary": "Remove a pool membership",
+        "description": "Does not delete the address. Policy CAS write; do not repeat an unknown outcome.",
+        "security": [{ "Session": [], "Csrf": [] }],
+        "parameters": [{ "$ref": "#/components/parameters/Origin" }],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/RoutingMemberInput" }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Saved policy and affected pool metadata.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/RoutingChange" }
+              }
+            }
+          },
+          "default": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/api/v1/proxy/users/{id}/routing": {
+      "parameters": [{ "$ref": "#/components/parameters/ResourceId" }],
+      "get": {
+        "operationId": "routingGetUserPermission",
+        "tags": ["IP inventory"],
+        "summary": "Read one user's route grants",
+        "description": "Rejects any query. Reading or saving a grant does not test an exit.",
+        "security": [{ "Session": [] }],
+        "responses": {
+          "200": {
+            "description": "Permission and its policy revision.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/RoutePermissionView" }
+              }
+            }
+          },
+          "default": { "$ref": "#/components/responses/Error" }
+        }
+      },
+      "put": {
+        "operationId": "routingSetUserPermission",
+        "tags": ["IP inventory"],
+        "summary": "Replace one user's route grants",
+        "description": "Policy CAS write. Empty selectors do not grant every asset. Do not repeat an unknown outcome.",
+        "security": [{ "Session": [], "Csrf": [] }],
+        "parameters": [{ "$ref": "#/components/parameters/Origin" }],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RoutingPermissionInput"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Saved policy and affected permission.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/RoutingChange" }
+              }
+            }
+          },
+          "default": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/api/v1/proxy/presets": {
+      "get": {
+        "operationId": "presetsGetCatalog",
+        "tags": ["TCP presets"],
+        "summary": "Read this process's preset capability",
+        "description": "Rejects any query. Ready describes the configured backend, not successful application to every route or TCP connection.",
+        "security": [{ "Session": [] }],
+        "responses": {
+          "200": {
+            "description": "Finite startup capability, not an eBPF load request.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/PresetCatalog" }
+              }
+            }
+          },
+          "default": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/api/v1/proxy/users/{id}/presets": {
+      "parameters": [{ "$ref": "#/components/parameters/ResourceId" }],
+      "get": {
+        "operationId": "presetsGetUserGrant",
+        "tags": ["TCP presets"],
+        "summary": "Read one user's preset grant",
+        "description": "Rejects any query. A missing grant is not an unrestricted default.",
+        "security": [{ "Session": [] }],
+        "responses": {
+          "200": {
+            "description": "Policy revision and explicit grant.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/UserPresetsView" }
+              }
+            }
+          },
+          "default": { "$ref": "#/components/responses/Error" }
+        }
+      },
+      "put": {
+        "operationId": "presetsSetUserGrant",
+        "tags": ["TCP presets"],
+        "summary": "Replace one user's preset grant",
+        "description": "Rejects any query. Nested user_id must match the path; a non-null default must belong to allowed_presets. Policy CAS write; does not load eBPF or alter existing sockets. Do not repeat an unknown outcome.",
+        "security": [{ "Session": [], "Csrf": [] }],
+        "parameters": [{ "$ref": "#/components/parameters/Origin" }],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/UserPresetInput" }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Saved grant and policy revision.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/UserPresetsView" }
+              }
+            }
+          },
+          "default": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/api/v1/proxy/pools/{id}/presets": {
+      "parameters": [{ "$ref": "#/components/parameters/ResourceId" }],
+      "get": {
+        "operationId": "presetsGetPoolDefault",
+        "tags": ["TCP presets"],
+        "summary": "Read one pool's suggested preset",
+        "description": "Rejects any query. A pool default cannot grant a user additional permission.",
+        "security": [{ "Session": [] }],
+        "responses": {
+          "200": {
+            "description": "Policy revision and explicit pool default.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/PoolPresetView" }
+              }
+            }
+          },
+          "default": { "$ref": "#/components/responses/Error" }
+        }
+      },
+      "put": {
+        "operationId": "presetsSetPoolDefault",
+        "tags": ["TCP presets"],
+        "summary": "Replace one pool's suggested preset",
+        "description": "Rejects any query. Nested pool_id must match the path. Policy CAS write; does not load eBPF or grant users permission. Do not repeat an unknown outcome.",
+        "security": [{ "Session": [], "Csrf": [] }],
+        "parameters": [{ "$ref": "#/components/parameters/Origin" }],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/PoolPresetInput" }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Saved default and policy revision.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/PoolPresetView" }
+              }
+            }
+          },
+          "default": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/api/v1/proxy/health": {
+      "get": {
+        "operationId": "healthGetSnapshot",
+        "tags": ["Health observations"],
+        "summary": "Read the latest bounded health snapshot",
+        "description": "Does not start a probe. Only after and limit are accepted. Each outcome belongs to one address/check/target; missing or expired observations are unknown, not a global health decision.",
+        "security": [{ "Session": [] }],
+        "parameters": [
+          { "$ref": "#/components/parameters/PageAfter" },
+          {
+            "name": "limit",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 16,
+              "default": 10
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Timed observation with boot and catalog provenance.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/HealthPage" }
+              }
+            }
+          },
+          "default": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/api/v1/proxy/traffic": {
+      "get": {
+        "operationId": "trafficGetTotals",
+        "tags": ["Traffic observations"],
+        "summary": "Read payload traffic totals for one local scope",
+        "description": "Only scope, id and protocol are accepted. Node scope requires no id; user, credential and pool require id. Durable and live counters are separate observations, never values to add together.",
+        "security": [{ "Session": [] }],
+        "parameters": [
+          {
+            "name": "scope",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "enum": ["node", "user", "credential", "pool"],
+              "default": "node"
+            }
+          },
+          {
+            "name": "id",
+            "in": "query",
+            "description": "Required for non-node scope, forbidden for node scope.",
+            "schema": { "$ref": "#/components/schemas/Id" }
+          },
+          {
+            "name": "protocol",
+            "in": "query",
+            "schema": { "$ref": "#/components/schemas/Protocol" }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Loss, continuity and checkpoint metadata accompany all counters.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/TrafficTotals" }
+              }
+            }
+          },
+          "default": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/api/v1/proxy/traffic/buckets": {
+      "get": {
+        "operationId": "trafficGetBuckets",
+        "tags": ["Traffic observations"],
+        "summary": "Read retained UTC traffic buckets",
+        "description": "Only scope, id, protocol, resolution, after and limit are accepted; duplicates are rejected. Credential history is unsupported. Node scope forbids id; user and pool require id. Retention gaps and clock uncertainty are explicit, not zero traffic.",
+        "security": [{ "Session": [] }],
+        "parameters": [
+          {
+            "name": "scope",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "enum": ["node", "user", "pool"],
+              "default": "node"
+            }
+          },
+          {
+            "name": "id",
+            "in": "query",
+            "schema": { "$ref": "#/components/schemas/Id" }
+          },
+          {
+            "name": "protocol",
+            "in": "query",
+            "schema": { "$ref": "#/components/schemas/Protocol" }
+          },
+          {
+            "name": "resolution",
+            "in": "query",
+            "schema": { "$ref": "#/components/schemas/TrafficResolution" }
+          },
+          {
+            "name": "after",
+            "in": "query",
+            "description": "Exclusive UTC window ID, not a user-list cursor.",
+            "schema": { "$ref": "#/components/schemas/TrafficCursor" }
+          },
+          { "$ref": "#/components/parameters/PageLimit" }
+        ],
+        "responses": {
+          "200": {
+            "description": "Bounded retained bucket page.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/TrafficBuckets" }
+              }
+            }
+          },
+          "default": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/api/v1/targets/{id}/traffic": {
+      "parameters": [{ "$ref": "#/components/parameters/ResourceId" }],
+      "get": {
+        "operationId": "remoteTrafficGetTotals",
+        "tags": ["Traffic observations"],
+        "summary": "Read one target's durable traffic totals",
+        "description": "Only scope, id and protocol are accepted. The query id selects an entity on the path's target, never a different node. Node scope may return historical cached data with source state/age; data:null means unavailable, not zero. Other scopes require authorized remote contact and never fall back to local data.",
+        "security": [{ "Session": [] }],
+        "parameters": [
+          {
+            "name": "scope",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "enum": ["node", "user", "credential", "pool"],
+              "default": "node"
+            }
+          },
+          {
+            "name": "id",
+            "in": "query",
+            "description": "Entity ID: required for non-node scope, forbidden for node scope.",
+            "schema": { "$ref": "#/components/schemas/Id" }
+          },
+          {
+            "name": "protocol",
+            "in": "query",
+            "schema": { "$ref": "#/components/schemas/Protocol" }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Source/contact metadata and optional durable projection; no inferred live counters.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/RemoteTrafficTotals" }
+              }
+            }
+          },
+          "default": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/api/v1/targets/{id}/traffic/buckets": {
+      "parameters": [{ "$ref": "#/components/parameters/ResourceId" }],
+      "get": {
+        "operationId": "remoteTrafficGetBuckets",
+        "tags": ["Traffic observations"],
+        "summary": "Read one target's retained durable traffic buckets",
+        "description": "Only scope, id, protocol, resolution, after and limit are accepted. Node scope may return a historical cache; show source state/age and retention flags. User/pool scopes require current authorized remote contact. No credential history or local fallback.",
+        "security": [{ "Session": [] }],
+        "parameters": [
+          {
+            "name": "scope",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "enum": ["node", "user", "pool"],
+              "default": "node"
+            }
+          },
+          {
+            "name": "id",
+            "in": "query",
+            "description": "Required for non-node scope, forbidden for node scope.",
+            "schema": { "$ref": "#/components/schemas/Id" }
+          },
+          {
+            "name": "protocol",
+            "in": "query",
+            "schema": { "$ref": "#/components/schemas/Protocol" }
+          },
+          {
+            "name": "resolution",
+            "in": "query",
+            "schema": { "$ref": "#/components/schemas/TrafficResolution" }
+          },
+          {
+            "name": "after",
+            "in": "query",
+            "schema": { "$ref": "#/components/schemas/TrafficCursor" }
+          },
+          { "$ref": "#/components/parameters/PageLimit" }
+        ],
+        "responses": {
+          "200": {
+            "description": "Source/contact metadata and optional retained data, not a freshness guarantee.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RemoteTrafficBuckets"
+                }
+              }
+            }
+          },
+          "default": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    }
+  },
+  "schemas": {
+    "AddressFamily": { "type": "string", "enum": ["v4", "v6"] },
+    "ResourceState": {
+      "type": "string",
+      "enum": ["active", "draining", "retired"],
+      "description": "Draining stops new selections; retired is a permanent tombstone."
+    },
+    "RoutingIpAddress": {
+      "type": "string",
+      "anyOf": [{ "format": "ipv4" }, { "format": "ipv6" }],
+      "description": "A concrete usable numeric IPv4/IPv6 address, without a port. Unspecified/multicast and unsupported scoped identities are rejected by the server."
+    },
+    "RoutingCidr": {
+      "type": "string",
+      "minLength": 3,
+      "maxLength": 43,
+      "description": "Canonical IPv4/IPv6 CIDR text; host bits and noncanonical spellings are not silently normalized."
+    },
+    "Prefix": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "name", "cidr", "retired", "revision"],
+      "properties": {
+        "id": { "$ref": "#/components/schemas/Id" },
+        "name": { "$ref": "#/components/schemas/Name" },
+        "cidr": { "$ref": "#/components/schemas/RoutingCidr" },
+        "retired": { "type": "boolean" },
+        "revision": { "$ref": "#/components/schemas/Revision" }
+      }
+    },
+    "Address": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "name", "ip", "prefix_id", "state", "revision"],
+      "properties": {
+        "id": { "$ref": "#/components/schemas/Id" },
+        "name": { "$ref": "#/components/schemas/Name" },
+        "ip": { "$ref": "#/components/schemas/RoutingIpAddress" },
+        "prefix_id": { "$ref": "#/components/schemas/NullableId" },
+        "state": { "$ref": "#/components/schemas/ResourceState" },
+        "revision": { "$ref": "#/components/schemas/Revision" }
+      }
+    },
+    "AddressView": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["revision", "address"],
+      "properties": {
+        "revision": { "$ref": "#/components/schemas/Revision" },
+        "address": { "$ref": "#/components/schemas/Address" }
+      },
+      "description": "The global policy revision and exact requested address come from the same snapshot. The address revision cannot exceed the policy revision. Retired addresses remain readable by ID."
+    },
+    "Pool": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "name", "family", "state", "member_count", "revision"],
+      "properties": {
+        "id": { "$ref": "#/components/schemas/Id" },
+        "name": { "$ref": "#/components/schemas/Name" },
+        "family": { "$ref": "#/components/schemas/AddressFamily" },
+        "state": { "$ref": "#/components/schemas/ResourceState" },
+        "member_count": { "type": "integer", "minimum": 0, "maximum": 1024 },
+        "revision": { "$ref": "#/components/schemas/Revision" }
+      }
+    },
+    "RoutePermission": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["user_id", "legacy_allowed", "exits", "pools"],
+      "properties": {
+        "user_id": { "$ref": "#/components/schemas/Id" },
+        "legacy_allowed": { "type": "boolean" },
+        "exits": {
+          "type": "array",
+          "maxItems": 32,
+          "uniqueItems": true,
+          "items": { "$ref": "#/components/schemas/Id" }
+        },
+        "pools": {
+          "type": "array",
+          "maxItems": 32,
+          "uniqueItems": true,
+          "items": { "$ref": "#/components/schemas/Id" }
+        }
+      },
+      "description": "Explicit existing exit/pool IDs; empty lists are not wildcard grants. Legacy routing is an independent boolean permission."
+    },
+    "RoutePermissionView": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["revision", "permission"],
+      "properties": {
+        "revision": { "$ref": "#/components/schemas/Revision" },
+        "permission": { "$ref": "#/components/schemas/RoutePermission" }
+      }
+    },
+    "PrefixPage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["revision", "items", "next_cursor"],
+      "properties": {
+        "revision": { "$ref": "#/components/schemas/Revision" },
+        "items": {
+          "type": "array",
+          "maxItems": 50,
+          "items": { "$ref": "#/components/schemas/Prefix" }
+        },
+        "next_cursor": { "$ref": "#/components/schemas/NullableId" }
+      }
+    },
+    "AddressPage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["revision", "items", "next_cursor"],
+      "properties": {
+        "revision": { "$ref": "#/components/schemas/Revision" },
+        "items": {
+          "type": "array",
+          "maxItems": 50,
+          "items": { "$ref": "#/components/schemas/Address" }
+        },
+        "next_cursor": { "$ref": "#/components/schemas/NullableId" }
+      }
+    },
+    "PoolPage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["revision", "items", "next_cursor"],
+      "properties": {
+        "revision": { "$ref": "#/components/schemas/Revision" },
+        "items": {
+          "type": "array",
+          "maxItems": 50,
+          "items": { "$ref": "#/components/schemas/Pool" }
+        },
+        "next_cursor": { "$ref": "#/components/schemas/NullableId" }
+      }
+    },
+    "PoolMembersPage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["revision", "items", "next_cursor"],
+      "properties": {
+        "revision": { "$ref": "#/components/schemas/Revision" },
+        "items": {
+          "type": "array",
+          "maxItems": 50,
+          "uniqueItems": true,
+          "items": { "$ref": "#/components/schemas/Id" }
+        },
+        "next_cursor": { "$ref": "#/components/schemas/NullableId" }
+      }
+    },
+    "RoutingRevisionInput": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["expected_revision"],
+      "properties": {
+        "expected_revision": { "$ref": "#/components/schemas/Revision" }
+      }
+    },
+    "RoutingPrefixInput": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["expected_revision", "name", "cidr"],
+      "properties": {
+        "expected_revision": { "$ref": "#/components/schemas/Revision" },
+        "name": { "$ref": "#/components/schemas/Name" },
+        "cidr": { "$ref": "#/components/schemas/RoutingCidr" }
+      }
+    },
+    "RoutingAddressInput": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["expected_revision", "name", "ip"],
+      "properties": {
+        "expected_revision": { "$ref": "#/components/schemas/Revision" },
+        "name": { "$ref": "#/components/schemas/Name" },
+        "ip": { "$ref": "#/components/schemas/RoutingIpAddress" },
+        "prefix_id": { "$ref": "#/components/schemas/NullableId" }
+      },
+      "description": "Missing or null prefix_id means no prefix association; a supplied prefix must exist and contain this IP."
+    },
+    "RoutingPoolInput": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["expected_revision", "name", "family"],
+      "properties": {
+        "expected_revision": { "$ref": "#/components/schemas/Revision" },
+        "name": { "$ref": "#/components/schemas/Name" },
+        "family": { "$ref": "#/components/schemas/AddressFamily" }
+      }
+    },
+    "RoutingStateInput": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["expected_revision", "state"],
+      "properties": {
+        "expected_revision": { "$ref": "#/components/schemas/Revision" },
+        "state": { "$ref": "#/components/schemas/ResourceState" }
+      }
+    },
+    "RoutingMemberInput": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["expected_revision", "address_id"],
+      "properties": {
+        "expected_revision": { "$ref": "#/components/schemas/Revision" },
+        "address_id": { "$ref": "#/components/schemas/Id" }
+      }
+    },
+    "RoutingPermissionInput": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["expected_revision", "legacy_allowed", "exits", "pools"],
+      "properties": {
+        "expected_revision": { "$ref": "#/components/schemas/Revision" },
+        "legacy_allowed": { "type": "boolean" },
+        "exits": {
+          "type": "array",
+          "maxItems": 32,
+          "uniqueItems": true,
+          "items": { "$ref": "#/components/schemas/Id" }
+        },
+        "pools": {
+          "type": "array",
+          "maxItems": 32,
+          "uniqueItems": true,
+          "items": { "$ref": "#/components/schemas/Id" }
+        }
+      }
+    },
+    "RoutingEntity": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "data"],
+          "properties": {
+            "kind": { "const": "prefix" },
+            "data": { "$ref": "#/components/schemas/Prefix" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "data"],
+          "properties": {
+            "kind": { "const": "address" },
+            "data": { "$ref": "#/components/schemas/Address" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "data"],
+          "properties": {
+            "kind": { "const": "pool" },
+            "data": { "$ref": "#/components/schemas/Pool" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "data"],
+          "properties": {
+            "kind": { "const": "permission" },
+            "data": { "$ref": "#/components/schemas/RoutePermission" }
+          }
+        }
+      ]
+    },
+    "RoutingChange": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["revision", "entity"],
+      "properties": {
+        "revision": { "$ref": "#/components/schemas/Revision" },
+        "entity": { "$ref": "#/components/schemas/RoutingEntity" }
+      }
+    },
+    "RoutingMutation": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["action", "name", "cidr"],
+          "properties": {
+            "action": { "const": "create_prefix" },
+            "name": { "$ref": "#/components/schemas/Name" },
+            "cidr": { "$ref": "#/components/schemas/RoutingCidr" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["action", "id"],
+          "properties": {
+            "action": { "const": "retire_prefix" },
+            "id": { "$ref": "#/components/schemas/Id" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["action", "name", "ip"],
+          "properties": {
+            "action": { "const": "create_address" },
+            "name": { "$ref": "#/components/schemas/Name" },
+            "ip": { "$ref": "#/components/schemas/RoutingIpAddress" },
+            "prefix_id": { "$ref": "#/components/schemas/NullableId" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["action", "id", "state"],
+          "properties": {
+            "action": { "const": "set_address_state" },
+            "id": { "$ref": "#/components/schemas/Id" },
+            "state": { "$ref": "#/components/schemas/ResourceState" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["action", "name", "family"],
+          "properties": {
+            "action": { "const": "create_pool" },
+            "name": { "$ref": "#/components/schemas/Name" },
+            "family": { "$ref": "#/components/schemas/AddressFamily" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["action", "id", "state"],
+          "properties": {
+            "action": { "const": "set_pool_state" },
+            "id": { "$ref": "#/components/schemas/Id" },
+            "state": { "$ref": "#/components/schemas/ResourceState" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["action", "pool_id", "address_id"],
+          "properties": {
+            "action": { "const": "add_pool_member" },
+            "pool_id": { "$ref": "#/components/schemas/Id" },
+            "address_id": { "$ref": "#/components/schemas/Id" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["action", "pool_id", "address_id"],
+          "properties": {
+            "action": { "const": "remove_pool_member" },
+            "pool_id": { "$ref": "#/components/schemas/Id" },
+            "address_id": { "$ref": "#/components/schemas/Id" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["action", "permission"],
+          "properties": {
+            "action": { "const": "set_route_permission" },
+            "permission": { "$ref": "#/components/schemas/RoutePermission" }
+          }
+        }
+      ]
+    },
+    "PresetProfile": {
+      "type": "string",
+      "enum": ["windows", "linux", "android", "macos", "ios"],
+      "description": "Stable built-in vproxy TCP baselines, not exact assertions about every OS version."
+    },
+    "UserPreset": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["user_id", "default_preset", "allowed_presets"],
+      "properties": {
+        "user_id": { "$ref": "#/components/schemas/Id" },
+        "default_preset": {
+          "anyOf": [
+            { "$ref": "#/components/schemas/PresetProfile" },
+            { "type": "null" }
+          ]
+        },
+        "allowed_presets": {
+          "type": "array",
+          "maxItems": 5,
+          "uniqueItems": true,
+          "items": { "$ref": "#/components/schemas/PresetProfile" }
+        }
+      },
+      "description": "A non-null default must be included in allowed_presets. Empty grants preserve native sockets and do not authorize every preset."
+    },
+    "PoolPreset": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["pool_id", "default_preset"],
+      "properties": {
+        "pool_id": { "$ref": "#/components/schemas/Id" },
+        "default_preset": {
+          "anyOf": [
+            { "$ref": "#/components/schemas/PresetProfile" },
+            { "type": "null" }
+          ]
+        }
+      },
+      "description": "Only a suggestion; it cannot enlarge a user's grant and does not affect UDP or passive listeners."
+    },
+    "UserPresetValueInput": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["user_id", "allowed_presets"],
+      "properties": {
+        "user_id": { "$ref": "#/components/schemas/Id" },
+        "default_preset": {
+          "anyOf": [
+            { "$ref": "#/components/schemas/PresetProfile" },
+            { "type": "null" }
+          ]
+        },
+        "allowed_presets": {
+          "type": "array",
+          "maxItems": 5,
+          "uniqueItems": true,
+          "items": { "$ref": "#/components/schemas/PresetProfile" }
+        }
+      },
+      "description": "Missing or null default_preset means native; a non-null default must be included in allowed_presets."
+    },
+    "PoolPresetValueInput": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["pool_id"],
+      "properties": {
+        "pool_id": { "$ref": "#/components/schemas/Id" },
+        "default_preset": {
+          "anyOf": [
+            { "$ref": "#/components/schemas/PresetProfile" },
+            { "type": "null" }
+          ]
+        }
+      },
+      "description": "Missing or null default_preset means no pool suggestion."
+    },
+    "UserPresetInput": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["expected_revision", "presets"],
+      "properties": {
+        "expected_revision": { "$ref": "#/components/schemas/Revision" },
+        "presets": { "$ref": "#/components/schemas/UserPresetValueInput" }
+      }
+    },
+    "PoolPresetInput": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["expected_revision", "preset"],
+      "properties": {
+        "expected_revision": { "$ref": "#/components/schemas/Revision" },
+        "preset": { "$ref": "#/components/schemas/PoolPresetValueInput" }
+      }
+    },
+    "UserPresetsView": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["revision", "presets"],
+      "properties": {
+        "revision": { "$ref": "#/components/schemas/Revision" },
+        "presets": { "$ref": "#/components/schemas/UserPreset" }
+      }
+    },
+    "PoolPresetView": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["revision", "preset"],
+      "properties": {
+        "revision": { "$ref": "#/components/schemas/Revision" },
+        "preset": { "$ref": "#/components/schemas/PoolPreset" }
+      }
+    },
+    "PresetMutation": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["action", "presets"],
+          "properties": {
+            "action": { "const": "set_user_presets" },
+            "presets": { "$ref": "#/components/schemas/UserPresetValueInput" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["action", "preset"],
+          "properties": {
+            "action": { "const": "set_pool_preset" },
+            "preset": { "$ref": "#/components/schemas/PoolPresetValueInput" }
+          }
+        }
+      ]
+    },
+    "PresetBackendState": {
+      "type": "string",
+      "enum": ["ready", "disabled", "unsupported", "unavailable"]
+    },
+    "PresetReason": {
+      "type": "string",
+      "enum": [
+        "not_configured",
+        "feature_disabled",
+        "platform_unsupported",
+        "proxy_unavailable"
+      ]
+    },
+    "PresetOperation": {
+      "type": "string",
+      "enum": ["http_forward", "http_connect", "socks5_connect"]
+    },
+    "PresetCatalog": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "node_id",
+        "capability_version",
+        "backend_state",
+        "reason_code",
+        "preset_revision",
+        "abi_version",
+        "available_presets",
+        "operations",
+        "observed_at_unix_ms"
+      ],
+      "properties": {
+        "node_id": { "$ref": "#/components/schemas/Id" },
+        "capability_version": { "const": 1 },
+        "backend_state": { "$ref": "#/components/schemas/PresetBackendState" },
+        "reason_code": {
+          "anyOf": [
+            { "$ref": "#/components/schemas/PresetReason" },
+            { "type": "null" }
+          ]
+        },
+        "preset_revision": { "const": "1" },
+        "abi_version": { "enum": [1, null] },
+        "available_presets": {
+          "type": "array",
+          "maxItems": 5,
+          "uniqueItems": true,
+          "items": { "$ref": "#/components/schemas/PresetProfile" }
+        },
+        "operations": {
+          "type": "array",
+          "maxItems": 3,
+          "uniqueItems": true,
+          "items": { "$ref": "#/components/schemas/PresetOperation" }
+        },
+        "observed_at_unix_ms": {
+          "$ref": "#/components/schemas/ObservationUnixMillis"
+        }
+      },
+      "oneOf": [
+        {
+          "properties": {
+            "backend_state": { "const": "ready" },
+            "reason_code": { "type": "null" },
+            "abi_version": { "const": 1 },
+            "available_presets": { "minItems": 5 },
+            "operations": { "minItems": 3 }
+          }
+        },
+        {
+          "properties": {
+            "backend_state": { "const": "disabled" },
+            "reason_code": { "enum": ["not_configured", "feature_disabled"] },
+            "abi_version": { "type": "null" },
+            "available_presets": { "maxItems": 0 },
+            "operations": { "maxItems": 0 }
+          }
+        },
+        {
+          "properties": {
+            "backend_state": { "const": "unsupported" },
+            "reason_code": { "const": "platform_unsupported" },
+            "abi_version": { "type": "null" },
+            "available_presets": { "maxItems": 0 },
+            "operations": { "maxItems": 0 }
+          }
+        },
+        {
+          "properties": {
+            "backend_state": { "const": "unavailable" },
+            "reason_code": { "const": "proxy_unavailable" },
+            "abi_version": { "type": "null" },
+            "available_presets": { "maxItems": 0 },
+            "operations": { "maxItems": 0 }
+          }
+        }
+      ],
+      "description": "Startup capability only. Ready cannot guarantee that every route satisfies MSS/buffer requirements. Non-ready states have no available operations; no request here loads an eBPF program."
+    },
+    "HealthOutcome": {
+      "type": "string",
+      "enum": [
+        "unknown",
+        "success",
+        "address_unavailable",
+        "connection_refused",
+        "timed_out",
+        "permission_denied",
+        "network_unreachable",
+        "failed",
+        "family_mismatch",
+        "cancelled"
+      ]
+    },
+    "ObservationUnixMillis": {
+      "type": ["integer", "null"],
+      "minimum": 0,
+      "maximum": 9007199254740991,
+      "description": "Optional Unix milliseconds for display, not an authorization or monotonic lifetime clock."
+    },
+    "ObservationAgeMillis": {
+      "type": ["integer", "null"],
+      "minimum": 0,
+      "maximum": 18446744073709551615,
+      "description": "Optional elapsed milliseconds. Null means unavailable, not zero."
+    },
+    "HealthCheck": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "target",
+        "outcome",
+        "sequence",
+        "observed_at_unix_ms",
+        "age_millis",
+        "latency_millis"
+      ],
+      "properties": {
+        "kind": { "type": "string", "enum": ["bind", "tcp"] },
+        "target": {
+          "type": ["string", "null"],
+          "maxLength": 64,
+          "description": "Null for bind, a startup-configured numeric socket address for TCP; never a browser-supplied probe URL."
+        },
+        "outcome": { "$ref": "#/components/schemas/HealthOutcome" },
+        "sequence": {
+          "anyOf": [
+            { "$ref": "#/components/schemas/Counter" },
+            { "type": "null" }
+          ]
+        },
+        "observed_at_unix_ms": {
+          "$ref": "#/components/schemas/ObservationUnixMillis"
+        },
+        "age_millis": { "$ref": "#/components/schemas/ObservationAgeMillis" },
+        "latency_millis": {
+          "$ref": "#/components/schemas/ObservationAgeMillis"
+        }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "kind": { "const": "bind" } } },
+          "then": { "properties": { "target": { "type": "null" } } },
+          "else": {
+            "properties": { "target": { "type": "string", "minLength": 3 } }
+          }
+        }
+      ]
+    },
+    "HealthEntry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["address_id", "address_revision", "ip", "checks"],
+      "properties": {
+        "address_id": { "$ref": "#/components/schemas/Id" },
+        "address_revision": { "$ref": "#/components/schemas/Revision" },
+        "ip": { "$ref": "#/components/schemas/RoutingIpAddress" },
+        "checks": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 5,
+          "items": { "$ref": "#/components/schemas/HealthCheck" }
+        }
+      }
+    },
+    "HealthPage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "boot_id",
+        "sequence",
+        "catalog_revision",
+        "catalog_loaded",
+        "catalog_error",
+        "catalog_observed_at_unix_ms",
+        "catalog_age_millis",
+        "in_flight",
+        "entries",
+        "next_cursor"
+      ],
+      "properties": {
+        "boot_id": { "$ref": "#/components/schemas/Id" },
+        "sequence": { "$ref": "#/components/schemas/Counter" },
+        "catalog_revision": { "$ref": "#/components/schemas/NullableRevision" },
+        "catalog_loaded": { "type": "boolean" },
+        "catalog_error": { "enum": ["catalog_unavailable", null] },
+        "catalog_observed_at_unix_ms": {
+          "$ref": "#/components/schemas/ObservationUnixMillis"
+        },
+        "catalog_age_millis": {
+          "$ref": "#/components/schemas/ObservationAgeMillis"
+        },
+        "in_flight": { "type": "integer", "minimum": 0, "maximum": 4 },
+        "entries": {
+          "type": "array",
+          "maxItems": 16,
+          "items": { "$ref": "#/components/schemas/HealthEntry" }
+        },
+        "next_cursor": { "$ref": "#/components/schemas/NullableId" }
+      },
+      "description": "Each page observes a process boot and bounded health catalog. An absent/expired result is unknown; binding and TCP checks do not establish global health, routing permission or prefix-wide reachability."
+    },
+    "TrafficResolution": {
+      "type": "string",
+      "enum": ["minute", "hour", "day"],
+      "default": "hour"
+    },
+    "TrafficCursor": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]{0,15})$",
+      "maxLength": 16,
+      "description": "Canonical nonnegative decimal UTC window ID, at most 9007199254740991. Exclusive for after; not a revision or user cursor."
+    },
+    "TrafficScope": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "id"],
+          "properties": {
+            "kind": { "const": "node" },
+            "id": { "type": "null" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "id"],
+          "properties": {
+            "kind": {
+              "type": "string",
+              "enum": ["user", "credential", "pool"]
+            },
+            "id": { "$ref": "#/components/schemas/Id" }
+          }
+        }
+      ]
+    },
+    "TrafficHistoryScope": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "id"],
+          "properties": {
+            "kind": { "const": "node" },
+            "id": { "type": "null" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "id"],
+          "properties": {
+            "kind": { "type": "string", "enum": ["user", "pool"] },
+            "id": { "$ref": "#/components/schemas/Id" }
+          }
+        }
+      ]
+    },
+    "TrafficMetadata": {
+      "type": "object",
+      "required": [
+        "definition",
+        "origin_node_id",
+        "meter_epoch",
+        "meter_started_at_unix_ms",
+        "checkpoint_cursor",
+        "last_checkpoint_at_unix_ms",
+        "last_run_clean",
+        "loss_possible",
+        "history_gap",
+        "time_uncertain",
+        "observed_at_unix_ms"
+      ],
+      "properties": {
+        "definition": { "const": "accepted_effective_payload_v1" },
+        "origin_node_id": { "$ref": "#/components/schemas/Id" },
+        "meter_epoch": { "$ref": "#/components/schemas/Id" },
+        "meter_started_at_unix_ms": {
+          "$ref": "#/components/schemas/ObservationUnixMillis"
+        },
+        "checkpoint_cursor": { "$ref": "#/components/schemas/Sequence" },
+        "last_checkpoint_at_unix_ms": {
+          "$ref": "#/components/schemas/ObservationUnixMillis"
+        },
+        "last_run_clean": { "type": "boolean" },
+        "loss_possible": { "type": "boolean" },
+        "history_gap": { "type": "boolean" },
+        "time_uncertain": { "type": "boolean" },
+        "observed_at_unix_ms": {
+          "$ref": "#/components/schemas/ObservationUnixMillis"
+        }
+      },
+      "description": "Durable accounting provenance. An unconfirmed prior tail, retention loss or clock discontinuity must not be reported as complete zero-loss history. This object is flattened into each traffic response."
+    },
+    "TrafficTotal": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "protocol",
+        "durable_upload_bytes",
+        "durable_download_bytes",
+        "durable_saturated",
+        "live_upload_bytes",
+        "live_download_bytes",
+        "live_saturated"
+      ],
+      "properties": {
+        "protocol": { "$ref": "#/components/schemas/Protocol" },
+        "durable_upload_bytes": { "$ref": "#/components/schemas/Counter" },
+        "durable_download_bytes": { "$ref": "#/components/schemas/Counter" },
+        "durable_saturated": { "type": "boolean" },
+        "live_upload_bytes": {
+          "anyOf": [
+            { "$ref": "#/components/schemas/Counter" },
+            { "type": "null" }
+          ]
+        },
+        "live_download_bytes": {
+          "anyOf": [
+            { "$ref": "#/components/schemas/Counter" },
+            { "type": "null" }
+          ]
+        },
+        "live_saturated": { "type": ["boolean", "null"] }
+      },
+      "description": "Durable and live are overlapping observations, not additive counters. Saturation is explicit; unavailable live data is null."
+    },
+    "TrafficTotals": {
+      "allOf": [
+        { "$ref": "#/components/schemas/TrafficMetadata" },
+        {
+          "type": "object",
+          "required": [
+            "scope",
+            "active_run_id",
+            "checkpoint_error",
+            "last_completed_cycle_at_unix_ms",
+            "last_completed_cycle_age_millis",
+            "items"
+          ],
+          "properties": {
+            "scope": { "$ref": "#/components/schemas/TrafficScope" },
+            "active_run_id": { "$ref": "#/components/schemas/NullableId" },
+            "checkpoint_error": { "type": "boolean" },
+            "checkpoint_failure_stage": {
+              "type": ["string", "null"],
+              "enum": ["sample", "write_admission", "update_gate", "store", "worker", "observation", null],
+              "description": "Optional process-local last failed cycle stage, cleared after a confirmed successful full cycle. No underlying error or commit outcome is exposed; store includes storage and run validation. Older servers and remote durable projections omit this field."
+            },
+            "last_completed_cycle_at_unix_ms": {
+              "$ref": "#/components/schemas/ObservationUnixMillis"
+            },
+            "last_completed_cycle_age_millis": {
+              "$ref": "#/components/schemas/ObservationAgeMillis"
+            },
+            "items": {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 3,
+              "items": { "$ref": "#/components/schemas/TrafficTotal" }
+            }
+          },
+          "allOf": [{
+            "if": {
+              "required": ["checkpoint_failure_stage"],
+              "properties": { "checkpoint_failure_stage": { "type": "string" } }
+            },
+            "then": { "properties": { "checkpoint_error": { "const": true } } }
+          }]
+        }
+      ],
+      "unevaluatedProperties": false,
+      "description": "One scope's totals. A persisted run marker is not proof that a proxy is currently forwarding."
+    },
+    "TrafficBucketTotal": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["protocol", "upload_bytes", "download_bytes", "saturated"],
+      "properties": {
+        "protocol": { "$ref": "#/components/schemas/Protocol" },
+        "upload_bytes": { "$ref": "#/components/schemas/Counter" },
+        "download_bytes": { "$ref": "#/components/schemas/Counter" },
+        "saturated": { "type": "boolean" }
+      }
+    },
+    "TrafficBucket": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["window_id", "items"],
+      "properties": {
+        "window_id": { "$ref": "#/components/schemas/TrafficCursor" },
+        "items": {
+          "type": "array",
+          "maxItems": 3,
+          "items": { "$ref": "#/components/schemas/TrafficBucketTotal" }
+        }
+      },
+      "description": "A missing protocol remains absent. A protocol filter can leave items empty without deleting the retained window or manufacturing a zero row."
+    },
+    "TrafficBuckets": {
+      "allOf": [
+        { "$ref": "#/components/schemas/TrafficMetadata" },
+        {
+          "type": "object",
+          "required": [
+            "scope",
+            "resolution",
+            "next_cursor",
+            "retention_floor",
+            "retention_gap",
+            "items"
+          ],
+          "properties": {
+            "scope": { "$ref": "#/components/schemas/TrafficHistoryScope" },
+            "resolution": { "$ref": "#/components/schemas/TrafficResolution" },
+            "next_cursor": {
+              "anyOf": [
+                { "$ref": "#/components/schemas/TrafficCursor" },
+                { "type": "null" }
+              ]
+            },
+            "retention_floor": {
+              "anyOf": [
+                { "$ref": "#/components/schemas/TrafficCursor" },
+                { "type": "null" }
+              ]
+            },
+            "retention_gap": { "type": "boolean" },
+            "items": {
+              "type": "array",
+              "maxItems": 50,
+              "items": { "$ref": "#/components/schemas/TrafficBucket" }
+            }
+          }
+        }
+      ],
+      "unevaluatedProperties": false,
+      "description": "UTC-aligned retained buckets in ascending window order. Credential scope is unsupported. The cursor does not freeze retention or later pages."
+    },
+    "RemoteTrafficSource": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "origin_node_id",
+        "cached",
+        "collector_available",
+        "state",
+        "last_success_at_unix_ms",
+        "age_millis",
+        "target_revision"
+      ],
+      "properties": {
+        "origin_node_id": { "$ref": "#/components/schemas/Id" },
+        "cached": { "type": "boolean" },
+        "collector_available": { "type": "boolean" },
+        "state": {
+          "type": "string",
+          "enum": [
+            "ready",
+            "pending",
+            "paused",
+            "stale",
+            "not_authorized",
+            "continuity_error",
+            "unsupported",
+            "unavailable"
+          ]
+        },
+        "last_success_at_unix_ms": {
+          "$ref": "#/components/schemas/ObservationUnixMillis"
+        },
+        "age_millis": { "$ref": "#/components/schemas/ObservationAgeMillis" },
+        "target_revision": { "$ref": "#/components/schemas/Revision" }
+      },
+      "description": "Cache/contact provenance, separate from the remote meter's historical flags. Cached data may remain available while paused, stale or unauthorized; it is not evidence of fresh remote authorization."
+    },
+    "RemoteTrafficTotalsData": {
+      "allOf": [
+        { "$ref": "#/components/schemas/TrafficTotals" },
+        {
+          "properties": {
+            "active_run_id": { "type": "null" },
+            "checkpoint_error": { "const": false },
+            "checkpoint_failure_stage": { "type": "null" },
+            "last_completed_cycle_at_unix_ms": { "type": "null" },
+            "last_completed_cycle_age_millis": { "type": "null" },
+            "items": {
+              "items": {
+                "properties": {
+                  "live_upload_bytes": { "type": "null" },
+                  "live_download_bytes": { "type": "null" },
+                  "live_saturated": { "type": "null" }
+                }
+              }
+            }
+          }
+        }
+      ],
+      "description": "Only confirmed durable remote facts; the adapter does not infer current live counters or local checkpoint health."
+    },
+    "RemoteTrafficTotals": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["source", "data"],
+      "properties": {
+        "source": { "$ref": "#/components/schemas/RemoteTrafficSource" },
+        "data": {
+          "anyOf": [
+            { "$ref": "#/components/schemas/RemoteTrafficTotalsData" },
+            { "type": "null" }
+          ]
+        }
+      },
+      "description": "Null data is unavailable, never a fabricated zero. The whole wrapper is bounded to 32 KiB."
+    },
+    "RemoteTrafficBuckets": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["source", "data"],
+      "properties": {
+        "source": { "$ref": "#/components/schemas/RemoteTrafficSource" },
+        "data": {
+          "anyOf": [
+            { "$ref": "#/components/schemas/TrafficBuckets" },
+            { "type": "null" }
+          ]
+        }
+      },
+      "description": "Null data is unavailable; retained history may have explicit gaps. The whole wrapper is bounded to 32 KiB."
+    }
+  }
+}

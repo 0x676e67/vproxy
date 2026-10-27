@@ -15,14 +15,28 @@ env:
   IMAGE_NAME: ${{ github.repository }}
 
 permissions:
-  contents: write
-  packages: write
+  contents: read
 
 jobs:
+  release-profiles:
+    name: Native and cross release packages
+    permissions:
+      contents: read
+    uses: ./.github/workflows/release-profiles.yml
+
+  web-quality:
+    name: Release Web quality
+    if: startsWith(github.ref, 'refs/tags/')
+    permissions:
+      contents: read
+    uses: ./.github/workflows/web.yml
+
   style:
     name: Style
     runs-on: ubuntu-latest
     environment: Linux
+    permissions:
+      contents: read
 
     steps:
       - uses: actions/checkout@v7
@@ -37,15 +51,20 @@ jobs:
         run: cargo fmt --all -- --check
 
       - name: Clippy check
-        run: cargo clippy --all-targets
+        run: |
+          cargo clippy --workspace --all-targets --locked -- -D warnings
+          cargo clippy --workspace --all-targets --features management --locked -- -D warnings
 
   tests:
-    name: Tests
+    name: Tests (${{ matrix.os }}, ${{ matrix.mode }})
     runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
     strategy:
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
         rust: [stable]
+        mode: [proxy, management]
 
     steps:
       - uses: actions/checkout@v7
@@ -55,8 +74,30 @@ jobs:
           toolchain: ${{ matrix.rust }}
           override: true
 
-      - name: Run tests
-        run: cargo test
+      - name: Run proxy tests
+        if: matrix.mode == 'proxy'
+        run: cargo test --locked
+
+      - name: Run management tests
+        if: matrix.mode == 'management'
+        run: cargo test --features management --locked
+
+  management-msrv:
+    name: Management MSRV
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: "1.97"
+
+      - name: Test optional management without the default allocator
+        run: cargo test --no-default-features --features management --locked
 
   masque-interop:
     name: MASQUE interoperability
@@ -77,7 +118,7 @@ jobs:
 
       - name: Build vproxy and masque-go client
         run: |
-          cargo build
+          cargo build --locked
           mkdir -p "$RUNNER_TEMP/bin"
           go build -C .github/masque-interop -o "$RUNNER_TEMP/bin/masque-interop" .
 
@@ -140,65 +181,35 @@ jobs:
           grep -F "vproxy-masque-interop-ok" "$RUNNER_TEMP/client.log"
 
   build:
-    name: Build
+    name: Publish checked proxy, API, and Web archives
     runs-on: ubuntu-latest
-    needs: ["style", "tests", "masque-interop"]
+    needs: ["style", "tests", "management-msrv", "masque-interop", "release-profiles", "web-quality"]
     environment: Linux
     if: startsWith(github.ref, 'refs/tags/')
-    container:
-      image: ghcr.io/rust-cross/cargo-zigbuild:latest
+    permissions:
+      contents: write
 
     steps:
-      - uses: actions/checkout@v7
-
-      - name: Get tag
-        if: startsWith(github.ref, 'refs/tags/')
-        id: tag
-        uses: dawidd6/action-get-tag@v1
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
-          strip_v: true
-
-      - name: Tag Check
-        run: |
-          echo "tag=${{ steps.tag.outputs.tag }}" >> $GITHUB_ENV
-          echo "tag=${{ steps.tag.outputs.tag }}" >> $GITHUB_OUTPUT
-          if [ -z "${{ steps.tag.outputs.tag }}" ]; then
-            echo "tag=latest" >> $GITHUB_OUTPUT
-            echo "tag=latest" >> $GITHUB_ENV
-          fi
-          
-      - name: Install upx
-        run: |
-          wget https://github.com/upx/upx/releases/download/v4.2.1/upx-4.2.1-amd64_linux.tar.xz
-          tar -xvf upx-4.2.1-amd64_linux.tar.xz
-          mv upx-4.2.1-amd64_linux/upx /usr/bin/upx
-          rm -rf upx-4.2.1-amd64_linux.tar.xz upx-4.2.1-amd64_linux
-      
-      - name: Install dependencies
-        run: |
-          apt-get update && apt-get install -y mingw-w64 sudo
-
-      - name: Setup Rust
-        uses: actions-rs/toolchain@v1
+          persist-credentials: false
+      - uses: actions/setup-python@e797f83bcb11b83ae66e0230d6156d7c80228e7c # v6.0.0
         with:
-          toolchain: stable
-          override: true
-
-      - name: Build Windows Target
-        shell: bash
-        run: |
-          os=windows ./.github/build.sh
-
-      - name: Build macOS Target
-        run: |
-          os=macos ./.github/build.sh
-
-      - name: Build Linux Target
-        run: |
-          os=linux ./.github/build.sh
-          
+          python-version: "3.12"
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: ${{ needs.release-profiles.outputs.cross-artifact }}
+          path: bin
+      - name: Recheck the exact 54 assets before publication
+        env:
+          VPROXY_ARCHIVE_TAG: ${{ needs.release-profiles.outputs.cross-tag }}
+          VPROXY_PACKAGE_VERSION: ${{ needs.release-profiles.outputs.package-version }}
+        run: >-
+          python .github/cross_artifacts.py --artifacts bin
+          --work-dir "${{ runner.temp }}/cross-publish-check"
+          --tag "$VPROXY_ARCHIVE_TAG" --version "$VPROXY_PACKAGE_VERSION" --profiles all --runtime none
       - name: Upload binaries to GitHub Release
-        uses: softprops/action-gh-release@v3
+        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
         if: startsWith(github.ref, 'refs/tags/')
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
@@ -206,11 +217,12 @@ jobs:
             bin/*
           prerelease: ${{ contains(github.ref, 'alpha') || contains(github.ref, 'beta') }}
           generate_release_notes: true
+          fail_on_unmatched_files: true
 
   docker:
     name: Build Docker Image
     runs-on: ubuntu-latest
-    needs: ["style", "tests", "masque-interop"]
+    needs: ["style", "tests", "management-msrv", "masque-interop", "release-profiles"]
     if: startsWith(github.ref, 'refs/tags/')
     permissions:
       contents: read

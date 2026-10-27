@@ -1,0 +1,560 @@
+{
+  "paths": {
+    "/api/v1/operations-alerts": {
+      "get": {
+        "tags": [
+          "Operations"
+        ],
+        "security": [
+          {
+            "Session": []
+          }
+        ],
+        "x-vproxy-max-query-bytes": 768,
+        "x-vproxy-max-response-bytes": 32768,
+        "parameters": [
+          {
+            "name": "state",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "active",
+                "recent"
+              ],
+              "default": "active"
+            }
+          },
+          {
+            "name": "after",
+            "in": "query",
+            "description": "Opaque next_cursor from this exact node-self projection, boot, revision and state; local all-source and egress cursors are rejected.",
+            "schema": {
+              "$ref": "#/components/schemas/AlertCursor"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Canonical decimal without signs or leading zeroes.",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 16,
+              "default": 10
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "A bounded snapshot of the selected observer's own incidents. Missing, incomplete or old evidence is not health; coverage only identifies configured sources.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NodeAlertPage"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "invalid_alert_query: unknown/duplicate query, wrong cursor namespace, malformed value, out-of-range cursor or limit.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "alerts_changed: the boot, collection revision or requested state changed. Read the first page again, without automatic retries.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "alerts_unavailable: missing/unavailable local monitor. The outer request deadline can instead return request_timeout; no health assertion.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "operationId": "nodeOperationsAlerts",
+        "summary": "Read this observer's own live operational incidents",
+        "description": "Administrator session only. This local RAM projection excludes remote_traffic, remote_job, remote_observation and every foreign origin before counting/paging. No network, probes, writes or acknowledgement starts. Durable event history is a separate resource, not this process-local active/recent view. The collection error/age conservatively describe the existing whole collector. A configured source or zero incident count does not prove service health. IDs/evidence/revisions share the monitor: excluded activity can leave numeric gaps or conservatively invalidate a cursor, but no downstream identity/payload is exported. Query fields occur at most once, within 768 encoded bytes."
+      }
+    },
+    "/api/v1/targets/{id}/operations-alerts": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/ResourceId"
+        }
+      ],
+      "get": {
+        "tags": [
+          "Operations",
+          "Targets"
+        ],
+        "security": [
+          {
+            "Session": []
+          }
+        ],
+        "x-vproxy-max-query-bytes": 768,
+        "x-vproxy-max-response-bytes": 32768,
+        "parameters": [
+          {
+            "name": "state",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "active",
+                "recent"
+              ],
+              "default": "active"
+            }
+          },
+          {
+            "name": "after",
+            "in": "query",
+            "description": "Opaque next_cursor from this exact node-self projection, boot, revision and state; local all-source and egress cursors are rejected.",
+            "schema": {
+              "$ref": "#/components/schemas/AlertCursor"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Canonical decimal without signs or leading zeroes.",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 16,
+              "default": 10
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "A bounded snapshot of the selected observer's own incidents. Missing, incomplete or old evidence is not health; coverage only identifies configured sources.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NodeAlertPage"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "invalid_alert_query: unknown/duplicate query, wrong cursor namespace, malformed value, out-of-range cursor or limit.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "alerts_changed: the boot, collection revision or requested state changed. Read the first page again, without automatic retries.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "operations_alerts_unsupported only for a fixed absent-protocol response; other remote authorization, representation, missing-monitor or transport failures keep bounded codes. No fallback to an egress subset or local observations.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Local node_control_unavailable or node_busy; a remote read was not admitted.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "504": {
+            "description": "node_timeout: the bounded remote exchange did not finish. No health or recovery assertion.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "operationId": "targetOperationsAlerts",
+        "summary": "Read one registered node's own live operational incidents",
+        "description": "Administrator session only, not an Automation or node-history permission. Makes one fixed mTLS request to the currently registered target, sharing existing per-peer FIFO and global network limits. Current exact-leaf, owner and registration/authorization revisions are fenced around the exchange, including errors. No arbitrary URL, recursive fan-out, probe, write, remote event-history access or local/egress fallback. Only the selected node's eight local kinds and exact origin are accepted. Unsupported nodes remain unknown. The cursor and IDs share that monitor; unrelated activity can leave gaps or conservatively invalidate the snapshot. Sampling age/error are conservative whole-collector metadata; neither a fresh response nor zero incidents proves current service health."
+      }
+    }
+  },
+  "schemas": {
+    "NodeAlertCoverage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "local_egress",
+        "local_traffic",
+        "local_proxy_expected",
+        "local_management_https",
+        "local_node_tls",
+        "local_proxy_tls"
+      ],
+      "properties": {
+        "local_egress": {
+          "type": "boolean"
+        },
+        "local_traffic": {
+          "type": "boolean"
+        },
+        "local_proxy_expected": {
+          "type": "boolean"
+        },
+        "local_management_https": {
+          "type": "boolean"
+        },
+        "local_node_tls": {
+          "type": "boolean"
+        },
+        "local_proxy_tls": {
+          "type": "boolean"
+        }
+      },
+      "description": "Only this node's configured local sources. local_proxy_expected describes intended proxy startup; API-only is not a missing proxy. Flags do not establish readiness, trust, reachability or per-incident freshness. No downstream directory/cache coverage is exported."
+    },
+    "NodeAlertIncident": {
+      "allOf": [
+        {
+          "$ref": "#/components/schemas/AlertIncident"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "enum": [
+                "egress_check",
+                "health_catalog",
+                "management_https",
+                "node_tls",
+                "proxy_tls",
+                "policy",
+                "traffic_checkpoint",
+                "traffic_continuity"
+              ]
+            },
+            "origin_node_id": {
+              "$ref": "#/components/schemas/Id",
+              "description": "Always the exact selected observer's node_id; not a managed descendant."
+            }
+          },
+          "allOf": [
+            {
+              "if": {
+                "properties": {
+                  "kind": {
+                    "const": "egress_check"
+                  }
+                }
+              },
+              "then": {
+                "properties": {
+                  "code": {
+                    "enum": [
+                      "egress_address_unavailable",
+                      "egress_connection_refused",
+                      "egress_timed_out",
+                      "egress_permission_denied",
+                      "egress_network_unreachable",
+                      "egress_failed",
+                      "egress_family_mismatch"
+                    ]
+                  }
+                }
+              }
+            },
+            {
+              "if": {
+                "properties": {
+                  "kind": {
+                    "const": "health_catalog"
+                  }
+                }
+              },
+              "then": {
+                "properties": {
+                  "code": {
+                    "enum": [
+                      "health_catalog_unavailable",
+                      "health_catalog_stale"
+                    ]
+                  },
+                  "resource_id": {
+                    "type": "null"
+                  }
+                }
+              }
+            },
+            {
+              "if": {
+                "properties": {
+                  "kind": {
+                    "const": "management_https"
+                  }
+                }
+              },
+              "then": {
+                "properties": {
+                  "code": {
+                    "enum": [
+                      "https_identity_unavailable",
+                      "https_identity_expiring",
+                      "https_identity_expired",
+                      "https_identity_not_yet_valid",
+                      "https_identity_metadata_unavailable",
+                      "acme_attempt_unavailable",
+                      "acme_review_required",
+                      "acme_worker_stopped"
+                    ]
+                  },
+                  "resource_id": {
+                    "type": "null"
+                  }
+                }
+              }
+            },
+            {
+              "if": {
+                "properties": {
+                  "kind": {
+                    "const": "node_tls"
+                  }
+                }
+              },
+              "then": {
+                "properties": {
+                  "code": {
+                    "enum": [
+                      "node_tls_identity_unavailable",
+                      "node_tls_identity_expiring",
+                      "node_tls_identity_expired",
+                      "node_tls_identity_not_yet_valid",
+                      "node_tls_identity_metadata_unavailable"
+                    ]
+                  },
+                  "resource_id": {
+                    "type": "null"
+                  }
+                }
+              }
+            },
+            {
+              "if": {
+                "properties": {
+                  "kind": {
+                    "const": "proxy_tls"
+                  }
+                }
+              },
+              "then": {
+                "properties": {
+                  "code": {
+                    "enum": [
+                      "proxy_tls_identity_unavailable",
+                      "proxy_tls_identity_expiring",
+                      "proxy_tls_identity_expired",
+                      "proxy_tls_identity_not_yet_valid",
+                      "proxy_tls_identity_metadata_unavailable"
+                    ]
+                  }
+                }
+              }
+            },
+            {
+              "if": {
+                "properties": {
+                  "kind": {
+                    "const": "policy"
+                  }
+                }
+              },
+              "then": {
+                "properties": {
+                  "code": {
+                    "enum": [
+                      "proxy_not_running",
+                      "proxy_drain_failed",
+                      "proxy_drain_interrupted",
+                      "policy_publication_unavailable",
+                      "policy_not_applied"
+                    ]
+                  },
+                  "resource_id": {
+                    "type": "null"
+                  }
+                }
+              }
+            },
+            {
+              "if": {
+                "properties": {
+                  "kind": {
+                    "const": "traffic_checkpoint"
+                  }
+                }
+              },
+              "then": {
+                "properties": {
+                  "code": {
+                    "enum": [
+                      "traffic_checkpoint_failed",
+                      "traffic_checkpoint_stale"
+                    ]
+                  },
+                  "resource_id": {
+                    "type": "null"
+                  }
+                }
+              }
+            },
+            {
+              "if": {
+                "properties": {
+                  "kind": {
+                    "const": "traffic_continuity"
+                  }
+                }
+              },
+              "then": {
+                "properties": {
+                  "code": {
+                    "enum": [
+                      "traffic_loss_possible",
+                      "traffic_history_gap",
+                      "traffic_time_uncertain"
+                    ]
+                  },
+                  "resource_id": {
+                    "type": "null"
+                  }
+                }
+              }
+            },
+            {
+              "if": { "properties": { "status": { "const": "recovered" } } },
+              "then": { "properties": { "evidence_fresh": { "const": true } } }
+            },
+            {
+              "if": { "properties": { "status": { "const": "unmonitored" } } },
+              "then": { "properties": { "evidence_fresh": { "const": false } } }
+            }
+          ]
+        }
+      ]
+    },
+    "NodeAlertPage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "node_id",
+        "boot_id",
+        "revision",
+        "observed_at_unix_ms",
+        "age_millis",
+        "collection_error",
+        "coverage",
+        "active_count",
+        "recent_count",
+        "dropped",
+        "items",
+        "next_cursor"
+      ],
+      "properties": {
+        "node_id": {
+          "$ref": "#/components/schemas/Id"
+        },
+        "boot_id": {
+          "$ref": "#/components/schemas/Id"
+        },
+        "revision": {
+          "$ref": "#/components/schemas/AlertRevision"
+        },
+        "observed_at_unix_ms": {
+          "$ref": "#/components/schemas/AlertNullableCounter",
+          "description": "Most recent successful whole collection's display timestamp, not an authorization/freshness clock."
+        },
+        "age_millis": {
+          "$ref": "#/components/schemas/AlertNullableCounter",
+          "description": "Monotonic age of that collection, null before collection. Individual incident freshness remains separate."
+        },
+        "collection_error": {
+          "type": "boolean",
+          "description": "The existing whole collection is incomplete or failed. Prior incidents do not recover merely because their source was unavailable."
+        },
+        "coverage": {
+          "$ref": "#/components/schemas/NodeAlertCoverage"
+        },
+        "active_count": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 6144
+        },
+        "recent_count": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 256
+        },
+        "dropped": {
+          "$ref": "#/components/schemas/Counter",
+          "description": "Only local exported episode capacity loss or shared-ring eviction. Excluded episodes' own evictions do not increment this count."
+        },
+        "items": {
+          "type": "array",
+          "maxItems": 16,
+          "items": {
+            "$ref": "#/components/schemas/NodeAlertIncident"
+          }
+        },
+        "next_cursor": {
+          "anyOf": [
+            {
+              "$ref": "#/components/schemas/AlertCursor"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "description": "Filtered before counts and offsets. Active order follows source/resource, recent is newest terminal first. At most 6144 active and 256 recent entries share bounded RAM; restarting starts a new boot. Dropped indicates incomplete retention. No historical import, recursive monitoring or incident acknowledgement."
+    }
+  }
+}

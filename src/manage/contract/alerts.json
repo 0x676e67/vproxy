@@ -1,0 +1,191 @@
+{
+  "paths": {
+    "/api/v1/alerts": {
+      "get": {
+        "operationId": "operationsAlerts",
+        "tags": ["Operations"],
+        "summary": "Read current-process operations incidents",
+        "description": "Requires schema 17 or later and an administrator session; users:read automation does not authorize this resource. Older databases return alerts_unavailable without automatic migration. The supervised monitor derives bounded incidents from local observations, loaded certificate metadata, ACME status and registered cache/job facts. An explicitly enabled schema22 controller can also collect registered targets' eight own-node observation kinds in the background, preserving their origins; it imports no downstream incidents or remote history. remote_observation incidents describe collection failures or unknown sources. Coverage does not prove a complete fresh read. This GET starts no remote request, probe, certificate load, issuance or repair. The live projection resets on restart; separately retained local event history is not live health. Unknown, stale or unavailable evidence never proves recovery. Refresh after alerts_changed instead of continuing an obsolete cursor. Only state, after and limit are accepted once each within 768 encoded bytes. Acknowledgement uses the separate local history API. No external notification is sent.",
+        "security": [{ "Session": [] }],
+        "x-vproxy-max-query-bytes": 768,
+        "x-vproxy-max-response-bytes": 32768,
+        "parameters": [
+          {
+            "name": "state",
+            "in": "query",
+            "description": "Active incidents or recently ended incidents. A cursor cannot be reused with a different state.",
+            "schema": { "type": "string", "enum": ["active", "recent"], "default": "active" }
+          },
+          {
+            "name": "after",
+            "in": "query",
+            "description": "Opaque next_cursor from the same boot, evidence revision and state. A changed source returns 409 alerts_changed; malformed or out-of-range cursors return 400 invalid_alert_query. This is not an inventory or search cursor.",
+            "schema": { "$ref": "#/components/schemas/AlertCursor" }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Canonical decimal 1..16 without signs or leading zeroes. A complete worst-case page fits the browser's 32 KiB response budget.",
+            "schema": { "type": "integer", "minimum": 1, "maximum": 16, "default": 10 }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Bounded incident page, explicit coverage and observation age. Zero incidents without a fresh successful collection is not a health assertion.",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/AlertPage" } } }
+          },
+          "400": {
+            "description": "invalid_alert_query: unknown/duplicate field, invalid state/limit or malformed/out-of-range cursor.",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ApiError" } } }
+          },
+          "409": {
+            "description": "alerts_changed: cursor boot, evidence revision or state no longer matches. Start a fresh first page; no mutation occurred.",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ApiError" } } }
+          },
+          "503": {
+            "description": "alerts_unavailable: no monitor or its current in-memory view is unavailable. This does not assert that the proxy or remote node is offline. The outer request deadline can instead return request_timeout.",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ApiError" } } }
+          },
+          "default": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    }
+  },
+  "schemas": {
+    "AlertCursor": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 160,
+      "description": "Opaque process-local snapshot cursor. Do not decode, synthesize or persist across boot, evidence revision or state changes."
+    },
+    "AlertNullableCounter": {
+      "anyOf": [{ "$ref": "#/components/schemas/Counter" }, { "type": "null" }]
+    },
+    "AlertEpisodeId": {
+      "$ref": "#/components/schemas/Counter",
+      "pattern": "^[1-9][0-9]{0,19}$",
+      "description": "Positive exact u64 decimal, unique only within boot_id. Not a database resource ID."
+    },
+    "AlertRevision": {
+      "$ref": "#/components/schemas/Counter",
+      "pattern": "^[1-9][0-9]{0,19}$",
+      "description": "Positive process-local projection revision. Membership/evidence changes invalidate cursors; merely reading the passage of time does not."
+    },
+    "AlertKind": {
+      "type": "string",
+      "enum": ["egress_check", "health_catalog", "policy", "traffic_checkpoint", "traffic_continuity", "remote_traffic", "remote_job", "remote_observation", "management_https", "node_tls", "proxy_tls"]
+    },
+    "AlertStatus": {
+      "type": "string",
+      "enum": ["active", "recovered", "unmonitored"],
+      "description": "recovered requires a newer successful observation in the same source lineage. unmonitored means the source/resource left scope or changed lineage, not a successful health result."
+    },
+    "AlertCode": {
+      "type": "string",
+      "enum": [
+        "egress_address_unavailable", "egress_connection_refused", "egress_timed_out",
+        "egress_permission_denied", "egress_network_unreachable", "egress_failed", "egress_family_mismatch",
+        "health_catalog_unavailable", "health_catalog_stale", "proxy_not_running",
+        "proxy_drain_failed", "proxy_drain_interrupted",
+        "policy_publication_unavailable", "policy_not_applied", "traffic_checkpoint_failed",
+        "traffic_checkpoint_stale", "traffic_loss_possible", "traffic_history_gap", "traffic_time_uncertain",
+        "remote_traffic_continuity_error", "remote_traffic_not_authorized", "remote_collector_unavailable",
+        "remote_traffic_unsupported", "remote_traffic_unavailable", "remote_traffic_stale",
+        "remote_job_blocked", "remote_job_rejected",
+        "remote_observation_pending", "remote_observation_unavailable", "remote_observation_unsupported",
+        "remote_observation_not_authorized", "remote_observation_stale", "remote_observation_changed",
+        "remote_observation_capacity", "remote_observation_incomplete",
+        "https_identity_unavailable", "https_identity_expiring", "https_identity_expired",
+        "https_identity_not_yet_valid", "https_identity_metadata_unavailable",
+        "node_tls_identity_unavailable", "node_tls_identity_expiring", "node_tls_identity_expired",
+        "node_tls_identity_not_yet_valid", "node_tls_identity_metadata_unavailable",
+        "proxy_tls_identity_unavailable", "proxy_tls_identity_expiring", "proxy_tls_identity_expired",
+        "proxy_tls_identity_not_yet_valid", "proxy_tls_identity_metadata_unavailable", "acme_attempt_unavailable",
+        "acme_review_required", "acme_worker_stopped"
+      ],
+      "description": "Fixed public reason code; never raw I/O, SQLite or remote error text. proxy_drain_failed and proxy_drain_interrupted are policy-kind local listener-runtime failures, independent of policy publication. A stable, still-owned saved-and-applied pause matching the original runtime request suppresses proxy_not_running during normal draining/drained phases; this unknown observation never recovers an existing incident. Changed ownership/policy or unreadable evidence cannot reuse that maintenance proof. Certificate metadata_unavailable means the public descriptor could not be read, not that TLS stopped. Identity_unavailable describes an enabled ACME identity without a normal publication. Expiring uses a seven-day local warning policy; validity includes both X.509 endpoints. Same-fingerprint wall-clock rollback cannot recover a prior validity incident; metadata recovery is separate. remote_collector_unavailable describes local configuration, not remote node reachability."
+    },
+    "AlertCoverage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["local_egress", "local_traffic", "local_proxy_expected", "remote_cached", "remote_egress", "remote_observation"],
+      "properties": {
+        "local_egress": { "type": "boolean", "description": "The existing local bind/TCP observation source is configured; this does not mean it has fresh results." },
+        "local_traffic": { "type": "boolean", "description": "A proxy is expected and a local traffic observer is configured; historical traffic alone is not a running proxy." },
+        "local_proxy_expected": { "type": "boolean", "description": "This process was configured to start a managed proxy. An API-only controller is not reported as a stopped proxy." },
+        "local_management_https": { "type": "boolean", "description": "Actual local management HTTPS metadata or the legacy ACME status source is configured, independently of proxy startup. Manual HTTPS is covered by current servers. Older responses can omit this field; clients treat omission as false. Not a trust, readiness or reachability result." },
+        "local_node_tls": { "type": "boolean", "description": "A local node mTLS listener is configured and its actual loaded leaf metadata is covered. Disabled is not a failure. Older responses can omit this field; omission means false, not a successful check." },
+        "local_proxy_tls": { "type": "boolean", "description": "At least one managed HTTPS/auto/MASQUE listener is configured and actual loaded metadata is covered. Plain HTTP/SOCKS5 listeners do not establish this coverage. Not a remote proxy, trust or connectivity check. Older responses can omit this field and clients treat omission as false." },
+        "remote_cached": { "type": "boolean", "description": "Registered target/cache/job facts are covered locally, not live remote proxy connectivity." },
+        "remote_egress": { "type": "boolean", "const": false, "description": "Legacy remote-egress coverage flag. Background node observations are represented separately by remote_observation." },
+        "remote_observation": { "type": "boolean", "description": "Opt-in schema22 background collection of registered targets' own observations is configured. It continues without a browser and preserves each source node, but does not imply a complete fresh read, recursive coverage or external notification. Older responses omit this flag; omission means false." }
+      }
+    },
+    "AlertIncident": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "kind", "origin_node_id", "resource_id", "check", "target", "status", "code", "first_observed_at_unix_ms", "last_observed_at_unix_ms", "ended_at_unix_ms", "age_millis", "evidence_sequence", "evidence_fresh"],
+      "properties": {
+        "id": { "$ref": "#/components/schemas/AlertEpisodeId" },
+        "kind": { "$ref": "#/components/schemas/AlertKind" },
+        "origin_node_id": { "$ref": "#/components/schemas/Id", "description": "Source node identity is preserved. Opt-in background collection can retain the eight own-node kinds from a registered foreign origin; it never imports that node's downstream remote incidents or history." },
+        "resource_id": { "$ref": "#/components/schemas/NullableId" },
+        "check": { "enum": ["bind", "tcp", null] },
+        "target": { "type": ["string", "null"], "maxLength": 64, "description": "Only a numeric startup-configured TCP check endpoint; null for bind and non-egress incidents." },
+        "status": { "$ref": "#/components/schemas/AlertStatus" },
+        "code": { "$ref": "#/components/schemas/AlertCode" },
+        "first_observed_at_unix_ms": { "$ref": "#/components/schemas/AlertNullableCounter", "description": "Wall-clock display timestamp; null when the wall clock cannot be represented. Not an ordering or freshness authority." },
+        "last_observed_at_unix_ms": { "$ref": "#/components/schemas/AlertNullableCounter" },
+        "ended_at_unix_ms": { "$ref": "#/components/schemas/AlertNullableCounter" },
+        "age_millis": { "$ref": "#/components/schemas/Counter", "description": "Monotonic elapsed age since this incident's latest evidence or terminal transition, encoded as an exact decimal string." },
+        "evidence_sequence": { "$ref": "#/components/schemas/AlertNullableCounter", "description": "Source-specific evidence order, not a global command or policy revision." },
+        "evidence_fresh": { "type": "boolean", "description": "For active incidents, whether the latest collection has fresh applicable evidence; false preserves the prior issue after unknown, expired, cancelled or unavailable input. For recovered history this records freshness at the terminal observation, not current health; unmonitored history is false. Age alone is not a freshness policy." }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "status": { "const": "active" } } },
+          "then": { "properties": { "ended_at_unix_ms": { "type": "null" } } }
+        },
+        {
+          "if": { "properties": { "kind": { "const": "egress_check" } } },
+          "then": {
+            "properties": { "resource_id": { "$ref": "#/components/schemas/Id" }, "check": { "enum": ["bind", "tcp"] } },
+            "allOf": [{
+              "if": { "properties": { "check": { "const": "bind" } } },
+              "then": { "properties": { "target": { "type": "null" } } },
+              "else": { "properties": { "target": { "type": "string", "minLength": 3 } } }
+            }]
+          },
+          "else": { "properties": { "check": { "type": "null" }, "target": { "type": "null" } } }
+        },
+        {
+          "if": { "properties": { "kind": { "enum": ["management_https", "node_tls", "remote_observation"] } } },
+          "then": { "properties": { "resource_id": { "type": "null" }, "check": { "type": "null" }, "target": { "type": "null" } } }
+        },
+        {
+          "if": { "properties": { "kind": { "const": "proxy_tls" } } },
+          "then": { "properties": { "resource_id": { "$ref": "#/components/schemas/Id", "description": "Stable managed endpoint identity, not an address, peer or list position." }, "check": { "type": "null" }, "target": { "type": "null" } } }
+        }
+      ]
+    },
+    "AlertPage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["boot_id", "revision", "observed_at_unix_ms", "age_millis", "collection_error", "coverage", "active_count", "recent_count", "dropped", "items", "next_cursor"],
+      "properties": {
+        "boot_id": { "$ref": "#/components/schemas/Id" },
+        "revision": { "$ref": "#/components/schemas/AlertRevision" },
+        "observed_at_unix_ms": { "$ref": "#/components/schemas/AlertNullableCounter", "description": "Latest successful whole collection's wall-clock display time; null before collection or when the wall clock is unavailable." },
+        "age_millis": { "$ref": "#/components/schemas/AlertNullableCounter", "description": "Monotonic age of the latest successful collection; null before success. A zero incident count does not replace this freshness evidence." },
+        "collection_error": { "type": "boolean", "description": "A collection failed or is incomplete. Prior incidents remain visible and do not recover merely because their source could not be read." },
+        "coverage": { "$ref": "#/components/schemas/AlertCoverage" },
+        "active_count": { "type": "integer", "minimum": 0, "maximum": 12288 },
+        "recent_count": { "type": "integer", "minimum": 0, "maximum": 256 },
+        "dropped": { "$ref": "#/components/schemas/Counter", "description": "Bounded-capacity overflow/eviction count. Nonzero means the retained view is not complete history." },
+        "items": { "type": "array", "maxItems": 16, "items": { "$ref": "#/components/schemas/AlertIncident" } },
+        "next_cursor": { "anyOf": [{ "$ref": "#/components/schemas/AlertCursor" }, { "type": "null" }] }
+      },
+      "description": "Active pages use stable source/resource order; recent pages use newest terminal transition first. Cursors pin membership/evidence but not displayed elapsed ages. All u64 values are decimal strings; only bounded counts are JSON numbers. Restart clears this bounded local history."
+    }
+  }
+}

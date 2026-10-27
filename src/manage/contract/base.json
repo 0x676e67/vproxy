@@ -1,0 +1,546 @@
+{
+  "openapi": "3.1.2",
+  "jsonSchemaDialect": "https://json-schema.org/draft/2020-12/schema",
+  "info": {
+    "title": "vproxy management API",
+    "version": "1",
+    "description": "API for the separately configured management HTTPS listener. Browser administration uses a process-local session cookie; mutations also require the exact configured Origin, application/json and CSRF. users:read Bearer permits only two local user-read resources; schema 18 users:write also permits caller-bound non-secret local user operations and context, never credentials or remote control. Never mix Authorization with Cookie or CSRF, and never send Proxy-Authorization. Bearer may omit Origin but a supplied value must exactly match the configured HTTPS origin. Proxy listeners and the exact-DER node mTLS protocol are separate interfaces. A saved policy, an applied policy and a successful client test are different results. Disconnect, timeout or 5xx can follow a committed mutation: reconcile a durable operation or command before deciding what to do next."
+  },
+  "servers": [
+    {
+      "url": "https://{managementAuthority}",
+      "description": "Use the configured management authority and normally verified CA/SAN. This is not a proxy port or the separate node listener.",
+      "variables": { "managementAuthority": { "default": "localhost:8443" } }
+    }
+  ],
+  "x-vproxy-limits": {
+    "default-json-body-bytes": 4096,
+    "password-change-json-body-bytes": 16384,
+    "json-body-timeout-seconds": 5,
+    "request-timeout-seconds": 10,
+    "note": "Limits are wire-byte limits, including JSON escapes. A request deadline or cancelled HTTP waiter does not cancel a dispatched storage mutation."
+  },
+  "paths": {
+    "/api/v1/auth/login": {
+      "post": {
+        "operationId": "login",
+        "summary": "Start an administrator session",
+        "description": "Requires an existing local administrator. A valid login replaces the supplied old session if any; no bootstrap or default account exists. Password verification is bounded and rate limited. Session lifetime is eight hours and restart invalidates all sessions. Do not send Authorization or Proxy-Authorization. Store Cookie and csrf_token privately; neither is a proxy credential.",
+        "security": [],
+        "parameters": [{ "$ref": "#/components/parameters/Origin" }],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/LoginInput" }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Authenticated session",
+            "headers": {
+              "Set-Cookie": {
+                "description": "__Host-vproxy-session; Secure; HttpOnly; SameSite=Strict; Path=/; Max-Age=28800",
+                "schema": { "type": "string" }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/SessionView" }
+              }
+            }
+          },
+          "default": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/api/v1/auth/session": {
+      "get": {
+        "operationId": "currentSession",
+        "summary": "Read the current administrator session",
+        "description": "The cookie must belong to this running process. Missing or expired browser sessions produce 403, not a Basic or Bearer challenge.",
+        "security": [{ "Session": [] }],
+        "responses": {
+          "200": {
+            "description": "Current session",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/SessionView" }
+              }
+            }
+          },
+          "default": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/api/v1/auth/logout": {
+      "post": {
+        "operationId": "logout",
+        "summary": "End the current session",
+        "security": [{ "Session": [], "Csrf": [] }],
+        "parameters": [{ "$ref": "#/components/parameters/Origin" }],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/Empty" }
+            }
+          }
+        },
+        "responses": {
+          "204": {
+            "description": "Session removed; no response body",
+            "headers": {
+              "Set-Cookie": {
+                "description": "Expires this session cookie with Max-Age=0",
+                "schema": { "type": "string" }
+              }
+            }
+          },
+          "default": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/api/v1/auth/password": {
+      "post": {
+        "operationId": "changeAdministratorPassword",
+        "summary": "Change the current administrator password",
+        "description": "Rechecks current_password and the request's session. All sessions for this administrator are revoked once the mutation fence is entered, even after a confirmed conflict or rollback; other administrators remain independent. A password_change_outcome_unknown or request timeout must not be blindly retried. No target administrator or node is accepted from JSON.",
+        "security": [{ "Session": [], "Csrf": [] }],
+        "parameters": [{ "$ref": "#/components/parameters/Origin" }],
+        "x-vproxy-max-body-bytes": 16384,
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/PasswordInput" }
+            }
+          }
+        },
+        "responses": {
+          "204": {
+            "description": "Password changed; session cookie expired; log in again",
+            "headers": {
+              "Set-Cookie": {
+                "description": "Expires this session cookie with Max-Age=0",
+                "schema": { "type": "string" }
+              }
+            }
+          },
+          "default": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/api/v1/node": {
+      "get": {
+        "operationId": "localNode",
+        "summary": "Read this management process's node identity",
+        "description": "The response does not claim a public server IP, egress IP, proxy readiness or current IP health.",
+        "security": [{ "Session": [] }],
+        "responses": {
+          "200": {
+            "description": "Local node metadata",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/NodeView" }
+              }
+            }
+          },
+          "default": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "Session": {
+        "type": "apiKey",
+        "in": "cookie",
+        "name": "__Host-vproxy-session",
+        "description": "Process-local administrator session from login. Not a proxy login, node identity or automation grant. Do not combine it with Authorization."
+      },
+      "Csrf": {
+        "type": "apiKey",
+        "in": "header",
+        "name": "X-CSRF-Token",
+        "description": "csrf_token from the same live session; required together with the Session cookie for administrator mutations."
+      },
+      "Automation": {
+        "type": "http",
+        "scheme": "bearer",
+        "bearerFormat": "vpa1",
+        "description": "Locally issued users:read or users:write identity. users:write includes user reads plus caller-bound non-secret user operations and context on schema 18. No OAuth endpoint, Cookie/CSRF mixing, Proxy-Authorization, credentials, IPAM, presets, ownership or remote control. A supplied Origin must exactly match the configured HTTPS origin; it may be absent."
+      }
+    },
+    "parameters": {
+      "UserOperationOrigin": {
+        "name": "Origin",
+        "in": "header",
+        "required": false,
+        "description": "Required with Session/CSRF authentication. Optional with Automation; if supplied it must exactly match the configured canonical management HTTPS origin. Host and JSON validation still apply.",
+        "schema": { "type": "string" }
+      },
+      "Origin": {
+        "name": "Origin",
+        "in": "header",
+        "required": true,
+        "description": "Exactly the configured canonical management HTTPS origin, without path or trailing slash.",
+        "schema": { "type": "string" }
+      },
+      "ResourceId": {
+        "name": "id",
+        "in": "path",
+        "required": true,
+        "schema": { "$ref": "#/components/schemas/Id" }
+      },
+      "PageAfter": {
+        "name": "after",
+        "in": "query",
+        "description": "ID cursor from this same legacy resource and options. Ordinary pages are not a coherent cross-request snapshot. Not interchangeable with a search cursor.",
+        "schema": { "$ref": "#/components/schemas/Id" }
+      },
+      "PageLimit": {
+        "name": "limit",
+        "in": "query",
+        "description": "Canonical decimal 1..50, without leading zero. Unknown or duplicate query fields are rejected.",
+        "schema": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 50,
+          "default": 25
+        }
+      },
+      "IncludeDeleted": {
+        "name": "include_deleted",
+        "in": "query",
+        "description": "Only the literal true or false. Deleted IDs remain historical and cannot be reactivated.",
+        "schema": { "type": "boolean", "default": false }
+      }
+    },
+    "responses": {
+      "Error": {
+        "description": "Fixed public error code; no storage, verifier or remote-body diagnostics. Codes and HTTP status must be considered together. Common failures include invalid input/query (400), invalid or absent Bearer credentials (401), session/CSRF or authorization denial and insufficient_scope (403), missing resource (404), conflict (409), body timeout/size/media type (408/413/415), rate limit (429), internal failure (500), remote failure (502) and busy/upgrade/unavailable/request timeout (503). Only the Bearer-capable local user reads and user-operation resources send authentication challenges. A transport error, timeout or 5xx is not proof that a mutation did not commit.",
+        "headers": {
+          "WWW-Authenticate": {
+            "description": "Only on Bearer-capable resources: Bearer realm=\"vproxy\"; invalid_token on invalid/revoked/expired credentials, invalid_request on malformed/mixed authentication, or insufficient_scope with scope=\"users:write\" after a valid key lacks write authority (RFC 6750 section 3.1). Absent on Cookie-only resources.",
+            "schema": { "type": "string" }
+          },
+          "Retry-After": {
+            "description": "60 on HTTP 429. This header is not permission to replay a possibly committed mutation.",
+            "schema": { "type": "string", "const": "60" }
+          },
+          "Cache-Control": {
+            "schema": { "type": "string", "const": "no-store" }
+          }
+        },
+        "content": {
+          "application/json": {
+            "schema": { "$ref": "#/components/schemas/ApiError" }
+          }
+        }
+      }
+    },
+    "schemas": {
+      "Id": {
+        "type": "string",
+        "pattern": "^[A-Za-z0-9_-]{21}[AQgw]$",
+        "minLength": 22,
+        "maxLength": 22,
+        "description": "Canonical base64url without padding of a generated 128-bit identity. Never a display name or a proxy login."
+      },
+      "NullableId": {
+        "anyOf": [{ "$ref": "#/components/schemas/Id" }, { "type": "null" }]
+      },
+      "Revision": {
+        "type": "string",
+        "pattern": "^[1-9][0-9]{0,18}$",
+        "maxLength": 19,
+        "description": "Canonical decimal integer 1..9223372036854775807. Parse exactly, never through a floating-point Number. The upper bound is enforced by the API in addition to this lexical schema.",
+        "x-vproxy-maximum-decimal": "9223372036854775807"
+      },
+      "NullableRevision": {
+        "anyOf": [
+          { "$ref": "#/components/schemas/Revision" },
+          { "type": "null" }
+        ]
+      },
+      "Sequence": {
+        "type": "string",
+        "pattern": "^(0|[1-9][0-9]{0,18})$",
+        "maxLength": 19,
+        "description": "Canonical decimal integer 0..9223372036854775807; zero means no terminal command where the resource says so. Keep distinct from a positive revision.",
+        "x-vproxy-maximum-decimal": "9223372036854775807"
+      },
+      "Counter": {
+        "type": "string",
+        "pattern": "^(0|[1-9][0-9]{0,19})$",
+        "maxLength": 20,
+        "description": "Canonical decimal u64, 0..18446744073709551615. Preserve as string or exact big integer. The server also enforces the numeric upper bound.",
+        "x-vproxy-maximum-decimal": "18446744073709551615"
+      },
+      "Name": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 128,
+        "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]+$",
+        "description": "Nonempty trimmed name, at most 128 UTF-8 bytes, with no Unicode control characters. JSON Schema maxLength counts characters; the API separately checks the UTF-8 byte bound.",
+        "x-vproxy-utf8-max-bytes": 128
+      },
+      "Protocol": {
+        "type": "string",
+        "enum": ["http", "socks5", "masque"],
+        "description": "User permission: http also covers HTTPS transport. This is distinct from the listener's protocol selector."
+      },
+      "User": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "name",
+          "active",
+          "deleted",
+          "protocols",
+          "concurrent_limit",
+          "revision"
+        ],
+        "properties": {
+          "id": { "$ref": "#/components/schemas/Id" },
+          "name": { "$ref": "#/components/schemas/Name" },
+          "active": { "type": "boolean" },
+          "deleted": { "type": "boolean" },
+          "protocols": {
+            "type": "array",
+            "items": { "$ref": "#/components/schemas/Protocol" },
+            "maxItems": 3,
+            "uniqueItems": true
+          },
+          "concurrent_limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 1000000
+          },
+          "revision": { "$ref": "#/components/schemas/Revision" }
+        },
+        "allOf": [
+          {
+            "if": { "properties": { "deleted": { "const": true } } },
+            "then": { "properties": { "active": { "const": false } } }
+          }
+        ]
+      },
+      "Credential": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "user_id",
+          "login",
+          "syntax_version",
+          "active",
+          "revoked",
+          "verifier_revision"
+        ],
+        "properties": {
+          "id": { "$ref": "#/components/schemas/Id" },
+          "user_id": { "$ref": "#/components/schemas/Id" },
+          "login": {
+            "type": "string",
+            "pattern": "^vp2_[0-9a-f]{32}$",
+            "description": "Generated base proxy login; unrelated to a display name or administrator. Extensions are applied by the connection generator."
+          },
+          "syntax_version": { "type": "integer", "const": 2 },
+          "active": { "type": "boolean" },
+          "revoked": { "type": "boolean" },
+          "verifier_revision": { "$ref": "#/components/schemas/Revision" }
+        },
+        "allOf": [
+          {
+            "if": { "properties": { "revoked": { "const": true } } },
+            "then": { "properties": { "active": { "const": false } } }
+          }
+        ]
+      },
+      "UserPage": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["revision", "items", "next_cursor"],
+        "properties": {
+          "revision": { "$ref": "#/components/schemas/Revision" },
+          "items": {
+            "type": "array",
+            "maxItems": 50,
+            "items": { "$ref": "#/components/schemas/User" }
+          },
+          "next_cursor": { "$ref": "#/components/schemas/NullableId" }
+        },
+        "description": "Ascending IDs, exclusive after cursor. Rows cannot exceed the page revision. next_cursor is null or the last row ID of a full page. Ordinary list pagination is not a cross-page snapshot."
+      },
+      "CredentialPage": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["revision", "items", "next_cursor"],
+        "properties": {
+          "revision": { "$ref": "#/components/schemas/Revision" },
+          "items": {
+            "type": "array",
+            "maxItems": 50,
+            "items": { "$ref": "#/components/schemas/Credential" }
+          },
+          "next_cursor": { "$ref": "#/components/schemas/NullableId" }
+        },
+        "description": "Metadata only, never a secret or verifier. Ascending IDs and exclusive after cursor; not a cross-page snapshot."
+      },
+      "PolicyChange": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["revision", "user", "credential", "secret"],
+        "properties": {
+          "revision": { "$ref": "#/components/schemas/Revision" },
+          "user": {
+            "anyOf": [
+              { "$ref": "#/components/schemas/User" },
+              { "type": "null" }
+            ]
+          },
+          "credential": {
+            "anyOf": [
+              { "$ref": "#/components/schemas/Credential" },
+              { "type": "null" }
+            ]
+          },
+          "secret": {
+            "type": ["string", "null"],
+            "description": "Creation or rotation returns the newly issued proxy secret. Lists and operation replay never return it. Schema28 supports a separate explicit read of the selected current encrypted copy; legacy one-way credentials have no recoverable copy.",
+            "readOnly": true,
+            "x-vproxy-sensitive": true
+          }
+        },
+        "description": "Result of a legacy direct user/credential mutation. Fields irrelevant to the action are null. revision is saved policy state, not proof of runtime application or client reachability."
+      },
+      "ApiError": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["error"],
+        "properties": {
+          "error": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["code"],
+            "properties": {
+              "code": { "type": "string", "pattern": "^[a-z][a-z0-9_]*$" }
+            }
+          }
+        }
+      },
+      "Empty": { "type": "object", "additionalProperties": false },
+      "LoginInput": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["username", "password"],
+        "properties": {
+          "username": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64,
+            "pattern": "^[A-Za-z0-9._-]+$"
+          },
+          "password": {
+            "type": "string",
+            "maxLength": 1024,
+            "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]*$",
+            "writeOnly": true,
+            "x-vproxy-sensitive": true,
+            "x-vproxy-utf8-max-bytes": 1024,
+            "description": "Existing administrator password, at most 1024 UTF-8 bytes, no control characters. Do not put it in command arguments or logs."
+          }
+        }
+      },
+      "PasswordInput": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["current_password", "new_password"],
+        "properties": {
+          "current_password": {
+            "type": "string",
+            "maxLength": 1024,
+            "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]*$",
+            "writeOnly": true,
+            "x-vproxy-sensitive": true,
+            "x-vproxy-utf8-max-bytes": 1024
+          },
+          "new_password": {
+            "type": "string",
+            "minLength": 12,
+            "maxLength": 1024,
+            "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]+$",
+            "writeOnly": true,
+            "x-vproxy-sensitive": true,
+            "x-vproxy-utf8-max-bytes": 1024,
+            "description": "At least 12 Unicode scalar values, at most 1024 UTF-8 bytes, no control characters. Leading/trailing spaces are preserved."
+          }
+        }
+      },
+      "AdministratorView": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "username"],
+        "properties": {
+          "id": { "$ref": "#/components/schemas/Id" },
+          "username": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64,
+            "pattern": "^[A-Za-z0-9._-]+$"
+          }
+        }
+      },
+      "SessionView": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["administrator", "csrf_token", "expires_at"],
+        "properties": {
+          "administrator": { "$ref": "#/components/schemas/AdministratorView" },
+          "csrf_token": {
+            "type": "string",
+            "minLength": 43,
+            "maxLength": 43,
+            "pattern": "^[A-Za-z0-9_-]{43}$",
+            "readOnly": true,
+            "x-vproxy-sensitive": true
+          },
+          "expires_at": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Unix seconds for display. The server enforces expiry with a monotonic clock, not a caller-supplied timestamp."
+          }
+        }
+      },
+      "NodeView": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "node_id",
+          "name",
+          "version",
+          "os",
+          "arch",
+          "capabilities"
+        ],
+        "properties": {
+          "node_id": { "$ref": "#/components/schemas/Id" },
+          "name": { "type": "string" },
+          "version": { "type": "string" },
+          "os": { "type": "string" },
+          "arch": { "type": "string" },
+          "capabilities": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 1,
+            "items": { "const": "local_administration" }
+          }
+        }
+      }
+    }
+  }
+}

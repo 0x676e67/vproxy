@@ -2,11 +2,12 @@ use std::{future::Future, io::Error};
 
 use crate::{
     ext::Extension,
+    server::auth::{Authenticated, Source},
     server::socks::proto::{Method, UsernamePassword},
 };
 
 /// Trait for SOCKS authentication methods.
-pub trait Auth: Send {
+pub(crate) trait Auth: Send {
     type Output;
 
     /// Returns the SOCKS authentication method type.
@@ -20,7 +21,7 @@ pub trait Auth: Send {
 }
 
 #[derive(Debug, thiserror::Error)]
-pub enum AuthError {
+pub(crate) enum AuthError {
     #[error("{0}")]
     Rejected(&'static str),
 
@@ -48,12 +49,24 @@ impl From<AuthError> for Error {
 
 /// Unified interface for different SOCKS authentication methods.
 #[non_exhaustive]
-pub enum AuthAdaptor {
+pub(crate) enum AuthAdaptor {
     NoAuth(NoAuth),
     Password(Password),
+    #[cfg(feature = "management")]
+    Managed(crate::access::Reader),
 }
 
 impl AuthAdaptor {
+    pub(super) fn from_source(source: Source) -> Self {
+        match source {
+            Source::Legacy(mode) => match (mode.username, mode.password) {
+                (Some(username), Some(password)) => Self::password(username, password),
+                _ => Self::no(),
+            },
+            #[cfg(feature = "management")]
+            Source::Managed(reader) => Self::Managed(reader),
+        }
+    }
     // Create a new [`AuthAdaptor`] instance with no authentication.
     #[inline]
     pub fn no() -> Self {
@@ -68,13 +81,15 @@ impl AuthAdaptor {
 }
 
 impl Auth for AuthAdaptor {
-    type Output = Result<Extension, AuthError>;
+    type Output = Result<Authenticated, AuthError>;
 
     #[inline]
     fn method(&self) -> Method {
         match self {
             Self::NoAuth(auth) => auth.method(),
             Self::Password(auth) => auth.method(),
+            #[cfg(feature = "management")]
+            Self::Managed(_) => Method::Password,
         }
     }
 
@@ -83,15 +98,45 @@ impl Auth for AuthAdaptor {
         match self {
             Self::NoAuth(auth) => auth.authenticate(credentials).await,
             Self::Password(auth) => auth.authenticate(credentials).await,
+            #[cfg(feature = "management")]
+            Self::Managed(reader) => {
+                let credentials =
+                    credentials.ok_or(AuthError::Rejected("username and password are required"))?;
+                let username = std::str::from_utf8(&credentials.username)
+                    .map_err(|_| AuthError::Rejected("username or password is incorrect"))?;
+                let source = Source::Managed(reader.clone());
+                source
+                    .authenticate(
+                        Some(username),
+                        Some(&credentials.password),
+                        crate::server::auth::Service::Socks5,
+                    )
+                    .await
+                    .map_err(|error| match error {
+                        crate::server::auth::Error::InvalidCredentials => {
+                            AuthError::Rejected("username or password is incorrect")
+                        }
+                        crate::server::auth::Error::Denied => {
+                            AuthError::Rejected("proxy policy denies access")
+                        }
+                        crate::server::auth::Error::Unavailable => AuthError::Internal(
+                            Error::other("managed proxy admission is unavailable"),
+                        ),
+                        crate::server::auth::Error::Capacity => AuthError::Internal(Error::new(
+                            std::io::ErrorKind::WouldBlock,
+                            "proxy user concurrency is exhausted",
+                        )),
+                    })
+            }
         }
     }
 }
 
 /// No authentication as the socks5 handshake method.
-pub struct NoAuth;
+pub(crate) struct NoAuth;
 
 impl Auth for NoAuth {
-    type Output = Result<Extension, AuthError>;
+    type Output = Result<Authenticated, AuthError>;
 
     #[inline]
     fn method(&self) -> Method {
@@ -101,7 +146,7 @@ impl Auth for NoAuth {
     #[inline]
     async fn authenticate(&self, credentials: Option<UsernamePassword>) -> Self::Output {
         if credentials.is_none() {
-            Ok(Extension::None)
+            Ok(Authenticated::legacy(Extension::None))
         } else {
             Err(AuthError::Rejected(
                 "unexpected credentials for no-auth method",
@@ -111,7 +156,7 @@ impl Auth for NoAuth {
 }
 
 /// Username and password as the socks5 handshake method.
-pub struct Password {
+pub(crate) struct Password {
     username: String,
     password: String,
 }
@@ -127,7 +172,7 @@ impl Password {
 }
 
 impl Auth for Password {
-    type Output = Result<Extension, AuthError>;
+    type Output = Result<Authenticated, AuthError>;
 
     #[inline]
     fn method(&self) -> Method {
@@ -144,9 +189,16 @@ impl Auth for Password {
                 .map_err(|_| AuthError::Rejected("username or password is incorrect"))?;
             let extension = Extension::try_from(&self.username, username)
                 .await
-                .map_err(|error| AuthError::Internal(Error::other(error)))?;
+                .map_err(|error| match error {
+                    crate::error::Error::IO(error)
+                        if error.kind() == std::io::ErrorKind::InvalidInput =>
+                    {
+                        AuthError::Rejected("invalid device selector")
+                    }
+                    error => AuthError::Internal(Error::other(error)),
+                })?;
 
-            Ok(extension)
+            Ok(Authenticated::legacy(extension))
         } else {
             Err(AuthError::Rejected("username or password is incorrect"))
         }

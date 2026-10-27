@@ -1,0 +1,13 @@
+# Default proxy image: send only declared Rust build inputs to the builder.
+# In particular, local state, keys, .agents, .git, target and caches stay local.
+**
+!Cargo.toml
+!Cargo.lock
+!build.rs
+!LICENSE
+!README.md
+!src/
+!src/**/
+!src/**/*.rs
+!src/manage/acme/staging-roots.pem
+!src/manage/contract/*.json

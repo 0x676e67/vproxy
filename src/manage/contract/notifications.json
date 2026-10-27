@@ -1,0 +1,311 @@
+{
+  "paths": {
+    "/api/v1/notifications/webhook": {
+      "get": {
+        "operationId": "localWebhookStatus",
+        "tags": ["Notifications"],
+        "summary": "Read node-local webhook metadata without destination secrets",
+        "description": "Session only, schema23. No query, including an empty query. No DNS, HTTP, collection or retry is started by this read. Saved enabled is configuration, not worker/receiver health. URL, token, digest, raw headers and transport errors are never returned. Sending means an attempt marker committed, not that the receiver saw bytes. Reconfiguration starts at the current history watermark and does not backfill old events.",
+        "security": [{ "Session": [] }],
+        "parameters": [],
+        "x-vproxy-max-response-bytes": 32768,
+        "responses": {
+          "200": {
+            "description": "One private-store metadata snapshot.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/WebhookStatus" }
+              }
+            }
+          },
+          "default": { "$ref": "#/components/responses/Error" }
+        }
+      },
+      "post": {
+        "operationId": "configureLocalWebhook",
+        "tags": ["Notifications"],
+        "summary": "Explicitly configure, disable or forget the local notification destination",
+        "description": "Session/CSRF only; no target/automation authority. Schema23, no query, 4096-byte body. Input binds node and expected revision. The latest exact actor/request receipt is idempotent; after a lost response read status with the original operation_id and expected_revision+1, never reconstruct/replay secrets. Later replacement may leave an old outcome unknown. Empty replacement is invalid; null retains the saved secret. clear_destination requires disabled with null URL/token and clear_bearer=false. Configuration changes discard pending delivery only with discard_pending=true, cannot recall an admitted request, and explicitly skip history through the current watermark. HTTPS public destinations only; all per-attempt DNS results are admitted and pinned. No redirect, environment proxy or TLS bypass. Default automatic_retry=false. Enabling it asserts receiver deduplication by observer_node_id+delivery_id: at most six total attempts, monotonic delays of 30/60/120/240/480 seconds. Unknown or HTTP408/429/5xx can qualify; Retry-After always pauses for review. Private backups contain the stored destination/token; restore-as-new does not copy them.",
+        "security": [{ "Session": [], "Csrf": [] }],
+        "parameters": [],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/WebhookChange" }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Configuration committed or the latest exact receipt confirmed; no delivery guarantee.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/WebhookStatus" }
+              }
+            }
+          },
+          "400": {
+            "description": "invalid_webhook or normal JSON/media/body guard failure.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ApiError" }
+              }
+            }
+          },
+          "409": {
+            "description": "webhook_changed: stale node/revision, changed operation digest/actor or pending delivery not explicitly discarded.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ApiError" }
+              }
+            }
+          },
+          "default": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/api/v1/notifications/webhook/retry": {
+      "post": {
+        "operationId": "retryLocalWebhook",
+        "tags": ["Notifications"],
+        "summary": "Permit one further attempt with the retained delivery ID and body",
+        "description": "Session/CSRF only; schema23, no query. Compare exact node/configuration revision, delivery ID and attempt counter. Only unknown/rejected/deferred/destination_blocked permits a manual retry. Counter must have room for one more attempt. A lost answer never permits automatic replay: status can prove admission by the same batch becoming ready, its count advancing or its receiver acceptance, but replacement/discard may leave the original outcome unknown. This does not reset the six-attempt automatic budget. The receiver may already have processed the POST; confirm deduplication and obey its waiting policy before explicit retry.",
+        "security": [{ "Session": [], "Csrf": [] }],
+        "parameters": [],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/WebhookRetry" }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "One attempt permission saved, not receiver execution.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/WebhookStatus" }
+              }
+            }
+          },
+          "409": {
+            "description": "webhook_changed: original pending attempt/configuration is no longer retryable.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ApiError" }
+              }
+            }
+          },
+          "default": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    }
+  },
+  "schemas": {
+    "WebhookStatus": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "node_id",
+        "revision",
+        "enabled",
+        "automatic_retry",
+        "configured",
+        "has_bearer",
+        "operation_id",
+        "cursor",
+        "skipped_through",
+        "last_accepted_delivery_id",
+        "discarded_delivery_id",
+        "pending"
+      ],
+      "properties": {
+        "node_id": { "$ref": "#/components/schemas/Id" },
+        "revision": { "$ref": "#/components/schemas/Sequence" },
+        "enabled": { "type": "boolean" },
+        "automatic_retry": { "type": "boolean" },
+        "configured": { "type": "boolean" },
+        "has_bearer": { "type": "boolean" },
+        "operation_id": { "$ref": "#/components/schemas/NullableId" },
+        "cursor": { "$ref": "#/components/schemas/Sequence" },
+        "skipped_through": { "$ref": "#/components/schemas/Sequence" },
+        "last_accepted_delivery_id": {
+          "$ref": "#/components/schemas/NullableId"
+        },
+        "discarded_delivery_id": { "$ref": "#/components/schemas/NullableId" },
+        "pending": {
+          "anyOf": [
+            { "$ref": "#/components/schemas/WebhookDelivery" },
+            { "type": "null" }
+          ]
+        }
+      }
+    },
+    "WebhookDelivery": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "attempts",
+        "outcome",
+        "http_status",
+        "after_sequence",
+        "through_sequence",
+        "history_trimmed_through",
+        "event_count",
+        "automatic_retry_eligible"
+      ],
+      "properties": {
+        "id": { "$ref": "#/components/schemas/Id" },
+        "attempts": { "type": "integer", "minimum": 1, "maximum": 4294967295 },
+        "outcome": {
+          "enum": [
+            "ready",
+            "sending",
+            "rejected",
+            "deferred",
+            "unknown",
+            "destination_blocked"
+          ]
+        },
+        "http_status": {
+          "type": ["integer", "null"],
+          "minimum": 100,
+          "maximum": 599
+        },
+        "after_sequence": { "$ref": "#/components/schemas/Sequence" },
+        "through_sequence": { "$ref": "#/components/schemas/Revision" },
+        "history_trimmed_through": { "$ref": "#/components/schemas/Sequence" },
+        "event_count": { "type": "integer", "minimum": 0, "maximum": 16 },
+        "automatic_retry_eligible": { "type": "boolean" }
+      }
+    },
+    "WebhookChange": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "expected_node_id",
+        "expected_revision",
+        "operation_id",
+        "enabled",
+        "automatic_retry",
+        "clear_bearer",
+        "clear_destination",
+        "discard_pending"
+      ],
+      "properties": {
+        "expected_node_id": { "$ref": "#/components/schemas/Id" },
+        "expected_revision": { "$ref": "#/components/schemas/Sequence" },
+        "operation_id": { "$ref": "#/components/schemas/Id" },
+        "enabled": { "type": "boolean" },
+        "automatic_retry": { "type": "boolean" },
+        "url": {
+          "type": ["string", "null"],
+          "minLength": 1,
+          "maxLength": 2048,
+          "writeOnly": true,
+          "description": "UTF-8 bytes also limited to 2048. HTTPS public receiver only; no userinfo/fragment, port0, private/special address, redirect, environment proxy or TLS bypass. Null retains stored URL."
+        },
+        "bearer": {
+          "type": ["string", "null"],
+          "minLength": 1,
+          "maxLength": 1024,
+          "writeOnly": true,
+          "pattern": "^[A-Za-z0-9\\-._~+/]+=*$",
+          "description": "RFC6750 section2.1 syntax; null retains the saved token. No OAuth issuance implied."
+        },
+        "clear_bearer": { "type": "boolean" },
+        "clear_destination": { "type": "boolean" },
+        "discard_pending": { "type": "boolean" }
+      }
+    },
+    "WebhookRetry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "expected_node_id",
+        "expected_revision",
+        "delivery_id",
+        "expected_attempts"
+      ],
+      "properties": {
+        "expected_node_id": { "$ref": "#/components/schemas/Id" },
+        "expected_revision": { "$ref": "#/components/schemas/Revision" },
+        "delivery_id": { "$ref": "#/components/schemas/Id" },
+        "expected_attempts": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4294967294
+        }
+      }
+    },
+    "WebhookEnvelope": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Outbound POST application/json, at most32768 bytes and16 events, vproxy-delivery-id header matches delivery_id. Stable ID/body across retries. 2xx means receiver acceptance, not human review or successful downstream processing. No response body is consumed. An explicit retention gap is reported through history_trimmed_through; it is not recovered evidence. This is a notification client, not forwarding another party's proxy request.",
+      "required": [
+        "version",
+        "delivery_id",
+        "observer_node_id",
+        "after_sequence",
+        "through_sequence",
+        "history_trimmed_through",
+        "events"
+      ],
+      "properties": {
+        "version": { "const": 1 },
+        "delivery_id": { "$ref": "#/components/schemas/Id" },
+        "observer_node_id": { "$ref": "#/components/schemas/Id" },
+        "after_sequence": { "$ref": "#/components/schemas/Sequence" },
+        "through_sequence": { "$ref": "#/components/schemas/Revision" },
+        "history_trimmed_through": { "$ref": "#/components/schemas/Sequence" },
+        "events": {
+          "type": "array",
+          "maxItems": 16,
+          "items": { "$ref": "#/components/schemas/WebhookEvent" }
+        }
+      }
+    },
+    "WebhookEvent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "sequence",
+        "episode_id",
+        "origin_node_id",
+        "kind",
+        "transition",
+        "code",
+        "resource_id",
+        "target",
+        "observed_at_unix_ms"
+      ],
+      "properties": {
+        "sequence": { "$ref": "#/components/schemas/Revision" },
+        "episode_id": { "$ref": "#/components/schemas/Revision" },
+        "origin_node_id": { "$ref": "#/components/schemas/Id" },
+        "kind": { "$ref": "#/components/schemas/AlertKind" },
+        "transition": {
+          "enum": [
+            "opened",
+            "reason_changed",
+            "recovered",
+            "unmonitored",
+            "acknowledged"
+          ]
+        },
+        "code": { "$ref": "#/components/schemas/AlertCode" },
+        "resource_id": { "$ref": "#/components/schemas/NullableId" },
+        "target": { "type": ["string", "null"], "maxLength": 64 },
+        "observed_at_unix_ms": {
+          "anyOf": [
+            { "$ref": "#/components/schemas/Counter" },
+            { "type": "null" }
+          ]
+        }
+      }
+    }
+  }
+}

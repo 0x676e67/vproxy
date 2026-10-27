@@ -1,0 +1,62 @@
+{
+  "paths": {
+    "/api/v1/targets/{id}/egress-alerts": {
+      "parameters": [{ "$ref": "#/components/parameters/ResourceId" }],
+      "get": {
+        "operationId": "targetEgressAlerts",
+        "tags": ["Operations", "Targets"],
+        "summary": "Read one registered node's egress incidents",
+        "description": "Administrator session only; users:read automation does not authorize target resources. Makes one bounded request to the registered mTLS node under current exact-leaf and owner authorization, sharing controller network and per-peer limits. No browser-supplied URL, probes, writes, background fan-out or local fallback. The target needs a schema-17 monitor. Only its own egress_check and health_catalog incidents are returned, never its remote directory, traffic or jobs. Sampling metadata, counts and cursors belong to this egress projection. History is process-local and cleared on restart. Unknown/stale/unavailable evidence and source replacement do not prove recovery. A manual response is a snapshot, not continuing health coverage. Query fields are accepted once each, with at most 768 encoded bytes.",
+        "security": [{ "Session": [] }],
+        "x-vproxy-max-query-bytes": 768,
+        "x-vproxy-max-response-bytes": 32768,
+        "parameters": [
+          { "name": "state", "in": "query", "schema": { "type": "string", "enum": ["active", "recent"], "default": "active" } },
+          { "name": "after", "in": "query", "description": "Opaque next_cursor from this target's same boot, egress revision and state. Not a local alert or inventory cursor.", "schema": { "$ref": "#/components/schemas/AlertCursor" } },
+          { "name": "limit", "in": "query", "description": "Canonical decimal without signs or leading zeroes.", "schema": { "type": "integer", "minimum": 1, "maximum": 16, "default": 10 } }
+        ],
+        "responses": {
+          "200": { "description": "A bounded snapshot of only the selected node's egress incidents. Empty without fresh applicable evidence does not mean healthy.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/EgressAlertPage" } } } },
+          "400": { "description": "invalid_alert_query: unknown/duplicate field, invalid state/limit, malformed or out-of-range cursor.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ApiError" } } } },
+          "409": { "description": "alerts_changed: target boot, egress revision or state changed. Start from the first page.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ApiError" } } } },
+          "502": { "description": "egress_alerts_unsupported only for a node's fixed not_found response; alerts_unavailable for a missing monitor; other remote authorization, representation or transport failures retain a bounded code. Remote authentication failure is not a browser logout.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ApiError" } } } },
+          "503": { "description": "Local node_control_unavailable or node_busy. No remote read was admitted.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ApiError" } } } },
+          "504": { "description": "node_timeout: bounded remote exchange did not complete. No health or recovery assertion.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ApiError" } } } },
+          "default": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    }
+  },
+  "schemas": {
+    "EgressAlertIncident": {
+      "allOf": [
+        { "$ref": "#/components/schemas/AlertIncident" },
+        { "type": "object", "properties": {
+          "kind": { "enum": ["egress_check", "health_catalog"] },
+          "origin_node_id": { "$ref": "#/components/schemas/Id", "description": "Always the exact selected target node_id, not one of its managed peers." },
+          "code": { "enum": ["egress_address_unavailable", "egress_connection_refused", "egress_timed_out", "egress_permission_denied", "egress_network_unreachable", "egress_failed", "egress_family_mismatch", "health_catalog_unavailable", "health_catalog_stale"] }
+        }, "allOf": [{ "if": { "properties": { "kind": { "const": "health_catalog" } } }, "then": { "properties": { "resource_id": { "type": "null" } } } }] }
+      ]
+    },
+    "EgressAlertPage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["node_id", "boot_id", "revision", "observed_at_unix_ms", "age_millis", "collection_error", "monitored", "active_count", "recent_count", "dropped", "items", "next_cursor"],
+      "properties": {
+        "node_id": { "$ref": "#/components/schemas/Id" },
+        "boot_id": { "$ref": "#/components/schemas/Id" },
+        "revision": { "$ref": "#/components/schemas/AlertRevision" },
+        "observed_at_unix_ms": { "$ref": "#/components/schemas/AlertNullableCounter", "description": "Most recent successful health snapshot read's display timestamp, not a successful probe." },
+        "age_millis": { "$ref": "#/components/schemas/AlertNullableCounter", "description": "Monotonic age of that read. Null before collection; remains historical on failed reads." },
+        "collection_error": { "type": "boolean", "description": "The latest health snapshot read failed. Other node observations do not change this flag." },
+        "monitored": { "type": "boolean", "description": "An egress observation source is configured on the target; not a healthy result." },
+        "active_count": { "type": "integer", "minimum": 0, "maximum": 6144 },
+        "recent_count": { "type": "integer", "minimum": 0, "maximum": 256 },
+        "dropped": { "$ref": "#/components/schemas/Counter", "description": "Discarded egress observations/history only, not other nodes' incidents." },
+        "items": { "type": "array", "maxItems": 16, "items": { "$ref": "#/components/schemas/EgressAlertIncident" } },
+        "next_cursor": { "anyOf": [{ "$ref": "#/components/schemas/AlertCursor" }, { "type": "null" }] }
+      },
+      "description": "Filter before counting and paging. Active uses source/resource order; recent uses latest terminal transition first. Sampling age is not a probe freshness policy. History shares the target monitor's bounded retention, so nonzero dropped means incomplete history. No durable import, notification or remediation."
+    }
+  }
+}

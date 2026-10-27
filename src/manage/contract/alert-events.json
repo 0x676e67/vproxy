@@ -1,0 +1,1114 @@
+{
+  "paths": {
+    "/api/v1/alert-events": {
+      "get": {
+        "operationId": "listAlertHistoryEvents",
+        "tags": [
+          "Operations"
+        ],
+        "summary": "Read retained local alert transitions",
+        "description": "Schema 21, Session only. One local SQLite snapshot rechecks the administrator. No remote service, collection, repair, replay or authority restoration. Optional origin/episode filters affect rows only. Descending exclusive sequence pagination; decode query names before duplicate checks, bound encoded query to 1024 bytes. Neither restart nor retention establishes recovery; empty history does not prove health.",
+        "security": [
+          {
+            "Session": []
+          }
+        ],
+        "x-vproxy-max-query-bytes": 1024,
+        "x-vproxy-max-response-bytes": 131072,
+        "responses": {
+          "200": {
+            "description": "One retained local snapshot, not current source health.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AlertHistoryPage"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "invalid_alert_history: malformed/duplicate/unknown query, identity or decimal. JSON/body/media guards retain their normal errors.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Session/CSRF/Origin or automation_route_denied; alert_history_denied rechecks the stored administrator. Node mTLS grants no access.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "alert_history_not_queryable: exact event/episode not retained, not proof of non-execution.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "management_upgrade_required, alert_history_capacity, policy_busy, policy_unavailable or request_timeout. No implicit migration. A lost reply or 5xx does not prove rollback.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "parameters": [
+          {
+            "name": "before",
+            "in": "query",
+            "schema": {
+              "$ref": "#/components/schemas/Revision"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Canonical decimal 1..50 without leading zero.",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 50,
+              "default": 25
+            }
+          },
+          {
+            "name": "origin_node_id",
+            "in": "query",
+            "schema": {
+              "$ref": "#/components/schemas/Id"
+            }
+          },
+          {
+            "name": "episode_id",
+            "in": "query",
+            "schema": {
+              "$ref": "#/components/schemas/Revision"
+            }
+          }
+        ]
+      }
+    },
+    "/api/v1/alert-events/{id}": {
+      "parameters": [
+        {
+          "name": "id",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "$ref": "#/components/schemas/Revision"
+          },
+          "description": "Positive durable event/episode sequence, not a 22-character resource ID."
+        }
+      ],
+      "get": {
+        "operationId": "getAlertHistoryEvent",
+        "tags": [
+          "Operations"
+        ],
+        "summary": "Read one exact retained event",
+        "description": "Schema 21, Session only; no query, including empty query. Exact original sequence. Missing/pruned means unavailable, not never occurred or safe to repeat.",
+        "security": [
+          {
+            "Session": []
+          }
+        ],
+        "x-vproxy-max-query-bytes": 0,
+        "x-vproxy-max-response-bytes": 32768,
+        "responses": {
+          "200": {
+            "description": "One retained local snapshot, not current source health.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AlertHistoryEvent"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "invalid_alert_history: malformed/duplicate/unknown query, identity or decimal. JSON/body/media guards retain their normal errors.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Session/CSRF/Origin or automation_route_denied; alert_history_denied rechecks the stored administrator. Node mTLS grants no access.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "alert_history_not_queryable: exact event/episode not retained, not proof of non-execution.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "management_upgrade_required, alert_history_capacity, policy_busy, policy_unavailable or request_timeout. No implicit migration. A lost reply or 5xx does not prove rollback.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/api/v1/alert-episodes/{id}": {
+      "parameters": [
+        {
+          "name": "id",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "$ref": "#/components/schemas/Revision"
+          },
+          "description": "Positive durable event/episode sequence, not a 22-character resource ID."
+        }
+      ],
+      "get": {
+        "operationId": "getAlertHistoryEpisode",
+        "tags": [
+          "Operations"
+        ],
+        "summary": "Read the retained episode projection",
+        "description": "Schema 21, Session only; no query, including empty query. Latest retained projection for this original episode, separate from live health. After a lost acknowledgement reply, this establishes only that a state was reviewed, not which particular request succeeded.",
+        "security": [
+          {
+            "Session": []
+          }
+        ],
+        "x-vproxy-max-query-bytes": 0,
+        "x-vproxy-max-response-bytes": 32768,
+        "responses": {
+          "200": {
+            "description": "One retained local snapshot, not current source health.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AlertHistoryEpisode"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "invalid_alert_history: malformed/duplicate/unknown query, identity or decimal. JSON/body/media guards retain their normal errors.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Session/CSRF/Origin or automation_route_denied; alert_history_denied rechecks the stored administrator. Node mTLS grants no access.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "alert_history_not_queryable: exact event/episode not retained, not proof of non-execution.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "management_upgrade_required, alert_history_capacity, policy_busy, policy_unavailable or request_timeout. No implicit migration. A lost reply or 5xx does not prove rollback.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/api/v1/alert-episodes/{id}/acknowledge": {
+      "parameters": [
+        {
+          "name": "id",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "$ref": "#/components/schemas/Revision"
+          },
+          "description": "Positive durable event/episode sequence, not a 22-character resource ID."
+        }
+      ],
+      "post": {
+        "operationId": "acknowledgeAlertHistoryEpisode",
+        "tags": [
+          "Operations"
+        ],
+        "summary": "Record review of one exact incident transition",
+        "description": "Schema 21, Session/CSRF/Origin only; no query. Administrator, expected local node, original episode and latest transition rechecked in one transaction. Does not change health/status/code. Same-state repeat returns original acknowledgement without appending or attributing another actor. Confirmed 409 alert_history_conflict means no write; re-read before a new explicit confirmation. Lost reply or 5xx is unknown: retain original identity and inspect original episode, never automatically re-POST or change expected_transition_sequence.",
+        "security": [
+          {
+            "Session": [],
+            "Csrf": []
+          }
+        ],
+        "x-vproxy-max-query-bytes": 0,
+        "x-vproxy-max-response-bytes": 32768,
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/Origin"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AlertHistoryAcknowledgementInput"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Retained episode after review; same-state repetition preserves the original actor/event.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AlertHistoryEpisode"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "invalid_alert_history: malformed/duplicate/unknown query, identity or decimal. JSON/body/media guards retain their normal errors.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Session/CSRF/Origin or automation_route_denied; alert_history_denied rechecks the stored administrator. Node mTLS grants no access.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "alert_history_not_queryable: exact event/episode not retained, not proof of non-execution.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "alert_history_conflict: expected node/latest transition changed; transaction made no write. Re-read and explicitly confirm the new transition.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "management_upgrade_required, alert_history_capacity, policy_busy, policy_unavailable or request_timeout. No implicit migration. A lost reply or 5xx does not prove rollback.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/api/v1/alert-summary": {
+      "get": {
+        "operationId": "getAlertHistorySummary",
+        "tags": [
+          "Operations"
+        ],
+        "summary": "Count retained unacknowledged states",
+        "description": "Schema 21, Session only; no query, including empty query. One local retained snapshot, no remote query/probe. Counts include ended states still needing review and exclude pruned rows; they are not unresolved failure counts.",
+        "security": [
+          {
+            "Session": []
+          }
+        ],
+        "x-vproxy-max-query-bytes": 0,
+        "x-vproxy-max-response-bytes": 32768,
+        "responses": {
+          "200": {
+            "description": "One retained local snapshot, not current source health.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AlertHistorySummary"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "invalid_alert_history: malformed/duplicate/unknown query, identity or decimal. JSON/body/media guards retain their normal errors.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Session/CSRF/Origin or automation_route_denied; alert_history_denied rechecks the stored administrator. Node mTLS grants no access.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "alert_history_not_queryable: exact event/episode not retained, not proof of non-execution.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "management_upgrade_required, alert_history_capacity, policy_busy, policy_unavailable or request_timeout. No implicit migration. A lost reply or 5xx does not prove rollback.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    }
+  },
+  "schemas": {
+    "AlertHistoryEndReason": {
+      "enum": [
+        "source_unmonitored",
+        "monitor_restarted",
+        null
+      ],
+      "description": "Source loss or observer restart, never a successful health result."
+    },
+    "AlertHistoryEvent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "sequence",
+        "node_id",
+        "episode_id",
+        "boot_id",
+        "incident_id",
+        "kind",
+        "origin_node_id",
+        "resource_id",
+        "check",
+        "target",
+        "code",
+        "first_observed_at_unix_ms",
+        "last_observed_at_unix_ms",
+        "evidence_sequence",
+        "transition",
+        "observed_at_unix_ms",
+        "recorded_at_unix_ms",
+        "end_reason",
+        "administrator_id",
+        "acknowledged_transition_sequence"
+      ],
+      "properties": {
+        "sequence": {
+          "$ref": "#/components/schemas/Revision"
+        },
+        "node_id": {
+          "$ref": "#/components/schemas/Id"
+        },
+        "episode_id": {
+          "$ref": "#/components/schemas/Revision"
+        },
+        "boot_id": {
+          "$ref": "#/components/schemas/Id"
+        },
+        "incident_id": {
+          "$ref": "#/components/schemas/AlertEpisodeId"
+        },
+        "kind": {
+          "$ref": "#/components/schemas/AlertKind"
+        },
+        "origin_node_id": {
+          "$ref": "#/components/schemas/Id"
+        },
+        "resource_id": {
+          "$ref": "#/components/schemas/NullableId"
+        },
+        "check": {
+          "enum": [
+            "bind",
+            "tcp",
+            null
+          ]
+        },
+        "target": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 64
+        },
+        "code": {
+          "$ref": "#/components/schemas/AlertCode"
+        },
+        "first_observed_at_unix_ms": {
+          "$ref": "#/components/schemas/AlertNullableCounter"
+        },
+        "last_observed_at_unix_ms": {
+          "$ref": "#/components/schemas/AlertNullableCounter"
+        },
+        "evidence_sequence": {
+          "$ref": "#/components/schemas/AlertNullableCounter"
+        },
+        "transition": {
+          "enum": [
+            "opened",
+            "reason_changed",
+            "recovered",
+            "unmonitored",
+            "acknowledged"
+          ]
+        },
+        "observed_at_unix_ms": {
+          "$ref": "#/components/schemas/AlertNullableCounter"
+        },
+        "recorded_at_unix_ms": {
+          "$ref": "#/components/schemas/AlertNullableCounter"
+        },
+        "end_reason": {
+          "$ref": "#/components/schemas/AlertHistoryEndReason"
+        },
+        "administrator_id": {
+          "$ref": "#/components/schemas/NullableId"
+        },
+        "acknowledged_transition_sequence": {
+          "$ref": "#/components/schemas/NullableRevision"
+        }
+      },
+      "description": "Immutable accepted transition, not live health. node_id observes origin_node_id. Event/episode IDs are positive i64 decimals; incident_id preserves the boot-local u64. Nullable wall time is display metadata, never ordering or authority. No raw slot, command, secret or evidence freshness.",
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "transition": {
+                "const": "acknowledged"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "administrator_id": {
+                "$ref": "#/components/schemas/Id"
+              },
+              "acknowledged_transition_sequence": {
+                "$ref": "#/components/schemas/Revision"
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "administrator_id": {
+                "type": "null"
+              },
+              "acknowledged_transition_sequence": {
+                "type": "null"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "transition": {
+                "const": "unmonitored"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "end_reason": {
+                "enum": [
+                  "source_unmonitored",
+                  "monitor_restarted"
+                ]
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "end_reason": {
+                "type": "null"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "egress_check"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "resource_id": {
+                "$ref": "#/components/schemas/Id"
+              },
+              "check": {
+                "enum": [
+                  "bind",
+                  "tcp"
+                ]
+              }
+            },
+            "allOf": [
+              {
+                "if": {
+                  "properties": {
+                    "check": {
+                      "const": "bind"
+                    }
+                  }
+                },
+                "then": {
+                  "properties": {
+                    "target": {
+                      "type": "null"
+                    }
+                  }
+                },
+                "else": {
+                  "properties": {
+                    "target": {
+                      "type": "string",
+                      "minLength": 3
+                    }
+                  }
+                }
+              }
+            ]
+          },
+          "else": {
+            "properties": {
+              "check": {
+                "type": "null"
+              },
+              "target": {
+                "type": "null"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "enum": [
+                  "management_https",
+                  "node_tls",
+                  "remote_observation"
+                ]
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "resource_id": {
+                "type": "null"
+              },
+              "check": {
+                "type": "null"
+              },
+              "target": {
+                "type": "null"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "proxy_tls"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "resource_id": {
+                "$ref": "#/components/schemas/Id",
+                "description": "Stable managed endpoint identity, not an address, peer or list position."
+              },
+              "check": {
+                "type": "null"
+              },
+              "target": {
+                "type": "null"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "AlertHistoryEpisode": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "node_id",
+        "boot_id",
+        "incident_id",
+        "kind",
+        "origin_node_id",
+        "resource_id",
+        "check",
+        "target",
+        "code",
+        "first_observed_at_unix_ms",
+        "last_observed_at_unix_ms",
+        "evidence_sequence",
+        "status",
+        "ended_at_unix_ms",
+        "end_reason",
+        "latest_transition_sequence",
+        "acknowledged_transition_sequence",
+        "acknowledged_by",
+        "acknowledged_at_unix_ms",
+        "acknowledgement_event_sequence",
+        "is_acknowledged"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/components/schemas/Revision"
+        },
+        "node_id": {
+          "$ref": "#/components/schemas/Id"
+        },
+        "boot_id": {
+          "$ref": "#/components/schemas/Id"
+        },
+        "incident_id": {
+          "$ref": "#/components/schemas/AlertEpisodeId"
+        },
+        "kind": {
+          "$ref": "#/components/schemas/AlertKind"
+        },
+        "origin_node_id": {
+          "$ref": "#/components/schemas/Id"
+        },
+        "resource_id": {
+          "$ref": "#/components/schemas/NullableId"
+        },
+        "check": {
+          "enum": [
+            "bind",
+            "tcp",
+            null
+          ]
+        },
+        "target": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 64
+        },
+        "code": {
+          "$ref": "#/components/schemas/AlertCode"
+        },
+        "first_observed_at_unix_ms": {
+          "$ref": "#/components/schemas/AlertNullableCounter"
+        },
+        "last_observed_at_unix_ms": {
+          "$ref": "#/components/schemas/AlertNullableCounter"
+        },
+        "evidence_sequence": {
+          "$ref": "#/components/schemas/AlertNullableCounter"
+        },
+        "status": {
+          "$ref": "#/components/schemas/AlertStatus"
+        },
+        "ended_at_unix_ms": {
+          "$ref": "#/components/schemas/AlertNullableCounter"
+        },
+        "end_reason": {
+          "$ref": "#/components/schemas/AlertHistoryEndReason"
+        },
+        "latest_transition_sequence": {
+          "$ref": "#/components/schemas/Revision"
+        },
+        "acknowledged_transition_sequence": {
+          "$ref": "#/components/schemas/NullableRevision"
+        },
+        "acknowledged_by": {
+          "$ref": "#/components/schemas/NullableId"
+        },
+        "acknowledged_at_unix_ms": {
+          "$ref": "#/components/schemas/AlertNullableCounter"
+        },
+        "acknowledgement_event_sequence": {
+          "$ref": "#/components/schemas/NullableRevision"
+        },
+        "is_acknowledged": {
+          "type": "boolean"
+        }
+      },
+      "description": "Latest retained projection, not live health. Old acknowledgements remain after a later transition; is_acknowledged requires that confirmation name latest_transition_sequence. Producer/client additionally compare exact numbers. Review never recovers or ends an incident. Restart ends old active episodes as unmonitored/monitor_restarted. Missing/pruned does not prove non-execution.",
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "const": "unmonitored"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "end_reason": {
+                "enum": [
+                  "source_unmonitored",
+                  "monitor_restarted"
+                ]
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "end_reason": {
+                "type": "null"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "const": "active"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "ended_at_unix_ms": {
+                "type": "null"
+              }
+            }
+          }
+        },
+        {
+          "oneOf": [
+            {
+              "properties": {
+                "acknowledged_transition_sequence": {
+                  "type": "null"
+                },
+                "acknowledged_by": {
+                  "type": "null"
+                },
+                "acknowledged_at_unix_ms": {
+                  "type": "null"
+                },
+                "acknowledgement_event_sequence": {
+                  "type": "null"
+                },
+                "is_acknowledged": {
+                  "const": false
+                }
+              }
+            },
+            {
+              "properties": {
+                "acknowledged_transition_sequence": {
+                  "$ref": "#/components/schemas/Revision"
+                },
+                "acknowledged_by": {
+                  "$ref": "#/components/schemas/Id"
+                },
+                "acknowledgement_event_sequence": {
+                  "$ref": "#/components/schemas/Revision"
+                }
+              }
+            }
+          ]
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "egress_check"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "resource_id": {
+                "$ref": "#/components/schemas/Id"
+              },
+              "check": {
+                "enum": [
+                  "bind",
+                  "tcp"
+                ]
+              }
+            },
+            "allOf": [
+              {
+                "if": {
+                  "properties": {
+                    "check": {
+                      "const": "bind"
+                    }
+                  }
+                },
+                "then": {
+                  "properties": {
+                    "target": {
+                      "type": "null"
+                    }
+                  }
+                },
+                "else": {
+                  "properties": {
+                    "target": {
+                      "type": "string",
+                      "minLength": 3
+                    }
+                  }
+                }
+              }
+            ]
+          },
+          "else": {
+            "properties": {
+              "check": {
+                "type": "null"
+              },
+              "target": {
+                "type": "null"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "enum": [
+                  "management_https",
+                  "node_tls",
+                  "remote_observation"
+                ]
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "resource_id": {
+                "type": "null"
+              },
+              "check": {
+                "type": "null"
+              },
+              "target": {
+                "type": "null"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "proxy_tls"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "resource_id": {
+                "$ref": "#/components/schemas/Id",
+                "description": "Stable managed endpoint identity, not an address, peer or list position."
+              },
+              "check": {
+                "type": "null"
+              },
+              "target": {
+                "type": "null"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "AlertHistoryPage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "node_id",
+        "items",
+        "next_cursor",
+        "oldest_sequence",
+        "trimmed"
+      ],
+      "properties": {
+        "node_id": {
+          "$ref": "#/components/schemas/Id"
+        },
+        "items": {
+          "type": "array",
+          "maxItems": 50,
+          "items": {
+            "$ref": "#/components/schemas/AlertHistoryEvent"
+          }
+        },
+        "next_cursor": {
+          "$ref": "#/components/schemas/NullableRevision"
+        },
+        "oldest_sequence": {
+          "$ref": "#/components/schemas/NullableRevision"
+        },
+        "trimmed": {
+          "$ref": "#/components/schemas/Counter"
+        }
+      },
+      "description": "At most 50 descending immutable event sequences with exclusive before cursor. Retains 16,384 events independently of 12,288 active and 4,096 closed episodes. Schema22 can retain opted-in background observations with their original source node; it does not read remote history. trimmed is a cumulative exact count, not boolean. oldest_sequence describes global retained history, even when a filter returns no rows. This is not a live snapshot cursor."
+    },
+    "AlertHistorySummary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "node_id",
+        "retained_episode_count",
+        "retained_event_count",
+        "unacknowledged_count",
+        "oldest_sequence",
+        "trimmed"
+      ],
+      "properties": {
+        "node_id": {
+          "$ref": "#/components/schemas/Id"
+        },
+        "retained_episode_count": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 16384
+        },
+        "retained_event_count": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 16384
+        },
+        "unacknowledged_count": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 16384
+        },
+        "oldest_sequence": {
+          "$ref": "#/components/schemas/NullableRevision"
+        },
+        "trimmed": {
+          "$ref": "#/components/schemas/Counter"
+        }
+      },
+      "description": "Local retained counts, including ended review states. unacknowledged_count<=retained_episode_count. Not current unresolved faults or live source health. Error is unknown, never a healthy zero."
+    },
+    "AlertHistoryAcknowledgementInput": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "expected_node_id",
+        "expected_transition_sequence"
+      ],
+      "properties": {
+        "expected_node_id": {
+          "$ref": "#/components/schemas/Id"
+        },
+        "expected_transition_sequence": {
+          "$ref": "#/components/schemas/Revision"
+        }
+      }
+    }
+  }
+}

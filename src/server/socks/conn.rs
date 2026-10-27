@@ -28,7 +28,7 @@ use super::{
         ServerFrame, SocksCodec, handshake::password::Status,
     },
 };
-use crate::ext::Extension;
+use crate::server::auth::Authenticated;
 
 fn poll_read_with_pending(
     stream: &mut TcpStream,
@@ -172,9 +172,9 @@ impl IncomingConnection {
     ///
     /// Authentication failures are reported to the client before the
     /// connection is closed, as required by RFC 1929 section 2.
-    pub async fn authenticate(
+    pub(crate) async fn authenticate(
         mut self,
-    ) -> Result<(AuthenticatedStream, Extension), AuthenticationError> {
+    ) -> Result<(AuthenticatedStream, Authenticated), AuthenticationError> {
         let method = self.auth.method();
         let Some(ClientFrame::Methods(methods)) = self.framed.next().await.transpose()? else {
             return Err(AuthenticationError::Io(std::io::Error::new(

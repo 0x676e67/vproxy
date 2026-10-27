@@ -1,0 +1,62 @@
+{
+  "name": "vproxy-web",
+  "version": "0.1.0",
+  "private": true,
+  "license": "GPL-3.0-only",
+  "scripts": {
+    "dev": "node tools/run.mjs dev api",
+    "dev:demo": "node tools/run.mjs dev demo",
+    "build": "node tools/run.mjs build api",
+    "build:demo": "node tools/run.mjs build demo",
+    "preview": "sirv dist --host 127.0.0.1 --port 8000",
+    "postinstall": "max setup",
+    "typecheck": "max setup && tsc --noEmit",
+    "test": "vitest run && npm run test:tools",
+    "test:tools": "node --test tools/build.test.mjs tools/cargo-guard.test.mjs"
+  },
+  "dependencies": {
+    "@ant-design/icons": "6.3.4",
+    "@ant-design/pro-components": "3.1.14-7",
+    "antd": "6.6.6",
+    "history": "5.3.0",
+    "react": "19.3.1",
+    "react-dom": "19.3.1",
+    "react-router": "7.18.4",
+    "react-router-dom": "7.18.4"
+  },
+  "devDependencies": {
+    "@testing-library/dom": "10.4.2",
+    "@testing-library/react": "16.3.3",
+    "@types/node": "24.19.2",
+    "@types/react": "19.3.0",
+    "@types/react-dom": "19.3.0",
+    "@umijs/max": "4.7.24",
+    "jsdom": "28.1.0",
+    "sirv-cli": "3.0.1",
+    "typescript": "5.9.3",
+    "vitest": "4.1.12"
+  },
+  "overrides": {
+    "react-router": "$react-router",
+    "react-router-dom": "$react-router-dom",
+    "@umijs/plugins": {
+      "@ant-design/pro-components": "$@ant-design/pro-components"
+    },
+    "umi": {
+      "@babel/runtime": "7.29.10"
+    },
+    "@umijs/renderer-react": {
+      "@babel/runtime": "7.29.10"
+    },
+    "@umijs/babel-preset-umi": {
+      "@babel/runtime": "7.29.10"
+    }
+  },
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "packageManager": "npm@12.0.2",
+  "browserslist": [
+    "defaults"
+  ]
+}

@@ -1,0 +1,32 @@
+export default {
+  "certificates.title": "本机 TLS 证书",
+  "certificates.scope":
+    "只读取本进程实际加载的身份。展开或刷新时更新；不读取证书文件、不探测远端，也不签发或轮换证书。",
+  "certificates.validityOnly":
+    "有效期内不代表已受信任、名称匹配、未被吊销或服务可达。",
+  "certificates.refresh": "刷新证书状态",
+  "certificates.unsupported":
+    "此服务版本不提供证书状态；其他节点功能仍可使用。",
+  "certificates.interrupted": "读取已中断，请刷新后再查看。",
+  "certificates.observed": "观测时间",
+  "certificates.clockUnknown": "时钟不可用，无法判断当前有效期",
+  "certificates.dateRange": "日期超出显示范围",
+  "certificates.validFrom": "生效时间",
+  "certificates.validUntil": "到期时间",
+  "certificates.copy": "复制 SHA-256",
+  "certificates.copied": "已复制",
+  "certificates.role.management": "管理 HTTPS",
+  "certificates.role.node": "节点 mTLS",
+  "certificates.role.proxy": "代理入口",
+  "certificates.source.manual": "手工配置",
+  "certificates.source.acme": "ACME",
+  "certificates.condition.disabled": "未配置 TLS 身份",
+  "certificates.condition.pending": "尚未发布正常证书",
+  "certificates.condition.unavailable": "证书元数据不可用，TLS 状态未知",
+  "certificates.condition.loaded": "已加载",
+  "certificates.condition.time_unknown": "当前有效期未知",
+  "certificates.condition.not_yet_valid": "尚未生效",
+  "certificates.condition.expired": "已过期",
+  "certificates.condition.expiring": "将在七天内到期",
+  "certificates.condition.within_validity": "位于有效期内",
+};

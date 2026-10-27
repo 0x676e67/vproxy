@@ -1,0 +1,141 @@
+{
+  "paths": {
+    "/api/v1/proxy/runtime": {
+      "get": {
+        "operationId": "localProxyRuntime", "tags": ["Maintenance"],
+        "summary": "Read this process's proxy runtime",
+        "description": "Session only; no query, including an empty query. Recheck the real administrator with current ownership and saved admission. A management-only node returns runtime=null. Counts are approximate managed authorization leases, not sockets or delivery acknowledgements. This starts no probe, polling, shutdown or recovery action.",
+        "security": [{"Session": []}], "parameters": [], "x-vproxy-max-query-bytes": 0,
+        "responses": {
+          "200": {"description": "Current saved facts and nullable process-local runtime.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ProxyRuntimeStatus"}}}},
+          "503": {"description": "Upgrade, busy or unavailable observation; no synthetic healthy runtime.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ApiError"}}}},
+          "default": {"$ref": "#/components/responses/Error"}
+        }
+      }
+    },
+    "/api/v1/proxy/runtime/drain": {
+      "post": {
+        "operationId": "drainLocalProxyRuntime", "tags": ["Maintenance"],
+        "summary": "Accept one explicit drain of this runtime",
+        "description": "Session and CSRF only; no query. First pause durable admission and confirm that exact revision was applied. Recheck administrator, local ownership epoch, node, policy CAS and runtime before accepting. This irreversible action closes listeners to new connections and lets admitted drivers finish without a maintenance deadline. Management and node APIs remain online. An exact retained intent is idempotent; another request cannot adopt it. 202 means accepted, not drained or worker destruction. Response loss is unknown: do not automatically POST again or invent another request ID. Recover only by GET with the original runtime_id/request_id. Restart explicitly to create listeners again; admission resume alone cannot do so. Automation users:write grants no runtime control.",
+        "security": [{"Session": [], "Csrf": []}], "parameters": [{"$ref": "#/components/parameters/Origin"}],
+        "x-vproxy-max-query-bytes": 0, "x-vproxy-max-body-bytes": 4096,
+        "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ProxyRuntimeDrainRequest"}}}},
+        "responses": {
+          "202": {"description": "The exact accepted runtime/request and its current phase, without waiting for drain.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ProxyRuntimeStatus"}}}},
+          "409": {"description": "Known pre-transition conflict: identity, owner epoch, policy CAS, pause/publication, existing drain or process stop. No implicit restart.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ApiError"}}}},
+          "default": {"$ref": "#/components/responses/Error"}
+        }
+      }
+    },
+    "/api/v1/proxy/runtime/drains/{runtime_id}/{request_id}": {
+      "parameters": [
+        {"name": "runtime_id", "in": "path", "required": true, "schema": {"$ref": "#/components/schemas/Id"}},
+        {"name": "request_id", "in": "path", "required": true, "schema": {"$ref": "#/components/schemas/Id"}}
+      ],
+      "get": {
+        "operationId": "originalLocalProxyDrain", "tags": ["Maintenance"],
+        "summary": "Read the original process-local drain",
+        "description": "Session only; no query. Recheck the real administrator and match both original IDs. These facts live only in the original process, not a durable command receipt. A replacement runtime or missing request returns 404; never substitute the newest request or resend a POST. Reading does not wait for completion, finalise traffic or restart listeners.",
+        "security": [{"Session": []}], "parameters": [], "x-vproxy-max-query-bytes": 0,
+        "responses": {
+          "200": {"description": "Only the same runtime and retained request.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ProxyRuntimeStatus"}}}},
+          "404": {"description": "resource_not_found in this process; not proof that an earlier request was never accepted.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ApiError"}}}},
+          "default": {"$ref": "#/components/responses/Error"}
+        }
+      }
+    },
+    "/api/v1/targets/{id}/proxy/runtime": {
+      "parameters": [{"$ref": "#/components/parameters/ResourceId"}],
+      "get": {
+        "operationId": "targetProxyRuntime", "tags": ["Maintenance"],
+        "summary": "Read the selected target's runtime",
+        "description": "Session only; no query. One fixed node-v6 proxy_runtime GET over configured mTLS with PKIX/SAN and exact-DER authorization. Recheck target binding/current owner and rollback floors before exposing the response. Unsupported older nodes fail explicitly; no old-version, local-node or admission-status fallback.",
+        "security": [{"Session": []}], "parameters": [], "x-vproxy-max-query-bytes": 0,
+        "responses": {
+          "200": {"description": "Validated target-issued runtime facts.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ProxyRuntimeStatus"}}}},
+          "502": {"description": "node_protocol_unsupported or an invalid/unavailable remote response.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ApiError"}}}},
+          "default": {"$ref": "#/components/responses/Error"}
+        }
+      }
+    },
+    "/api/v1/targets/{id}/proxy/runtime/drain": {
+      "parameters": [{"$ref": "#/components/parameters/ResourceId"}],
+      "post": {
+        "operationId": "drainTargetProxyRuntime", "tags": ["Maintenance"],
+        "summary": "Send one explicit drain to the selected target",
+        "description": "Session and CSRF only; no query. expected_target_revision binds the saved local target, and request.expected_node_id must equal path id. Reauthorize the administrator and target CAS before one fixed node-v6 POST; the child rechecks current controller/DER, owner epoch, paused policy CAS and runtime. Recheck administrator/target and response identity after the attempt. The admitted worker survives HTTP waiter cancellation but never retries, polls or persists a policy command. 202 binds the complete original intent, not completion. After an untrusted/lost answer, changed authorization/target or failed post-check, return 502 runtime_outcome_unknown: do not automatically rePOST. Use only the original exact GET for recovery; a process replacement cannot recover old in-memory state. No credential, durable sequence or automation runtime grant is created.",
+        "security": [{"Session": [], "Csrf": []}], "parameters": [{"$ref": "#/components/parameters/Origin"}],
+        "x-vproxy-max-query-bytes": 0, "x-vproxy-max-body-bytes": 4096,
+        "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/TargetProxyRuntimeDrainInput"}}}},
+        "responses": {
+          "202": {"description": "Validated acceptance of the exact original intent; no drain wait.", "headers": {"Location": {"description": "Exact runtime/request recovery URL, not a new command ticket.", "schema": {"type": "string"}}}, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ProxyRuntimeStatus"}}}},
+          "409": {"description": "Definitive local target-CAS or authenticated child pre-transition refusal, including runtime mismatch, existing drain, stopping or unapplied pause.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ApiError"}}}},
+          "502": {"description": "runtime_outcome_unknown after an attempted request; it may already have been accepted. Unsupported v6 also fails explicitly without downgrade.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ApiError"}}}},
+          "default": {"$ref": "#/components/responses/Error"}
+        }
+      }
+    },
+    "/api/v1/targets/{id}/proxy/runtime/drains/{runtime_id}/{request_id}": {
+      "parameters": [
+        {"$ref": "#/components/parameters/ResourceId"},
+        {"name": "runtime_id", "in": "path", "required": true, "schema": {"$ref": "#/components/schemas/Id"}},
+        {"name": "request_id", "in": "path", "required": true, "schema": {"$ref": "#/components/schemas/Id"}}
+      ],
+      "get": {
+        "operationId": "originalTargetProxyDrain", "tags": ["Maintenance"],
+        "summary": "Read the selected target's original runtime request",
+        "description": "Session only; no query. One fixed node-v6 exact GET, never POST replay or latest-slot substitution. Require both original IDs, current local target/peer binding, current child owner/DER authorization and valid rollback floors. Missing state after a child restart remains unknown; there is no durable drain receipt. No automatic polling, listener restart or traffic finalisation.",
+        "security": [{"Session": []}], "parameters": [], "x-vproxy-max-query-bytes": 0,
+        "responses": {
+          "200": {"description": "Validated observation of only the original runtime/request.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ProxyRuntimeStatus"}}}},
+          "502": {"description": "Missing/replaced request, unsupported v6, authorization change or invalid remote response; no recovery by another POST.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ApiError"}}}},
+          "default": {"$ref": "#/components/responses/Error"}
+        }
+      }
+    }
+  },
+  "schemas": {
+    "ProxyRuntimeDrainRequest": {
+      "type": "object", "additionalProperties": false,
+      "required": ["expected_node_id", "expected_epoch", "expected_revision", "runtime_id", "request_id"],
+      "properties": {
+        "expected_node_id": {"$ref": "#/components/schemas/Id"},
+        "expected_epoch": {"$ref": "#/components/schemas/Revision"},
+        "expected_revision": {"$ref": "#/components/schemas/Revision"},
+        "runtime_id": {"$ref": "#/components/schemas/Id"},
+        "request_id": {"$ref": "#/components/schemas/Id"}
+      },
+      "description": "Five non-secret assertions for one runtime, not a durable command. Preserve the complete original request for exact result checking. IDs are canonical 128-bit base64url; epoch and revision are positive signed-SQLite-range decimal strings. A restart changes runtime identity. No secret, actor override, force option or sequence is accepted."
+    },
+    "TargetProxyRuntimeDrainInput": {
+      "type": "object", "additionalProperties": false, "required": ["expected_target_revision", "request"],
+      "properties": {"expected_target_revision": {"$ref": "#/components/schemas/Revision"}, "request": {"$ref": "#/components/schemas/ProxyRuntimeDrainRequest"}}
+    },
+    "ProxyRuntimeState": {
+      "type": "object", "additionalProperties": false, "required": ["runtime_id", "phase", "request", "active_operations"],
+      "properties": {
+        "runtime_id": {"$ref": "#/components/schemas/Id"},
+        "phase": {"enum": ["serving", "draining", "drained", "interrupted", "failed"]},
+        "request": {"anyOf": [{"$ref": "#/components/schemas/ProxyRuntimeDrainRequest"}, {"type": "null"}]},
+        "active_operations": {"anyOf": [{"$ref": "#/components/schemas/Counter"}, {"type": "null"}]}
+      },
+      "oneOf": [
+        {"properties": {"phase": {"const": "serving"}, "request": {"type": "null"}}},
+        {"properties": {"phase": {"enum": ["draining", "drained", "interrupted", "failed"]}, "request": {"$ref": "#/components/schemas/ProxyRuntimeDrainRequest"}}}
+      ],
+      "description": "Nullable keys are required. Serving has no drain request; all other phases retain the exact original request for this runtime. Draining can be indefinite for long-lived operations. Drained means listener drivers completed, not worker-pool destruction or peer delivery. Interrupted records a bounded process-stop timeout; failed records another driver error. active_operations is an approximate u64 admission-lease count, or null when unavailable/inconsistent with saved policy; zero never authorizes forced stop."
+    },
+    "ProxyRuntimeStatus": {
+      "type": "object", "additionalProperties": false,
+      "required": ["node_id", "ownership", "saved_revision", "saved_accepting", "runtime"],
+      "properties": {
+        "node_id": {"$ref": "#/components/schemas/Id"}, "ownership": {"$ref": "#/components/schemas/MaintenanceOwnership"},
+        "saved_revision": {"$ref": "#/components/schemas/Revision"}, "saved_accepting": {"type": "boolean"},
+        "runtime": {"anyOf": [{"$ref": "#/components/schemas/ProxyRuntimeState"}, {"type": "null"}]}
+      },
+      "allOf": [{"if": {"properties": {"runtime": {"type": "object", "properties": {"phase": {"enum": ["draining", "drained", "interrupted", "failed"]}}, "required": ["phase"]}}}, "then": {"properties": {"saved_accepting": {"const": false}}}}],
+      "description": "runtime is required and null only when no proxy runtime is configured. Controller identity cannot equal node_id. Retained request node/runtime IDs must match this observation; its original epoch/revision cannot exceed current owner epoch/saved revision. Non-serving runtimes require saved_accepting=false. No automatic listener resume, worker-destruction claim, durable operation receipt or precise-billing guarantee."
+    }
+  }
+}

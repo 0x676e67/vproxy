@@ -4,12 +4,30 @@ use std::{
 };
 
 use super::rand;
+use crate::ebpf::Profile;
 
 /// Enum representing different types of extensions.
 #[allow(clippy::upper_case_acronyms)]
 #[derive(Clone, Copy, Debug, Default)]
 pub enum Extension {
     #[default]
+    None,
+    TTL(u64),
+    Range(u64),
+    Session(u64),
+    /// A leading device selector plus the independent legacy routing decision.
+    /// It never reinterprets text embedded inside a session value.
+    Profiled {
+        route: RouteExtension,
+        profile: Profile,
+    },
+}
+
+/// The routing part of an extension, independent of the SYN preset. Keeping the
+/// old Extension variants preserves existing managed admission call sites.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[allow(clippy::upper_case_acronyms)]
+pub enum RouteExtension {
     None,
     TTL(u64),
     Range(u64),
@@ -28,10 +46,94 @@ impl Extension {
     {
         let full = full.into();
         let prefix = prefix.to_owned();
-        tokio::task::spawn_blocking(move || parser(prefix, full))
-            .await
-            .map_err(Into::into)
+        tokio::task::spawn_blocking(move || parse_profiled(prefix, full)).await?
     }
+
+    /// Extracts routing without allowing a device choice to alter address
+    /// selection. Both old variants and a profiled route use this same value.
+    pub(crate) const fn route(self) -> RouteExtension {
+        match self {
+            Self::None => RouteExtension::None,
+            Self::TTL(value) => RouteExtension::TTL(value),
+            Self::Range(value) => RouteExtension::Range(value),
+            Self::Session(value) => RouteExtension::Session(value),
+            Self::Profiled { route, .. } => route,
+        }
+    }
+
+    /// An absent selector preserves native behavior; there is no named native
+    /// preset that could be confused with an applied packet transformation.
+    pub(crate) const fn profile(self) -> Option<Profile> {
+        match self {
+            Self::Profiled { profile, .. } => Some(profile),
+            _ => None,
+        }
+    }
+}
+
+/// Only the exact prefix immediately following the authenticated username can
+/// introduce a device. Remove it before invoking the unchanged legacy parser,
+/// so session/range hashes are identical to their device-free equivalents.
+/// Unknown/empty selectors are input errors without recording the username.
+fn parse_profiled(prefix: String, full: String) -> crate::Result<Extension> {
+    let Some(suffix) = full.strip_prefix(&prefix) else {
+        return Ok(Extension::None);
+    };
+    let Some(device) = suffix.strip_prefix("-device-") else {
+        return Ok(parser(prefix, full));
+    };
+    let (device, route) = match device.split_once('-') {
+        Some((device, route)) => (device, Some(route)),
+        None => (device, None),
+    };
+    let profile = device.parse::<Profile>().map_err(|_| {
+        std::io::Error::new(std::io::ErrorKind::InvalidInput, "unknown device profile")
+    })?;
+    let route = match route {
+        Some("") => {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "empty device routing extension",
+            )
+            .into());
+        }
+        Some(route) => {
+            let (kind, value) = route
+                .split_once('-')
+                .filter(|(_, value)| !value.is_empty())
+                .ok_or_else(|| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        "empty device routing extension",
+                    )
+                })?;
+            let full = format!("{prefix}-{route}");
+            // A profiled suffix has one route selector; do not reinterpret an
+            // unknown or repeated selector as a successful profile-only login.
+            let extension = match kind {
+                "session" => parse_session_extension(&full),
+                "range" => parse_range_extension(value),
+                "ttl" => parse_ttl_extension(value),
+                _ => {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        "unknown device routing extension",
+                    )
+                    .into());
+                }
+            };
+            if matches!(extension, Extension::None) {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "invalid device routing extension",
+                )
+                .into());
+            }
+            extension.route()
+        }
+        None => RouteExtension::None,
+    };
+    Ok(Extension::Profiled { route, profile })
 }
 
 /// This function takes a tuple of two strings as input: a prefix (the username)
@@ -84,7 +186,7 @@ fn parser(prefix: String, full: String) -> Extension {
 ///
 /// If the string `s` does not start with the prefix, the function returns
 /// `None`.
-#[tracing::instrument(level = "trace", skip(handler))]
+#[tracing::instrument(level = "trace", skip_all)]
 #[inline]
 fn parse_extension(
     trim: bool,
@@ -159,24 +261,71 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_parse_ttl_extension_zero() {
-        // Should return Extension::None for zero input
-        assert!(matches!(parse_ttl_extension("0"), Extension::None));
-    }
-
-    #[test]
-    fn test_parse_ttl_extension_nonzero() {
-        // Should return Extension::TTL for non-zero input
-        let ext = parse_ttl_extension("60");
-        match ext {
-            Extension::TTL(_) => {}
-            _ => panic!("Expected Extension::TTL"),
+    fn device_selection_preserves_legacy_route_hashes_and_session_text() {
+        for (profile, expected) in [
+            ("windows", Profile::Windows),
+            ("linux", Profile::Linux),
+            ("android", Profile::Android),
+            ("macos", Profile::MacOs),
+            ("ios", Profile::Ios),
+        ] {
+            let selected = parse_profiled("user".into(), format!("user-device-{profile}"))
+                .expect("known device");
+            assert_eq!(selected.profile(), Some(expected));
+            assert_eq!(selected.route(), RouteExtension::None);
+            for route in ["session-client-a-device-ios", "range-client-a"] {
+                let native = parser("user".into(), format!("user-{route}"));
+                let selected =
+                    parse_profiled("user".into(), format!("user-device-{profile}-{route}"))
+                        .expect("device and route");
+                assert_eq!(selected.route(), native.route());
+                assert_eq!(selected.profile(), Some(expected));
+            }
+        }
+        for username in [
+            "user-session-client-a-device-windows",
+            "user-range-client-a-device-windows",
+        ] {
+            let selected = parse_profiled("user".into(), username.into()).expect("legacy value");
+            assert_eq!(selected.profile(), None);
+            assert_eq!(
+                selected.route(),
+                parser("user".into(), username.into()).route()
+            );
         }
     }
 
     #[test]
-    fn test_parse_ttl_extension_invalid() {
-        // Should return Extension::None for invalid input
-        assert!(matches!(parse_ttl_extension("abc"), Extension::None));
+    fn malformed_leading_devices_are_not_silently_native() {
+        for username in [
+            "user-device-",
+            "user-device-native",
+            "user-device-Windows",
+            "user-device-freebsd",
+            "user-device-windows-",
+            "user-device-windows-device-linux",
+            "user-device-windows-session-",
+            "user-device-windows-range-",
+            "user-device-windows-ttl-0",
+        ] {
+            let error = parse_profiled("user".into(), username.into()).expect_err("invalid device");
+            assert!(matches!(error, crate::error::Error::IO(ref error)
+                if error.kind() == std::io::ErrorKind::InvalidInput));
+            assert!(!error.to_string().contains(username));
+        }
+        // This port does not tighten the historical device-free grammar.
+        assert!(matches!(
+            parse_profiled("user".into(), "user-unknown-value".into())
+                .expect("unchanged legacy parser"),
+            Extension::None
+        ));
+    }
+
+    #[test]
+    fn ttl_extension_requires_a_nonzero_integer() {
+        for input in ["0", "abc"] {
+            assert!(matches!(parse_ttl_extension(input), Extension::None));
+        }
+        assert!(matches!(parse_ttl_extension("60"), Extension::TTL(_)));
     }
 }

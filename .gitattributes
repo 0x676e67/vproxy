@@ -1,0 +1,5 @@
+/.github/build.sh text eol=lf
+/.github/zig-cc.sh text eol=lf
+/.github/install.sh text eol=lf
+/.github/install_test.py text eol=lf
+/src/manage/acme/staging-roots.pem text eol=lf

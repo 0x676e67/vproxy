@@ -1,35 +1,37 @@
-use self_update::{backends::github, cargo_crate_version, update::UpdateStatus};
+mod notices;
+mod release;
+
+/// Print only embedded licensing text; no installed file, database or network is read.
+pub(super) fn notices() -> crate::Result<()> {
+    notices::write(&mut std::io::stdout().lock()).map_err(Into::into)
+}
 
 /// Updates the current executable to the latest version available.
 pub(super) fn update() -> crate::Result<()> {
     const BIN_NAME: &str = env!("CARGO_PKG_NAME");
 
-    let status = github::Update::configure()
-        .repo_owner("0x676e67")
-        .repo_name(BIN_NAME)
-        .bin_name(BIN_NAME)
-        .target(self_update::get_target())
-        .show_output(true)
-        .show_download_progress(true)
-        .no_confirm(true)
-        .current_version(cargo_crate_version!())
-        .build()?
-        .update_extended()?;
-
-    if let UpdateStatus::Updated(ref release) = status {
-        if let Some(body) = &release.body {
-            if !body.trim().is_empty() {
-                println!("{} upgraded to {}:\n", BIN_NAME, release.version);
-                println!("{body}");
-            } else {
-                println!("{} upgraded to {}", BIN_NAME, release.version);
-            }
-        }
-    } else {
-        println!("{BIN_NAME} is up-to-date");
+    println!("Checking update packages for this build...");
+    match release::update()? {
+        release::Outcome::Updated(version) => println!("{BIN_NAME} upgraded to {version}"),
+        release::Outcome::UpToDate => println!("{BIN_NAME} is up-to-date"),
     }
 
     Ok(())
+}
+
+/// HTTP loopback tests use an explicit provider instead of racing over a
+/// process-wide default. No CA is trusted here: a test needing HTTPS must supply
+/// its own roots rather than accidentally trusting a public or system issuer.
+#[cfg(test)]
+pub(crate) fn test_http_client_builder() -> std::io::Result<reqwest::ClientBuilder> {
+    let tls = rustls::ClientConfig::builder_with_provider(std::sync::Arc::new(
+        rustls::crypto::aws_lc_rs::default_provider(),
+    ))
+    .with_safe_default_protocol_versions()
+    .map_err(std::io::Error::other)?
+    .with_root_certificates(rustls::RootCertStore::empty())
+    .with_no_client_auth();
+    Ok(reqwest::Client::builder().use_preconfigured_tls(tls))
 }
 
 /// Uninstalls the current executable.

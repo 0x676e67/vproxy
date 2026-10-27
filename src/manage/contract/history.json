@@ -1,0 +1,222 @@
+{
+  "paths": {
+    "/api/v1/targets/{id}/commands/history": {
+      "parameters": [{ "$ref": "#/components/parameters/ResourceId" }],
+      "get": {
+        "operationId": "listTargetCommandHistory",
+        "tags": ["Targets"],
+        "summary": "Read locally retained non-secret target command history",
+        "description": "Schema 20. One local snapshot, no network or delivery. Rechecks the current local administrator; retired or revoked targets remain auditable without restoring control. Descending durable sequence, exclusive before cursor. Retains at most 128 records per target. Migration imports only the then-current outbox; earlier commands and missing secrets cannot be reconstructed. A missing/pruned row does not prove non-execution. Unknown or duplicate decoded query parameters, noncanonical decimals and queries over 1024 bytes are rejected. No request body is advertised.",
+        "security": [{ "Session": [] }],
+        "parameters": [
+          {
+            "name": "before",
+            "in": "query",
+            "schema": { "$ref": "#/components/schemas/Revision" }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 50,
+              "default": 25
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "A bounded local history page, not current target state.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TargetCommandHistoryPage"
+                }
+              }
+            }
+          },
+          "default": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/api/v1/targets/{id}/commands/history/{job_id}": {
+      "parameters": [
+        { "$ref": "#/components/parameters/ResourceId" },
+        {
+          "name": "job_id",
+          "in": "path",
+          "required": true,
+          "schema": { "$ref": "#/components/schemas/Id" }
+        }
+      ],
+      "get": {
+        "operationId": "getTargetCommandHistory",
+        "tags": ["Targets"],
+        "summary": "Read the original target job by its exact ID",
+        "description": "Schema 20, Session only, no query or network. The peer and original job ID are both bound. A retained non-secret result may outlive the replaceable execution slot; this read never retries it, returns its input or recovers a one-time password. A 404 resource_not_found means unavailable locally, not never executed or safe to replay. Saved/applied is historical receipt evidence, not current policy or runtime readiness.",
+        "security": [{ "Session": [] }],
+        "responses": {
+          "200": {
+            "description": "Exactly this retained job.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TargetCommandHistoryEntry"
+                }
+              }
+            }
+          },
+          "default": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    }
+  },
+  "schemas": {
+    "TargetCommandHistoryTime": {
+      "description": "Optional wall-clock Unix seconds, not ordering, freshness or authorization. Null means unavailable. Numeric upper bound is checked by the producer, beyond lexical JSON Schema constraints.",
+      "anyOf": [{ "$ref": "#/components/schemas/Sequence" }, { "type": "null" }]
+    },
+    "TargetCommandHistoryEntry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "sequence",
+        "controller_node_id",
+        "administrator_id",
+        "protocol_version",
+        "action",
+        "job",
+        "user_id",
+        "credential_id",
+        "imported",
+        "recorded_at_unix_s",
+        "updated_at_unix_s"
+      ],
+      "properties": {
+        "sequence": { "$ref": "#/components/schemas/Revision" },
+        "controller_node_id": { "$ref": "#/components/schemas/Id" },
+        "administrator_id": { "$ref": "#/components/schemas/Id" },
+        "protocol_version": { "type": "integer", "minimum": 1, "maximum": 5 },
+        "action": {
+          "type": "string",
+          "enum": [
+            "create_user",
+            "update_user",
+            "set_user_active",
+            "delete_user",
+            "create_credential",
+            "set_credential_active",
+            "rotate_credential",
+            "revoke_credential",
+            "create_prefix",
+            "retire_prefix",
+            "create_address",
+            "set_address_state",
+            "create_pool",
+            "set_pool_state",
+            "add_pool_member",
+            "remove_pool_member",
+            "set_route_permission",
+            "set_user_presets",
+            "set_pool_preset",
+            "set_public_address",
+            "set_admission"
+          ]
+        },
+        "job": { "$ref": "#/components/schemas/TargetJob" },
+        "user_id": { "$ref": "#/components/schemas/NullableId" },
+        "credential_id": { "$ref": "#/components/schemas/NullableId" },
+        "imported": {
+          "type": "boolean",
+          "description": "Imported from the slot present at migration, not evidence of a complete pre-migration history. Saved/applied imported rows can lack old result IDs; do not infer them from current users or credentials."
+        },
+        "recorded_at_unix_s": {
+          "$ref": "#/components/schemas/TargetCommandHistoryTime"
+        },
+        "updated_at_unix_s": {
+          "$ref": "#/components/schemas/TargetCommandHistoryTime"
+        }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "protocol_version": { "const": 1 } } },
+          "then": {
+            "properties": {
+              "action": {
+                "enum": [
+                  "create_user",
+                  "update_user",
+                  "set_user_active",
+                  "delete_user",
+                  "create_credential",
+                  "set_credential_active",
+                  "rotate_credential",
+                  "revoke_credential"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "if": { "properties": { "protocol_version": { "const": 2 } } },
+          "then": {
+            "properties": {
+              "action": {
+                "enum": [
+                  "create_prefix",
+                  "retire_prefix",
+                  "create_address",
+                  "set_address_state",
+                  "create_pool",
+                  "set_pool_state",
+                  "add_pool_member",
+                  "remove_pool_member",
+                  "set_route_permission"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "if": { "properties": { "protocol_version": { "const": 3 } } },
+          "then": {
+            "properties": {
+              "action": { "enum": ["set_user_presets", "set_pool_preset"] }
+            }
+          }
+        },
+        {
+          "if": { "properties": { "protocol_version": { "const": 4 } } },
+          "then": {
+            "properties": { "action": { "const": "set_public_address" } }
+          }
+        },
+        {
+          "if": { "properties": { "protocol_version": { "const": 5 } } },
+          "then": { "properties": { "action": { "const": "set_admission" } } }
+        }
+      ],
+      "description": "Original controller, actor and job lineage with a non-secret snapshot. Identity, result/action, resource/version and sequence relationships are also validated by the producer; this schema does not prove those dynamic bindings. No name, command payload, verifier, password or key is returned."
+    },
+    "TargetCommandHistoryPage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["items", "next_cursor", "oldest_sequence", "trimmed"],
+      "properties": {
+        "items": {
+          "type": "array",
+          "maxItems": 50,
+          "items": { "$ref": "#/components/schemas/TargetCommandHistoryEntry" }
+        },
+        "next_cursor": { "$ref": "#/components/schemas/NullableRevision" },
+        "oldest_sequence": { "$ref": "#/components/schemas/NullableRevision" },
+        "trimmed": {
+          "type": "boolean",
+          "description": "The per-target retention limit has evicted older records; not proof that any absent job did not execute."
+        }
+      },
+      "description": "A descending exclusive-sequence page. Oldest sequence describes this peer's retained range in this snapshot, even if the requested page is empty. Cursors, ordering and shared controller/peer bindings are enforced by the producer."
+    }
+  }
+}

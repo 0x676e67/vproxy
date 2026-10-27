@@ -1,0 +1,92 @@
+name: Web
+
+on:
+  pull_request:
+    paths:
+      - "web/**"
+      - "src/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "build.rs"
+      - ".github/workflows/web.yml"
+      - ".github/check_management_contract.mjs"
+  push:
+    branches: ["main"]
+    paths:
+      - "web/**"
+      - "src/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "build.rs"
+      - ".github/workflows/web.yml"
+      - ".github/check_management_contract.mjs"
+  workflow_dispatch:
+  workflow_call:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: Typecheck, test and build
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: web
+
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Test
+        run: npm test
+
+      - name: Build
+        run: npm run build
+
+      - uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1
+        with:
+          toolchain: "1.97"
+          components: clippy
+
+      - name: Test embedded Web, API and build guard without the default allocator
+        working-directory: .
+        run: node web/tools/cargo-guard.mjs
+
+      - name: Check embedded Web and API
+        working-directory: .
+        run: cargo clippy --workspace --all-targets --no-default-features --features web-ui --locked -- -D warnings
+
+      - name: Check release package boundaries
+        working-directory: .
+        run: |
+          cargo package --list --allow-dirty --locked > "$RUNNER_TEMP/package-files.txt"
+          if grep -E '(^|/)(\.agents|node_modules|\.umi[^/]*|target)/' "$RUNNER_TEMP/package-files.txt"; then
+            echo 'Private or generated development files entered the package'
+            exit 1
+          fi
+
+      - name: Check offline management API contracts
+        working-directory: .
+        run: |
+          cargo run --quiet --no-default-features --features management --locked --bin vproxy -- manage api-spec > "$RUNNER_TEMP/management.openapi.json"
+          cargo run --quiet --no-default-features --features management --locked --bin vproxy -- manage api-spec --automation > "$RUNNER_TEMP/users-read.openapi.json"
+          node .github/check_management_contract.mjs "$RUNNER_TEMP/management.openapi.json" "$RUNNER_TEMP/users-read.openapi.json"

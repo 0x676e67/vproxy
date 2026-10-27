@@ -1,0 +1,80 @@
+{
+  "paths": {
+    "/api/v1/tls/acme": {
+      "get": {
+        "operationId": "browserTlsAcmeStatus",
+        "tags": ["TLS"],
+        "summary": "Read this process's browser HTTPS certificate state",
+        "description": "Administrator session only; users:read automation does not authorize this resource. No query is accepted, including an empty query. This bounded in-memory read does not open cache files, contact the CA, trigger an attempt, or control a remote node. Manual TLS returns only its mode. ACME reports the most recently activated normal certificate, not the temporary validation certificate; availability includes both validity endpoints. A working or failed renewal can coexist with an available certificate. No account, order, challenge token, contact, DNS name, private path, key, certificate bytes or raw CA error is exported. Initial issuance without an available normal certificate may leave this HTTPS endpoint unreachable; use local startup diagnostics then. The timestamps describe this process's observation, not a connectivity test or a guarantee of browser trust.",
+        "security": [{ "Session": [] }],
+        "x-vproxy-max-query-bytes": 0,
+        "x-vproxy-max-response-bytes": 2048,
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "Manual mode or the current process's ACME snapshot. An available staging certificate is not publicly trusted.",
+            "headers": { "Cache-Control": { "schema": { "type": "string", "const": "no-store" } } },
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/AcmeStatus" } } }
+          },
+          "400": {
+            "description": "invalid_query: this resource accepts no query string.",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ApiError" } } }
+          },
+          "503": {
+            "description": "acme_status_unavailable: the bounded in-memory status cannot be read. No CA operation or retry is triggered. The outer deadline can instead return request_timeout.",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ApiError" } } }
+          },
+          "default": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    }
+  },
+  "schemas": {
+    "AcmeStatus": {
+      "oneOf": [
+        { "$ref": "#/components/schemas/ManualTlsStatus" },
+        { "$ref": "#/components/schemas/AcmeTlsStatus" }
+      ]
+    },
+    "ManualTlsStatus": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["mode"],
+      "properties": { "mode": { "type": "string", "const": "manual" } }
+    },
+    "AcmeUnixSeconds": {
+      "$ref": "#/components/schemas/Counter",
+      "description": "Canonical u64 seconds since the Unix epoch, encoded as a decimal string. Zero is valid. Preserve as a string or exact integer; do not use a floating-point Number. The producer enforces the numeric upper bound."
+    },
+    "AcmeCertificate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["not_before_unix_s", "not_after_unix_s", "available"],
+      "properties": {
+        "not_before_unix_s": { "$ref": "#/components/schemas/AcmeUnixSeconds" },
+        "not_after_unix_s": { "$ref": "#/components/schemas/AcmeUnixSeconds" },
+        "available": { "type": "boolean", "description": "True exactly when the observation time lies within both inclusive validity endpoints of the most recently activated normal identity. Does not prove public trust, DNS reachability or future handshakes." }
+      }
+    },
+    "AcmeTlsStatus": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["mode", "environment", "challenge", "certificate", "activity", "next_attempt_at_unix_s", "last_failure", "observed_at_unix_s"],
+      "properties": {
+        "mode": { "type": "string", "const": "acme" },
+        "environment": { "type": "string", "enum": ["staging", "production"] },
+        "challenge": { "type": "string", "enum": ["tls-alpn-01", "http-01"] },
+        "certificate": { "anyOf": [{ "$ref": "#/components/schemas/AcmeCertificate" }, { "type": "null" }] },
+        "activity": { "type": "string", "enum": ["waiting", "working", "stopped"] },
+        "next_attempt_at_unix_s": { "anyOf": [{ "$ref": "#/components/schemas/AcmeUnixSeconds" }, { "type": "null" }] },
+        "last_failure": { "anyOf": [{ "type": "string", "enum": ["attempt_unavailable", "review_required"] }, { "type": "null" }], "description": "Fixed public reason, independent of certificate availability and current activity. No raw transport, filesystem, account or CA error is exposed." },
+        "observed_at_unix_s": { "$ref": "#/components/schemas/AcmeUnixSeconds" }
+      },
+      "allOf": [{
+        "if": { "properties": { "activity": { "const": "waiting" } } },
+        "then": { "properties": { "next_attempt_at_unix_s": { "$ref": "#/components/schemas/AcmeUnixSeconds" } } },
+        "else": { "properties": { "next_attempt_at_unix_s": { "type": "null" } } }
+      }]
+    }
+  }
+}
