@@ -3,6 +3,7 @@
 import { defineConfig } from "@umijs/max";
 import defaultSettings from "./defaultSettings";
 import routes from "./routes";
+import { consolePalette, consoleTokens } from "./theme";
 
 export default defineConfig({
   plugins: ["./config/router.ts"],
@@ -17,8 +18,11 @@ export default defineConfig({
   title: "vproxy",
   // Do not inherit the template's zoom restriction on mobile and low-vision use.
   metas: [
-    { name: "viewport", content: "width=device-width, initial-scale=1" },
-    { name: "theme-color", content: "#000000" },
+    {
+      name: "viewport",
+      content: "width=device-width, initial-scale=1, viewport-fit=cover",
+    },
+    { name: "theme-color", content: consolePalette.canvas },
   ],
   fastRefresh: true,
   layout: { locale: true, ...defaultSettings },
@@ -32,12 +36,7 @@ export default defineConfig({
     appConfig: {},
     configProvider: {
       theme: {
-        token: {
-          colorPrimary: "#1677ff",
-          borderRadius: 8,
-          fontFamily:
-            '-apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif',
-        },
+        token: consoleTokens(),
       },
     },
   },

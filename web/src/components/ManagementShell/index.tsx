@@ -2,6 +2,7 @@ import { lazy, Suspense, type ReactNode } from "react";
 import { useManagement } from "../../auth/context";
 import { useMessages } from "../../hooks/useMessages";
 import LanguageSwitch from "../LanguageSwitch";
+import ThemeSwitch from "../ThemeSwitch";
 
 // Lazy loading keeps ProForm out of the initial shell chunk.
 const ManagementGate = lazy(() => import("../ManagementGate"));
@@ -15,6 +16,7 @@ export default function ManagementShell({ children }: { children: ReactNode }) {
   return (
     <div className="management-auth-shell">
       <header className="management-auth-shell-actions">
+        <ThemeSwitch />
         <LanguageSwitch />
       </header>
       <main className="management-auth-shell-content">

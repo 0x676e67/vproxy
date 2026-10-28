@@ -16,6 +16,16 @@ import notifications from "./notifications/en";
 import service from "./service/en";
 
 export default {
+  "theme.title": "Theme",
+  "theme.current": "Current theme",
+  "theme.light": "Light",
+  "theme.dark": "Dark",
+  "layout.expandNavigation": "Expand sidebar",
+  "layout.collapseNavigation": "Collapse sidebar",
+  "layout.openNavigation": "Open navigation",
+  "layout.closeNavigation": "Close navigation",
+  "control.registeredNodes": "Registered nodes",
+  "control.registrationHelp": "Node registration help",
   ...service,
   ...users,
   ...control,

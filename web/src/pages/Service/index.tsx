@@ -366,7 +366,7 @@ export function LiveService() {
   const status = view?.status;
   const runtime = !reading && !error ? status?.runtime : undefined;
   return (
-    <PageContainer title={t("service.title")}>
+    <PageContainer className="management-page" title={t("service.title")}>
       <Space orientation="vertical" className="full-width" size={16}>
         <ProCard
           title={view?.node.name ?? t("node.local")}
@@ -529,6 +529,7 @@ export function LiveService() {
                   {items.map(({ key, name, ...rest }) => (
                     <ProCard
                       key={key}
+                      className="management-listener"
                       variant="outlined"
                       title={t("service.listener", { number: name + 1 })}
                       extra={
@@ -544,7 +545,7 @@ export function LiveService() {
                       }
                     >
                       <Row gutter={16}>
-                        <Col xs={24} sm={8}>
+                        <Col xs={12} sm={8}>
                           <Form.Item
                             {...rest}
                             name={[name, "protocol"]}
@@ -565,7 +566,7 @@ export function LiveService() {
                             />
                           </Form.Item>
                         </Col>
-                        <Col xs={24} sm={6}>
+                        <Col xs={12} sm={6}>
                           <Form.Item
                             {...rest}
                             name={[name, "port"]}

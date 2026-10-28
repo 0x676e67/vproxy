@@ -19,6 +19,13 @@ import {
   alertEventQuery,
   alertSummary,
   alertAcknowledgementInput,
+  unreadAlertQuery,
+  unreadAlertPage,
+  alertAcknowledgementBatch,
+  alertAcknowledgementResult,
+  type UnreadAlertOptions,
+  type UnreadAlertPage,
+  type AlertAcknowledgementBatch,
   type AlertEvent,
   type AlertEpisode,
   type AlertEventPage,
@@ -319,6 +326,7 @@ type Endpoint =
   | "/alerts"
   | `/operations-alerts${string}`
   | `/alert-events${string}`
+  | `/alert-episodes${string}`
   | `/alert-episodes/${string}`
   | "/alert-summary"
   | "/notifications/webhook"
@@ -638,12 +646,15 @@ export class ManagementClient {
         endpoint,
       );
     const eventResponse = /^\/alert-events(?:\?[^?]*)?$/.test(endpoint);
+    const inboxResponse = /^\/alert-episodes(?:\?[^?]*|\/acknowledge)?$/.test(
+      endpoint,
+    );
     const value = await jsonBody(
       response,
       signal,
       settingsResponse
         ? 262_144
-        : historyResponse || eventResponse
+        : historyResponse || eventResponse || inboxResponse
           ? 131_072
           : MAX_RESPONSE_BYTES,
     );
@@ -813,6 +824,32 @@ export class ManagementClient {
   ): Promise<AlertSummary> {
     if (nodeId !== undefined) idPath(nodeId);
     return alertSummary(await this.request("/alert-summary", signal), nodeId);
+  }
+  async unreadAlerts(
+    nodeId: string,
+    options: UnreadAlertOptions,
+    signal: AbortSignal,
+  ): Promise<UnreadAlertPage> {
+    idPath(nodeId);
+    return unreadAlertPage(
+      await this.request(`/alert-episodes${unreadAlertQuery(options)}`, signal),
+      nodeId,
+      options,
+    );
+  }
+  async acknowledgeAlertBatch(
+    input: AlertAcknowledgementBatch,
+    csrf: string,
+    signal: AbortSignal,
+  ): Promise<AlertEpisode[]> {
+    const checked = alertAcknowledgementBatch(input);
+    return alertAcknowledgementResult(
+      await this.request("/alert-episodes/acknowledge", signal, {
+        csrf,
+        body: JSON.stringify(checked),
+      }),
+      checked,
+    );
   }
   async acknowledgeAlertEpisode(
     id: string,

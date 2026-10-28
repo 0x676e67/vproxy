@@ -478,7 +478,6 @@ fn invalid(message: &'static str) -> io::Error {
 #[cfg(test)]
 mod tests {
     use std::{
-        io::{Read as _, Write as _},
         net::{TcpListener, TcpStream},
         sync::{
             Arc,

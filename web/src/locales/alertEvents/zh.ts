@@ -1,4 +1,14 @@
 export default {
+  "inbox.title": "通知",
+  "inbox.unread": "未读",
+  "inbox.markAll": "全部标为已读",
+  "inbox.readHint": "已读不会修复或结束告警；新变化仍会提醒。",
+  "inbox.empty": "没有未读通知",
+  "inbox.progress": "已标记 {count} 条",
+  "inbox.details": "查看详情",
+  "inbox.older": "更早的未读通知",
+  "inbox.history": "全部事件历史",
+  "inbox.review": "检查原结果",
   "alertEvents.title": "事件历史",
   "alertEvents.conflict": "问题状态已变化，请重新读取后再确认。",
   "alertEvents.storeCapacity":

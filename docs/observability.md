@@ -25,6 +25,15 @@ different evidence.
 
 ## Alerts and history
 
+The header bell opens the unread list on this management node. Each entry shows
+its source, resource and latest change, with a link to the matching history event.
+Use **Mark all as read** to acknowledge the changes in the displayed inbox, or
+mark an individual entry. Changes arriving afterward remain unread. These review
+acknowledgements are shared on this node, rather than private per-browser flags.
+
+If a request loses its response, review its result in event history before trying
+again. The interface does not silently repeat an uncertain acknowledgement.
+
 Open an alert to inspect its origin, resource, timestamps and evidence. Current
 alerts describe current observations; persistent history retains earlier episodes
 and acknowledgements across normal restarts. An acknowledgement records review;

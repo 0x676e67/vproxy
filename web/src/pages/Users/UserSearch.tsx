@@ -34,14 +34,18 @@ export default function UserSearch({
       initialValues={{ mode: "name", q: "" }}
       disabled={disabled}
       aria-label={t("users.searchTitle")}
+      className="management-user-search"
       onFinish={(value) => {
         if (!disabled) submit({ mode: value.mode, q: value.q.trim() });
       }}
     >
       <div className="management-filter-bar">
-        <Form.Item name="mode" label={t("users.searchMode")}>
+        <Form.Item
+          name="mode"
+          label={t("users.searchMode")}
+          className="management-search-mode"
+        >
           <Select
-            style={{ width: 140 }}
             onChange={() => void form.validateFields(["q"]).catch(() => {})}
             options={[
               { value: "name", label: t("users.searchName") },
@@ -53,7 +57,7 @@ export default function UserSearch({
           name="q"
           label={t("users.searchQuery")}
           dependencies={["mode"]}
-          style={{ width: 260, maxWidth: "100%" }}
+          className="management-search-query"
           rules={[
             {
               validator: async (_, value: unknown) => {
@@ -71,24 +75,24 @@ export default function UserSearch({
         >
           <Input autoComplete="off" />
         </Form.Item>
+        <Form.Item className="management-search-actions">
+          <Space wrap>
+            <Button htmlType="submit" type="primary">
+              {t("users.searchSubmit")}
+            </Button>
+            <Button
+              disabled={disabled || !active}
+              onClick={() => {
+                if (disabled) return;
+                form.resetFields();
+                clear();
+              }}
+            >
+              {t("users.searchClear")}
+            </Button>
+          </Space>
+        </Form.Item>
       </div>
-      <Form.Item>
-        <Space wrap>
-          <Button htmlType="submit" type="primary">
-            {t("users.searchSubmit")}
-          </Button>
-          <Button
-            disabled={disabled || !active}
-            onClick={() => {
-              if (disabled) return;
-              form.resetFields();
-              clear();
-            }}
-          >
-            {t("users.searchClear")}
-          </Button>
-        </Space>
-      </Form.Item>
     </Form>
   );
 }

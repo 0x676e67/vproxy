@@ -283,7 +283,6 @@ pub(super) mod tests {
 
     use std::{
         fs::{self, DirBuilder, OpenOptions},
-        io::Write as _,
         path::PathBuf,
         sync::Arc,
         sync::atomic::{AtomicUsize, Ordering},

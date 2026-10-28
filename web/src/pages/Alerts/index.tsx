@@ -8,12 +8,12 @@ import {
   Result,
   Select,
   Space,
-  Table,
   Tabs,
   Tag,
   Typography,
 } from "antd";
 import type { ColumnsType } from "antd/es/table";
+import Table from "../../components/DataTable";
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   alertCodes,

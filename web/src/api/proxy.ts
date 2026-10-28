@@ -406,6 +406,29 @@ export function endpointStatus(
     if (query !== undefined || method !== "GET") throw new ApiError("format");
     return 200;
   }
+  if (path === "/alert-episodes/acknowledge") {
+    if (query !== undefined || method !== "POST") throw new ApiError("format");
+    return 200;
+  }
+  if (path === "/alert-episodes") {
+    if (
+      method !== "GET" ||
+      (query !== undefined && (!query.length || query.length > 256))
+    )
+      throw new ApiError("format");
+    const seen = new Set<string>();
+    for (const [key, value] of new URLSearchParams(query)) {
+      if (
+        seen.has(key) ||
+        (key === "before"
+          ? !canonicalRevision(value)
+          : key !== "through" || (value !== "0" && !canonicalRevision(value)))
+      )
+        throw new ApiError("format");
+      seen.add(key);
+    }
+    return 200;
+  }
   if (path === "/alert-events") {
     if (
       method !== "GET" ||

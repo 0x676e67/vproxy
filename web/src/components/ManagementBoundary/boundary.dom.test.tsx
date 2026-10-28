@@ -31,6 +31,7 @@ vi.mock("../../hooks/useMessages", () => ({
   useMessages: () => ({ t: (key: string) => key }),
 }));
 vi.mock("@umijs/max", () => ({
+  useAntdConfigSetter: () => () => {},
   Link: () => null,
   useLocation: vi.fn(),
   useNavigate: vi.fn(),

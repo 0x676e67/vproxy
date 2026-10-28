@@ -30,18 +30,25 @@ pub(in crate::manage) struct RemoteError {
     pub(in crate::manage) code: &'static str,
 }
 
-/// Transport I/O is not an authenticated application rejection. Windows may
-/// report WSAEACCES for a closed connection; its original io::ErrorKind must
-/// not silently become a permanent node authorization denial. Stage labels
-/// contain no address, certificate, remote text or operating-system detail.
+/// Transport I/O is not an authenticated application rejection. Observed
+/// Windows connect failures carry PermissionDenied without proving an owner
+/// rejection. Retain the native code for diagnosis, but not arbitrary library
+/// messages that may contain addresses, certificates, headers or body values.
 #[derive(Debug, thiserror::Error)]
 #[error("node control transport failed ({stage})")]
 pub(in crate::manage) struct TransportError {
     stage: &'static str,
+    os_error: Option<i32>,
 }
 
 fn transport(error: io::Error, stage: &'static str) -> io::Error {
-    io::Error::new(error.kind(), TransportError { stage })
+    let kind = error.kind();
+    let failure = TransportError {
+        stage,
+        os_error: error.raw_os_error(),
+    };
+    tracing::debug!(stage, ?kind, os_error = ?failure.os_error, "node control transport failed");
+    io::Error::new(kind, failure)
 }
 
 /// Perform one fixed operation against a locally registered canonical origin.
@@ -1436,6 +1443,29 @@ mod tests {
                 .is_some_and(|error| !error.is::<RemoteError>())
         );
         assert!(!error.to_string().contains("operating-system detail"));
+        assert!(!format!("{error:?}").contains("operating-system detail"));
+        let detail = error
+            .get_ref()
+            .and_then(|error| error.downcast_ref::<TransportError>())
+            .unwrap();
+        assert_eq!(detail.stage, "connect");
+        assert_eq!(detail.os_error, None);
+
+        // A synthetic native code proves preservation on every platform; it
+        // does not claim to reproduce a Windows socket failure on this host.
+        let native = io::Error::from_raw_os_error(10013);
+        let original_kind = native.kind();
+        let error = transport(native, "connect");
+        assert_eq!(error.kind(), original_kind);
+        assert_eq!(error.raw_os_error(), None);
+        let detail = error
+            .get_ref()
+            .and_then(|error| error.downcast_ref::<TransportError>())
+            .unwrap();
+        assert_eq!(detail.os_error, Some(10013));
+        assert!(format!("{error:?}").contains("10013"));
+        assert_eq!(error.to_string(), "node control transport failed (connect)");
+
         let error = remote_error(
             StatusCode::FORBIDDEN,
             br#"{"error":{"code":"peer_not_authorized"}}"#,

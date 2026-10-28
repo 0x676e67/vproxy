@@ -1,14 +1,6 @@
-import {
-  Button,
-  Drawer,
-  Empty,
-  Space,
-  Table,
-  Tag,
-  Typography,
-  Alert,
-} from "antd";
+import { Button, Drawer, Empty, Space, Tag, Typography, Alert } from "antd";
 import type { ColumnsType } from "antd/es/table";
+import Table from "../../components/DataTable";
 import {
   useCallback,
   useEffect,

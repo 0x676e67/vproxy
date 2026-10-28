@@ -7,6 +7,9 @@ import {
   alertEventPage,
   alertEventQuery,
   alertSummary,
+  unreadAlertPage,
+  alertAcknowledgementBatch,
+  alertAcknowledgementResult,
 } from "./alertEvents";
 import {
   eventFixture,
@@ -19,6 +22,77 @@ import {
 } from "./alertEvents.fixtures";
 import { endpointStatus } from "./proxy";
 describe("durable local events and acknowledgement assertions", () => {
+  it("validates inbox watermarks, unread projections and exact batch identities without numeric rounding", () => {
+    const value = {
+      node_id: EVENT_NODE,
+      items: [episodeFixture()],
+      next_cursor: null,
+      through_sequence: "1",
+    };
+    expect(unreadAlertPage(value, EVENT_NODE, {}).items).toHaveLength(1);
+    expect(endpointStatus("/alert-episodes", "GET")).toBe(200);
+    expect(endpointStatus("/alert-episodes?before=2&through=3", "GET")).toBe(
+      200,
+    );
+    expect(endpointStatus("/alert-episodes/acknowledge", "POST")).toBe(200);
+    for (const path of [
+      "/alert-episodes?through=01",
+      "/alert-episodes?through=1&through=2",
+      "/alert-episodes?limit=50",
+      "/alert-episodes?before=0",
+    ]) {
+      expect(() => endpointStatus(path, "GET")).toThrow(ApiError);
+    }
+    expect(() => endpointStatus("/alert-episodes/acknowledge", "GET")).toThrow(
+      ApiError,
+    );
+    for (const patch of [
+      { through_sequence: "0" },
+      { items: [episodeFixture(true)] },
+      { node_id: EVENT_OTHER },
+      { next_cursor: "1" },
+      { through_sequence: "9223372036854775808" },
+    ]) {
+      expect(() =>
+        unreadAlertPage({ ...value, ...patch }, EVENT_NODE, {}),
+      ).toThrow(ApiError);
+    }
+    expect(() => unreadAlertPage(value, EVENT_NODE, { through: "2" })).toThrow(
+      ApiError,
+    );
+    const input = {
+      expected_node_id: EVENT_NODE,
+      items: [{ episode_id: "1", expected_transition_sequence: "1" }],
+    };
+    expect(alertAcknowledgementBatch(input)).toEqual(input);
+    expect(() =>
+      alertAcknowledgementBatch({
+        ...input,
+        items: [...input.items, ...input.items],
+      }),
+    ).toThrow(ApiError);
+    expect(() => alertAcknowledgementBatch({ ...input, items: [] })).toThrow(
+      ApiError,
+    );
+    expect(
+      alertAcknowledgementResult(
+        { node_id: EVENT_NODE, items: [episodeFixture(true)] },
+        input,
+      ),
+    ).toHaveLength(1);
+    expect(() =>
+      alertAcknowledgementResult(
+        { node_id: EVENT_NODE, items: [episodeFixture()] },
+        input,
+      ),
+    ).toThrow(ApiError);
+    expect(() =>
+      alertAcknowledgementResult(
+        { node_id: EVENT_OTHER, items: [episodeFixture(true)] },
+        input,
+      ),
+    ).toThrow(ApiError);
+  });
   it("requires exact immutable event fields and distinguishes u64 incident/evidence/time from i64 identities", () => {
     const value = eventFixture();
     expect(

@@ -4,7 +4,8 @@ export default {
   "menu.traffic": "Traffic",
   "traffic.title": "Traffic accounting",
   "traffic.description":
-    "Accepted proxy payload by node, user, credential or actually selected pool. Read-only manual snapshots, not live bandwidth or a billing ledger.",
+    "Manual proxy payload snapshots, not live bandwidth or billing.",
+  "traffic.about": "How traffic is counted",
   "traffic.open": "Traffic",
   "traffic.source": "Source node",
   "traffic.dimension": "Accounting entity",

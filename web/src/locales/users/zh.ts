@@ -78,7 +78,7 @@ export default {
   "users.historyReservedHint":
     "已分配编号，尚无执行结果。查询不会执行此操作；请先核对当前状态。",
   "menu.users": "代理用户",
-  "users.title": "代理访问管理",
+  "users.title": "代理用户",
   "users.description":
     "管理所选节点的代理用户和机器凭证。管理员账号、代理用户与节点 mTLS 身份相互独立。",
   "users.policy": "策略详情",

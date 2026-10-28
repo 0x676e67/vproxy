@@ -27,6 +27,7 @@ function Login() {
     <ProCard variant="outlined" className="management-login">
       <LoginForm<LoginValues>
         form={form}
+        contentStyle={{ width: "100%" }}
         title="vproxy"
         subTitle={t("auth.description")}
         submitter={{

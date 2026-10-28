@@ -13,6 +13,10 @@ vi.mock("@umijs/max", async () => {
   const dom = await import("react-router-dom");
   return {
     Link: dom.Link,
+    useIntl: () => ({
+      formatMessage: ({ defaultMessage }: { defaultMessage?: string }) =>
+        defaultMessage,
+    }),
     useLocation: vi.fn(router.useLocation),
     useNavigate: vi.fn(router.useNavigate),
   };

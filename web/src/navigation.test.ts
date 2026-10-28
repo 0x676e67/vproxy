@@ -202,7 +202,9 @@ describe("fixed internal navigation boundary", () => {
       "pages/Users/index.tsx",
     ]);
     expect(projectLinks).toBe(1);
-    expect(links).toBe(33);
+    // The inbox adds three reviewed history links and replaces its old bell
+    // link with a native dialog button: net two additional canonical links.
+    expect(links).toBe(35);
   });
 
   it("rejects URL and pattern input before canonical identifiers reach navigation", () => {

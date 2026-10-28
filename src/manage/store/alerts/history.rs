@@ -50,6 +50,7 @@ pub(in crate::manage) const MAX_EVENTS: usize = 16_384;
 const MAX_BATCH: usize = MAX_ACTIVE * 2;
 const MAX_PAYLOAD: usize = 1_024;
 const MAX_PAGE: u32 = 50;
+pub(in crate::manage) const MAX_ACK_BATCH: usize = 32;
 
 /// A fixed event vocabulary, not a user-supplied message or remediation command.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -215,6 +216,18 @@ pub(in crate::manage) struct Ack {
     pub(in crate::manage) expected_node_id: String,
     pub(in crate::manage) episode_id: u64,
     pub(in crate::manage) expected_transition_sequence: u64,
+}
+
+/// Exclusive episode-ID pages stay bounded by the transition watermark seen
+/// when the inbox opened. Later transitions remain unread, even while paging.
+pub(in crate::manage) struct UnreadQuery {
+    pub(in crate::manage) before: Option<u64>,
+    pub(in crate::manage) through: Option<u64>,
+}
+pub(in crate::manage) struct UnreadPage {
+    pub(in crate::manage) items: Vec<Episode>,
+    pub(in crate::manage) next_cursor: Option<u64>,
+    pub(in crate::manage) through_sequence: u64,
 }
 
 /// Fixed failures contain no paths, SQL, producer messages or credentials.
@@ -1270,6 +1283,22 @@ fn acknowledge_in_with(
     input: &Ack,
     mut checkpoints: Option<&mut dyn Checkpoints>,
 ) -> io::Result<(Episode, bool)> {
+    let result = acknowledge_transition(tx, administrator_id, input)?;
+    if result.1 {
+        let mut s = state(tx)?;
+        trim_with(tx, &mut s, &mut checkpoints)?;
+        s.save(tx)?;
+    }
+    Ok(result)
+}
+
+// Batches share one retention/checkpoint pass, rather than rescanning the full
+// active catalog for each of their at most 32 transitions.
+fn acknowledge_transition(
+    tx: &Connection,
+    administrator_id: &str,
+    input: &Ack,
+) -> io::Result<(Episode, bool)> {
     require_transaction(tx)?;
     let node = require(tx)?;
     administrator(tx, administrator_id)?;
@@ -1318,7 +1347,6 @@ fn acknowledge_in_with(
     episode.is_acknowledged = true;
     save_event(tx, &event)?;
     save_episode(tx, &episode)?;
-    trim_with(tx, &mut s, &mut checkpoints)?;
     s.save(tx)?;
     Ok((episode, true))
 }
@@ -1345,6 +1373,61 @@ fn validate_ack(input: &Ack) -> io::Result<()> {
         return Err(Error::Invalid.error());
     }
     Ok(())
+}
+
+fn validate_ack_batch(inputs: &[Ack]) -> io::Result<()> {
+    if inputs.is_empty() || inputs.len() > MAX_ACK_BATCH {
+        return Err(Error::Invalid.error());
+    }
+    let mut ids = HashSet::with_capacity(inputs.len());
+    for input in inputs {
+        validate_ack(input)?;
+        if !ids.insert(input.episode_id) {
+            return Err(Error::Invalid.error());
+        }
+    }
+    Ok(())
+}
+
+/// A small explicit set of original transitions commits atomically. A changed
+/// row rejects the entire batch; duplicate confirmed transitions stay read-only.
+fn acknowledge_batch(
+    directory: &Path,
+    gate: &UpdateGuard,
+    administrator_id: &str,
+    inputs: &[Ack],
+) -> io::Result<Vec<Episode>> {
+    validate_ack_batch(inputs)?;
+    gate.ensure(directory)?;
+    let mut connection = open_existing(directory, true)?;
+    let tx = connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(|e| sql_error("cannot begin alert acknowledgement batch", e))?;
+    let values = acknowledge_batch_in(&tx, administrator_id, inputs, None)?;
+    tx.commit()
+        .map_err(|e| sql_error("cannot commit alert acknowledgement batch", e))?;
+    Ok(values)
+}
+
+fn acknowledge_batch_in(
+    tx: &Connection,
+    actor: &str,
+    inputs: &[Ack],
+    mut checkpoints: Option<&mut dyn Checkpoints>,
+) -> io::Result<Vec<Episode>> {
+    let mut values = Vec::with_capacity(inputs.len());
+    let mut changed = false;
+    for input in inputs {
+        let (value, wrote) = acknowledge_transition(tx, actor, input)?;
+        changed |= wrote;
+        values.push(value);
+    }
+    if changed {
+        let mut s = state(tx)?;
+        trim_with(tx, &mut s, &mut checkpoints)?;
+        s.save(tx)?;
+    }
+    Ok(values)
 }
 
 fn read<T>(
@@ -1429,6 +1512,74 @@ pub(in crate::manage) fn episode(
             return Err(corrupt());
         }
         Ok(e)
+    })
+}
+
+/// Return only unread retained episode projections, never a fabricated health
+/// result. An authenticated snapshot verifies every payload and keeps newer
+/// transitions outside the original inbox watermark.
+pub(in crate::manage) fn unread(
+    directory: &Path,
+    administrator_id: &str,
+    query: &UnreadQuery,
+) -> io::Result<UnreadPage> {
+    if query.before.is_some_and(|value| !positive(value))
+        || query.through.is_some_and(|value| value > i64::MAX as u64)
+    {
+        return Err(Error::Invalid.error());
+    }
+    read(directory, administrator_id, |connection, node| {
+        let s = state(connection)?;
+        let through = query.through.unwrap_or(s.last);
+        if through > s.last {
+            return Err(Error::Conflict.error());
+        }
+        let mut statement = connection
+            .prepare(&format!(
+                "SELECT {EPISODE_COLUMNS} FROM alert_episodes \
+             WHERE (ack_sequence IS NULL OR ack_sequence<>transition_sequence) \
+             AND (?1 IS NULL OR id<?1) AND transition_sequence<=?2 \
+             ORDER BY id DESC LIMIT ?3"
+            ))
+            .map_err(|e| sql_error("cannot prepare unread alert episodes", e))?;
+        let rows = statement
+            .query_map(
+                params![
+                    query.before.map(sql).transpose()?,
+                    sql(through)?,
+                    (MAX_ACK_BATCH + 1) as i64
+                ],
+                episode_row,
+            )
+            .map_err(|e| sql_error("cannot read unread alert episodes", e))?;
+        let mut items = Vec::with_capacity(MAX_ACK_BATCH + 1);
+        for row in rows {
+            let value = episode_value(
+                row.map_err(|e| sql_error("cannot decode unread alert episode", e))?,
+            )?;
+            if value.observer_node_id != node
+                || value.last_transition_sequence > through
+                || value.is_acknowledged
+                || value
+                    .acknowledgement
+                    .as_ref()
+                    .is_some_and(|ack| ack.event_sequence > s.last)
+            {
+                return Err(corrupt());
+            }
+            items.push(value);
+        }
+        let more = items.len() > MAX_ACK_BATCH;
+        items.truncate(MAX_ACK_BATCH);
+        Ok(UnreadPage {
+            next_cursor: if more {
+                items.last().map(|value| value.id)
+            } else {
+                None
+            },
+            items,
+            through_sequence: through,
+        })
     })
 }
 /// Immutable sequence pages use an exclusive before cursor. Missing or pruned
@@ -2344,6 +2495,150 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.directory);
         }
+    }
+
+    #[test]
+    fn unread_pages_and_bulk_acknowledgements_keep_a_finite_original_scope() -> io::Result<()> {
+        let f = Fixture::new()?;
+        f.start()?;
+        let mut batch = f.batch(1, TransitionKind::Opened, f.observation(1));
+        batch.transitions.clear();
+        for id in 1..=33 {
+            for kind in [TransitionKind::Opened, TransitionKind::Recovered] {
+                batch.transitions.push(Transition {
+                    kind,
+                    observation: f.observation(id),
+                    observed_at_unix_ms: Some(30),
+                    ended_reason: None,
+                });
+            }
+        }
+        f.record(&batch)?;
+        let first = unread(
+            &f.directory,
+            &f.administrator,
+            &UnreadQuery {
+                before: None,
+                through: None,
+            },
+        )?;
+        assert_eq!(first.items.len(), MAX_ACK_BATCH);
+        assert_eq!(first.items[0].id, 65);
+        assert_eq!(first.next_cursor, Some(3));
+        assert_eq!(first.through_sequence, 66);
+        f.record(&f.batch(2, TransitionKind::Opened, f.observation(34)))?;
+        let inputs: Vec<_> = first
+            .items
+            .iter()
+            .map(|value| Ack {
+                expected_node_id: f.node.clone(),
+                episode_id: value.id,
+                expected_transition_sequence: value.last_transition_sequence,
+            })
+            .collect();
+        let values = acknowledge_batch(
+            &f.directory,
+            &update_lock(&f.directory)?,
+            &f.administrator,
+            &inputs,
+        )?;
+        assert_eq!(values.len(), 32);
+        assert!(
+            values
+                .iter()
+                .all(|value| value.is_acknowledged && value.status == Status::Recovered)
+        );
+        let before = summary(&f.directory, &f.administrator)?;
+        acknowledge_batch(
+            &f.directory,
+            &update_lock(&f.directory)?,
+            &f.administrator,
+            &inputs,
+        )?;
+        assert_eq!(
+            summary(&f.directory, &f.administrator)?.last_event_sequence,
+            before.last_event_sequence
+        );
+        let older = unread(
+            &f.directory,
+            &f.administrator,
+            &UnreadQuery {
+                before: first.next_cursor,
+                through: Some(66),
+            },
+        )?;
+        assert_eq!(older.items.len(), 1);
+        assert_eq!(older.items[0].id, 1);
+        assert!(older.next_cursor.is_none());
+        let fresh = unread(
+            &f.directory,
+            &f.administrator,
+            &UnreadQuery {
+                before: None,
+                through: None,
+            },
+        )?;
+        assert_eq!(
+            fresh.items.iter().map(|value| value.id).collect::<Vec<_>>(),
+            [67, 1]
+        );
+        validate_snapshot(&f.connection()?)?;
+        Ok(())
+    }
+
+    #[cfg(feature = "witness-journal")]
+    #[test]
+    fn source_ack_batch_keeps_partial_changes_inside_the_held_transaction() -> io::Result<()> {
+        struct Budget;
+        impl Checkpoints for Budget {
+            fn checkpoint(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+        let f = Fixture::new()?;
+        f.start()?;
+        f.record(&f.batch(1, TransitionKind::Opened, f.observation(1)))?;
+        let input = |id| Ack {
+            expected_node_id: f.node.clone(),
+            episode_id: id,
+            expected_transition_sequence: id,
+        };
+        let mut connection = f.connection()?;
+        {
+            let tx = connection
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .map_err(io::Error::other)?;
+            let mut budget = Budget;
+            let failed = Writer::Source {
+                tx: &tx,
+                checkpoints: &mut budget,
+            }
+            .acknowledge_batch(&f.administrator, &[input(1), input(99)]);
+            assert_eq!(failed.unwrap_err().kind(), io::ErrorKind::NotFound);
+            // The Source coordinator discards this entire held transaction on
+            // failure, rather than confirming a partial acknowledgement intent.
+        }
+        assert!(!f.episode(1)?.is_acknowledged);
+        assert_eq!(
+            summary(&f.directory, &f.administrator)?.last_event_sequence,
+            1
+        );
+        {
+            let tx = connection
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .map_err(io::Error::other)?;
+            let mut budget = Budget;
+            let values = Writer::Source {
+                tx: &tx,
+                checkpoints: &mut budget,
+            }
+            .acknowledge_batch(&f.administrator, &[input(1)])?;
+            assert!(values[0].is_acknowledged);
+            tx.commit().map_err(io::Error::other)?;
+        }
+        assert_eq!(f.episode(1)?.status, Status::Active);
+        validate_snapshot(&connection)?;
+        Ok(())
     }
 
     #[test]

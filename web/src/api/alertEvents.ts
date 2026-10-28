@@ -77,6 +77,20 @@ export interface AlertAcknowledgementInput {
   expected_node_id: string;
   expected_transition_sequence: string;
 }
+export interface UnreadAlertOptions {
+  before?: string;
+  through?: string;
+}
+export interface UnreadAlertPage {
+  node_id: string;
+  items: AlertEpisode[];
+  next_cursor: string | null;
+  through_sequence: string;
+}
+export interface AlertAcknowledgementBatch {
+  expected_node_id: string;
+  items: { episode_id: string; expected_transition_sequence: string }[];
+}
 const invalid = (): never => {
   throw new ApiError("format");
 };
@@ -333,4 +347,129 @@ export function alertAcknowledgementInput(
   )
     return invalid();
   return { ...value };
+}
+
+/** The inbox only returns unread retained projections up to one fixed fence. */
+export function unreadAlertQuery(options: UnreadAlertOptions): string {
+  const query = new URLSearchParams();
+  if (options.before !== undefined) {
+    if (!canonicalRevision(options.before)) return invalid();
+    query.set("before", options.before);
+  }
+  if (options.through !== undefined) {
+    if (
+      !alertDecimal(options.through) ||
+      BigInt(options.through) > 9_223_372_036_854_775_807n
+    )
+      return invalid();
+    query.set("through", options.through);
+  }
+  return query.size ? `?${query}` : "";
+}
+export function unreadAlertPage(
+  value: unknown,
+  node: string,
+  options: UnreadAlertOptions,
+): UnreadAlertPage {
+  unreadAlertQuery(options);
+  shape(value, ["node_id", "items", "next_cursor", "through_sequence"]);
+  if (
+    !canonicalId(node) ||
+    value.node_id !== node ||
+    !Array.isArray(value.items) ||
+    value.items.length > 32 ||
+    !nullableRevision(value.next_cursor) ||
+    !alertDecimal(value.through_sequence) ||
+    BigInt(value.through_sequence) > 9_223_372_036_854_775_807n ||
+    (options.through !== undefined &&
+      value.through_sequence !== options.through)
+  )
+    return invalid();
+  const items = value.items.map((item) => {
+    if (
+      typeof item !== "object" ||
+      item === null ||
+      !canonicalRevision(item.id)
+    )
+      return invalid();
+    return alertEpisode(item, node, item.id);
+  });
+  if (
+    items.some(
+      (item, index) =>
+        item.is_acknowledged ||
+        BigInt(item.latest_transition_sequence) >
+          BigInt(value.through_sequence as string) ||
+        (options.before !== undefined &&
+          BigInt(item.id) >= BigInt(options.before)) ||
+        (index > 0 && BigInt(item.id) >= BigInt(items[index - 1].id)),
+    ) ||
+    (value.next_cursor !== null &&
+      (items.length !== 32 || value.next_cursor !== items.at(-1)?.id))
+  )
+    return invalid();
+  return {
+    node_id: node,
+    items,
+    next_cursor: value.next_cursor,
+    through_sequence: value.through_sequence,
+  };
+}
+export function alertAcknowledgementBatch(
+  value: AlertAcknowledgementBatch,
+): AlertAcknowledgementBatch {
+  shape(value, ["expected_node_id", "items"]);
+  if (
+    !canonicalId(value.expected_node_id) ||
+    !Array.isArray(value.items) ||
+    !value.items.length ||
+    value.items.length > 32
+  )
+    return invalid();
+  const seen = new Set<string>();
+  const items = value.items.map((item) => {
+    shape(item, ["episode_id", "expected_transition_sequence"]);
+    alertAcknowledgementInput({
+      expected_node_id: value.expected_node_id,
+      expected_transition_sequence: item.expected_transition_sequence,
+    });
+    if (
+      !canonicalRevision(item.episode_id) ||
+      seen.has(item.episode_id) ||
+      BigInt(item.episode_id) > BigInt(item.expected_transition_sequence)
+    )
+      return invalid();
+    seen.add(item.episode_id);
+    return { ...item };
+  });
+  return { expected_node_id: value.expected_node_id, items };
+}
+export function alertAcknowledgementResult(
+  value: unknown,
+  input: AlertAcknowledgementBatch,
+): AlertEpisode[] {
+  shape(value, ["node_id", "items"]);
+  if (
+    value.node_id !== input.expected_node_id ||
+    !Array.isArray(value.items) ||
+    value.items.length !== input.items.length
+  )
+    return invalid();
+  return value.items.map((item, index) => {
+    const intent = input.items[index];
+    const result = alertEpisode(
+      item,
+      input.expected_node_id,
+      intent.episode_id,
+    );
+    if (
+      !result.is_acknowledged ||
+      result.latest_transition_sequence !==
+        intent.expected_transition_sequence ||
+      result.acknowledged_transition_sequence !==
+        intent.expected_transition_sequence
+    )
+      return invalid();
+    return result;
+  });
 }

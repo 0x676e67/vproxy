@@ -1,11 +1,16 @@
 import { BellOutlined } from "@ant-design/icons";
-import { Link } from "@umijs/max";
-import { Badge } from "antd";
-import { useEffect, useState, useSyncExternalStore } from "react";
+import { Badge, Button, Drawer } from "antd";
+import {
+  lazy,
+  Suspense,
+  useEffect,
+  useState,
+  useSyncExternalStore,
+} from "react";
 import type { AlertSummary } from "../../api/alertEvents";
 import { useManagement } from "../../auth/context";
 import { useMessages } from "../../hooks/useMessages";
-import { alertHistoryHref } from "../../routing/scope";
+const UnreadNotifications = lazy(() => import("./UnreadNotifications"));
 
 export const ALERT_SUMMARY_POLL_MS = 30_000;
 /** One visible, controller-local summary poller. Failures are unknown counts,
@@ -15,6 +20,11 @@ export default function AlertInbox() {
     { t } = useMessages();
   const epoch = controller.generation(),
     session = state.session;
+  const [opened, setOpened] = useState<{
+    epoch: number;
+    session: typeof session;
+  } | null>(null);
+  const open = opened?.epoch === epoch && opened.session === session;
   const notes = useSyncExternalStore(
     controller.alertAcknowledgements.subscribe,
     controller.alertAcknowledgements.snapshot,
@@ -25,7 +35,8 @@ export default function AlertInbox() {
     summary: AlertSummary | null;
   } | null>(null);
   useEffect(() => {
-    if (!session || state.phase !== "authenticated" || state.busy) return;
+    if (!session || state.phase !== "authenticated" || state.busy || open)
+      return;
     let disposed = false,
       pending: AbortController | null = null,
       timer: ReturnType<typeof setTimeout> | undefined;
@@ -77,7 +88,7 @@ export default function AlertInbox() {
       stop();
       document.removeEventListener("visibilitychange", visibility);
     };
-  }, [controller, epoch, session, state.phase, state.busy, notes]);
+  }, [controller, epoch, session, state.phase, state.busy, notes, open]);
   if (!session || state.phase !== "authenticated") return null;
   const summary =
     view?.epoch === epoch && view.session === session && !state.busy
@@ -87,20 +98,43 @@ export default function AlertInbox() {
     ? t("alertEvents.badge", { count: summary.unacknowledged_count })
     : t("alertEvents.badgeUnknown");
   return (
-    <Link
-      to={alertHistoryHref()}
-      className="management-header-action"
-      aria-label={label}
-      title={`${label}. ${t("alertEvents.badgeHint")}`}
-    >
-      <Badge
-        count={summary ? summary.unacknowledged_count : "?"}
-        overflowCount={99}
+    <>
+      <Button
+        type="text"
+        className="management-header-action"
+        aria-label={label}
+        aria-haspopup="dialog"
+        aria-expanded={open}
+        disabled={state.busy}
+        onClick={() => setOpened({ epoch, session })}
+        title={label}
       >
-        <span className="management-header-icon">
-          <BellOutlined aria-hidden />
-        </span>
-      </Badge>
-    </Link>
+        <Badge
+          count={summary ? summary.unacknowledged_count : "?"}
+          overflowCount={99}
+        >
+          <span className="management-header-icon">
+            <BellOutlined aria-hidden />
+          </span>
+        </Badge>
+      </Button>
+      <Drawer
+        open={open}
+        onClose={() => setOpened(null)}
+        title={t("inbox.title")}
+        size={480}
+        classNames={{ body: "notification-inbox-body" }}
+        destroyOnHidden
+      >
+        {open && (
+          <Suspense fallback={<div role="status">{t("auth.checking")}</div>}>
+            <UnreadNotifications
+              key={epoch}
+              onNavigate={() => setOpened(null)}
+            />
+          </Suspense>
+        )}
+      </Drawer>
+    </>
   );
 }

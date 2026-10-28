@@ -1,4 +1,15 @@
 export default {
+  "inbox.title": "Notifications",
+  "inbox.unread": "Unread",
+  "inbox.markAll": "Mark all as read",
+  "inbox.readHint":
+    "Reading does not resolve alerts. New changes still notify you.",
+  "inbox.empty": "No unread notifications",
+  "inbox.progress": "Marked {count} as read",
+  "inbox.details": "View details",
+  "inbox.older": "Older unread notifications",
+  "inbox.history": "All event history",
+  "inbox.review": "Check original results",
   "alertEvents.title": "Event history",
   "alertEvents.conflict":
     "The episode state changed. Read it again before another acknowledgement.",

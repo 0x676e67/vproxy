@@ -449,13 +449,13 @@ describe("durable event history and original acknowledgement outcomes", () => {
       return jsonResponse(eventPageFixture());
     };
     mount("with-history");
-    await screen.findByRole("link", {
+    await screen.findByRole("button", {
       name: messages["alertEvents.badge"].replace("{count}", "1"),
     });
     await openEpisode();
     await acknowledge();
     await screen.findByText(messages["alertEvents.acknowledged"]);
-    const bell = await screen.findByRole("link", {
+    const bell = await screen.findByRole("button", {
       name: messages["alertEvents.badge"].replace("{count}", "0"),
     });
     expect(bell.querySelector(".ant-badge-count")).toBeNull();
@@ -473,12 +473,14 @@ describe("durable event history and original acknowledgement outcomes", () => {
         : jsonResponse({ error: { code: "policy_busy" } }, 503);
     mount(true);
     await act(async () => vi.advanceTimersByTimeAsync(0));
-    expect(screen.getByRole("link").getAttribute("aria-label")).toBe(
+    const bell = screen.getByRole("button", {
+      name: messages["alertEvents.badge"].replace("{count}", "1"),
+    });
+    expect(bell.getAttribute("aria-label")).toBe(
       messages["alertEvents.badge"].replace("{count}", "1"),
     );
-    expect(screen.getByRole("link").getAttribute("href")).toBe(
-      "/alerts?view=history",
-    );
+    expect(bell.getAttribute("aria-haspopup")).toBe("dialog");
+    expect(bell.getAttribute("aria-expanded")).toBe("false");
     await act(async () => {
       visibility = "hidden";
       document.dispatchEvent(new Event("visibilitychange"));
@@ -491,9 +493,152 @@ describe("durable event history and original acknowledgement outcomes", () => {
       await vi.advanceTimersByTimeAsync(0);
     });
     expect(
-      screen.getByRole("link", { name: messages["alertEvents.badgeUnknown"] }),
+      screen.getByRole("button", {
+        name: messages["alertEvents.badgeUnknown"],
+      }),
     ).toBeTruthy();
     expect(summaries).toBe(2);
     expect(posts()).toHaveLength(0);
+  });
+  it("opens unread records directly and marks the original multi-page set once without consuming new notifications", async () => {
+    const marked = new Set<string>();
+    let arrived = false;
+    const row = (id: number, acknowledged = false) => ({
+      ...episodeFixture(acknowledged),
+      id: String(id),
+      latest_transition_sequence: String(id),
+      acknowledged_transition_sequence: acknowledged ? String(id) : null,
+      acknowledgement_event_sequence: acknowledged ? String(id + 100) : null,
+    });
+    reply = async (path, method) => {
+      if (path === "/alert-summary")
+        return jsonResponse({
+          ...summaryFixture(),
+          retained_episode_count: 34,
+          unacknowledged_count: 33 - marked.size + Number(arrived),
+        });
+      if (path === "/alert-episodes/acknowledge" && method === "POST") {
+        const input = posts().at(-1)!.body as {
+          expected_node_id: string;
+          items: { episode_id: string }[];
+        };
+        input.items.forEach((item) => marked.add(item.episode_id));
+        arrived = true;
+        return jsonResponse({
+          node_id: EVENT_NODE,
+          items: input.items.map((item) => row(Number(item.episode_id), true)),
+        });
+      }
+      if (path.startsWith("/alert-episodes")) {
+        const query = new URL(path, "https://manager.example").searchParams;
+        const through = query.get("through") ?? (arrived ? "34" : "33");
+        const values = Array.from({ length: arrived ? 34 : 33 }, (_, i) =>
+          row(i + 1),
+        )
+          .filter(
+            (item) =>
+              !marked.has(item.id) &&
+              BigInt(item.id) <= BigInt(through) &&
+              (!query.has("before") ||
+                BigInt(item.id) < BigInt(query.get("before")!)),
+          )
+          .reverse();
+        return jsonResponse({
+          node_id: EVENT_NODE,
+          items: values.slice(0, 32),
+          through_sequence: through,
+          next_cursor: values.length > 32 ? values[31].id : null,
+        });
+      }
+      throw new Error("Unexpected fixture request");
+    };
+    mount(true);
+    fireEvent.click(
+      await screen.findByRole("button", {
+        name: messages["alertEvents.badge"].replace("{count}", "33"),
+      }),
+    );
+    const inbox = await screen.findByRole("dialog", {
+      name: messages["inbox.title"],
+    });
+    await within(inbox).findAllByRole("button", {
+      name: messages["alertEvents.ack"],
+    });
+    expect(posts()).toHaveLength(0);
+    fireEvent.click(
+      within(inbox).getByRole("button", { name: messages["inbox.markAll"] }),
+    );
+    await within(inbox).findByText(
+      messages["inbox.progress"].replace("{count}", "33"),
+    );
+    await waitFor(() =>
+      expect(
+        within(inbox).getAllByRole("button", {
+          name: messages["alertEvents.ack"],
+        }),
+      ).toHaveLength(1),
+    );
+    expect(
+      posts().map((item) => (item.body as { items: unknown[] }).items.length),
+    ).toEqual([32, 1]);
+    expect(marked.has("34")).toBe(false);
+    expect(
+      within(inbox).getByText(messages["alerts.status.active"]),
+    ).toBeTruthy();
+    expect(
+      requests.some(
+        (request) => request.path === "/alert-episodes?before=2&through=33",
+      ),
+    ).toBe(true);
+  });
+  it("retains unknown batch results on close and never resubmits when the inbox is reopened", async () => {
+    let finish!: (response: Response) => void;
+    let accepted = false;
+    reply = async (path, method) => {
+      if (path === "/alert-summary") return jsonResponse(summaryFixture());
+      if (path === "/alert-episodes/acknowledge" && method === "POST") {
+        accepted = true;
+        return new Promise((resolve) => {
+          finish = resolve;
+        });
+      }
+      return jsonResponse({
+        node_id: EVENT_NODE,
+        items: [episodeFixture()],
+        next_cursor: null,
+        through_sequence: "1",
+      });
+    };
+    mount(true);
+    const label = messages["alertEvents.badge"].replace("{count}", "1");
+    fireEvent.click(await screen.findByRole("button", { name: label }));
+    let inbox = await screen.findByRole("dialog", {
+      name: messages["inbox.title"],
+    });
+    await within(inbox).findByRole("button", {
+      name: messages["alertEvents.ack"],
+    });
+    fireEvent.click(
+      within(inbox).getByRole("button", { name: messages["inbox.markAll"] }),
+    );
+    await waitFor(() => expect(accepted).toBe(true));
+    fireEvent.click(within(inbox).getByRole("button", { name: "Close" }));
+    await act(async () =>
+      finish(
+        jsonResponse({ node_id: EVENT_NODE, items: [episodeFixture(true)] }),
+      ),
+    );
+    fireEvent.click(await screen.findByRole("button", { name: label }));
+    inbox = await screen.findByRole("dialog", {
+      name: messages["inbox.title"],
+    });
+    await within(inbox).findByText(messages["alertEvents.unknown"]);
+    expect(
+      within(inbox)
+        .getByRole("button", { name: messages["inbox.markAll"] })
+        .hasAttribute("disabled"),
+    ).toBe(true);
+    expect(posts()).toHaveLength(1);
+    expect(posts()[0].signal?.aborted).toBe(true);
   });
 });

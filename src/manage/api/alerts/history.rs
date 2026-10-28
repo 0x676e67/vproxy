@@ -14,6 +14,11 @@ pub(super) fn routes() -> Router<Arc<AppState>> {
     Router::new()
         .route("/api/v1/alert-events", get(list))
         .route("/api/v1/alert-events/{id}", get(event))
+        .route("/api/v1/alert-episodes", get(unread))
+        .route(
+            "/api/v1/alert-episodes/acknowledge",
+            post(acknowledge_batch),
+        )
         .route("/api/v1/alert-episodes/{id}", get(episode))
         .route("/api/v1/alert-episodes/{id}/acknowledge", post(acknowledge))
         .route("/api/v1/alert-summary", get(summary))
@@ -330,6 +335,107 @@ async fn summary(
     .into_response())
 }
 
+#[derive(Serialize)]
+struct UnreadPage {
+    node_id: String,
+    items: Vec<Episode>,
+    next_cursor: Option<String>,
+    through_sequence: String,
+}
+
+/// Inbox pages share an explicit transition watermark. Only retained unread
+/// episodes are returned; origins are facts, not a reason to contact a peer.
+async fn unread(
+    State(state): State<Arc<AppState>>,
+    Extension(users::Administrator(actor)): Extension<users::Administrator>,
+    uri: Uri,
+) -> Result<Response, ApiError> {
+    let raw = uri.query().unwrap_or_default();
+    if raw.len() > 256 {
+        return Err(invalid());
+    }
+    let mut query = storage::UnreadQuery {
+        before: None,
+        through: None,
+    };
+    for (key, value) in url::form_urlencoded::parse(raw.as_bytes()) {
+        match key.as_ref() {
+            "before" if query.before.is_none() => query.before = Some(id(&value)?),
+            "through" if query.through.is_none() => {
+                query.through = Some(if value == "0" { 0 } else { id(&value)? });
+            }
+            _ => return Err(invalid()),
+        }
+    }
+    let page = coordinator(&state)?
+        .read(move |directory| storage::unread(directory, &actor, &query))
+        .await
+        .map_err(storage_error)?;
+    Ok(Json(UnreadPage {
+        node_id: state.node.node_id.clone(),
+        items: page.items.into_iter().map(Episode::from).collect(),
+        next_cursor: decimal(page.next_cursor),
+        through_sequence: page.through_sequence.to_string(),
+    })
+    .into_response())
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BatchInput {
+    expected_node_id: String,
+    items: Vec<BatchItem>,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BatchItem {
+    episode_id: String,
+    expected_transition_sequence: String,
+}
+#[derive(Serialize)]
+struct BatchResult {
+    node_id: String,
+    items: Vec<Episode>,
+}
+
+/// At most 32 exact transitions per transaction. There is no server-side
+/// "whatever is current" acknowledgement, so concurrently arriving events are
+/// never marked read by an old inbox. Session/CSRF/Origin guards remain shared.
+async fn acknowledge_batch(
+    State(state): State<Arc<AppState>>,
+    Extension(users::Administrator(actor)): Extension<users::Administrator>,
+    request: Request,
+) -> Result<Response, ApiError> {
+    no_query(request.uri())?;
+    let input: BatchInput = json(request).await?;
+    if !store::valid_id(&input.expected_node_id)
+        || input.items.is_empty()
+        || input.items.len() > storage::MAX_ACK_BATCH
+    {
+        return Err(invalid());
+    }
+    let inputs = input
+        .items
+        .into_iter()
+        .map(|value| {
+            Ok(storage::Ack {
+                expected_node_id: input.expected_node_id.clone(),
+                episode_id: id(&value.episode_id)?,
+                expected_transition_sequence: id(&value.expected_transition_sequence)?,
+            })
+        })
+        .collect::<Result<Vec<_>, ApiError>>()?;
+    let values = coordinator(&state)?
+        .history_write(move |writer| writer.acknowledge_batch(&actor, &inputs))
+        .await
+        .map_err(storage_error)?;
+    Ok(Json(BatchResult {
+        node_id: state.node.node_id.clone(),
+        items: values.into_iter().map(Episode::from).collect(),
+    })
+    .into_response())
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Input {
@@ -447,6 +553,7 @@ mod tests {
         for path in [
             "/api/v1/alert-events",
             "/api/v1/alert-events/1",
+            "/api/v1/alert-episodes",
             "/api/v1/alert-episodes/1",
             "/api/v1/alert-summary",
         ] {
@@ -561,6 +668,155 @@ mod tests {
         assert!(page["items"][0].get("slot").is_none());
         assert!(page["items"][0].get("evidence_fresh").is_none());
         assert!(page["items"][0].get("status").is_none());
+    }
+
+    #[tokio::test]
+    async fn unread_inbox_batch_is_atomic_bounded_and_keeps_later_transitions_unread() {
+        let (_directory, mut state, cookie) = managed_state();
+        let (boot, mut observation) = seed(&mut state);
+        let list = "/api/v1/alert-episodes";
+        let path = "/api/v1/alert-episodes/acknowledge";
+        let first = body(
+            call(state.clone(), authorized(&cookie, Method::GET, list, "")).await,
+            StatusCode::OK,
+        )
+        .await;
+        assert_eq!(first["through_sequence"], "1");
+        assert_eq!(first["items"][0]["id"], "1");
+        assert_eq!(first["items"][0]["is_acknowledged"], false);
+        for query in [
+            "?before=0",
+            "?through=01",
+            "?through=1&%74hrough=1",
+            "?unknown=1",
+        ] {
+            assert_eq!(
+                call(
+                    state.clone(),
+                    authorized(&cookie, Method::GET, &format!("{list}{query}"), "")
+                )
+                .await
+                .status(),
+                StatusCode::BAD_REQUEST
+            );
+        }
+        let input = json!({"expected_node_id":state.node.node_id,"items":[{"episode_id":"1","expected_transition_sequence":"1"}]}).to_string();
+        let mut no_csrf = authorized(&cookie, Method::POST, path, &input);
+        no_csrf.headers_mut().remove("x-csrf-token");
+        assert_eq!(
+            call(state.clone(), no_csrf).await.status(),
+            StatusCode::FORBIDDEN
+        );
+        let partial = json!({"expected_node_id":state.node.node_id,"items":[
+            {"episode_id":"1","expected_transition_sequence":"1"},
+            {"episode_id":"99","expected_transition_sequence":"99"}
+        ]})
+        .to_string();
+        assert_eq!(
+            call(
+                state.clone(),
+                authorized(&cookie, Method::POST, path, &partial)
+            )
+            .await
+            .status(),
+            StatusCode::NOT_FOUND
+        );
+        let after = body(
+            call(state.clone(), authorized(&cookie, Method::GET, list, "")).await,
+            StatusCode::OK,
+        )
+        .await;
+        assert_eq!(
+            after, first,
+            "a later missing row must roll back the first acknowledgement"
+        );
+        for items in [
+            json!([]),
+            json!([
+                {"episode_id":"1","expected_transition_sequence":"1"},
+                {"episode_id":"1","expected_transition_sequence":"1"}
+            ]),
+            json!(vec![
+                json!({"episode_id":"1","expected_transition_sequence":"1"});
+                33
+            ]),
+        ] {
+            let invalid = json!({"expected_node_id":state.node.node_id,"items":items}).to_string();
+            assert_eq!(
+                call(
+                    state.clone(),
+                    authorized(&cookie, Method::POST, path, &invalid)
+                )
+                .await
+                .status(),
+                StatusCode::BAD_REQUEST
+            );
+        }
+        for _ in 0..2 {
+            let response = body(
+                call(
+                    state.clone(),
+                    authorized(&cookie, Method::POST, path, &input),
+                )
+                .await,
+                StatusCode::OK,
+            )
+            .await;
+            assert_eq!(response["items"][0]["is_acknowledged"], true);
+            assert_eq!(response["items"][0]["status"], "active");
+            assert_eq!(response["items"][0]["acknowledgement_event_sequence"], "2");
+        }
+        observation.code = "health_catalog_stale".into();
+        {
+            let gate = store::update_lock(&state.directory).unwrap();
+            storage::record(
+                &state.directory,
+                &gate,
+                &storage::Batch {
+                    boot_id: boot,
+                    sequence: 2,
+                    transitions: vec![storage::Transition {
+                        kind: storage::TransitionKind::ReasonChanged,
+                        observation,
+                        observed_at_unix_ms: None,
+                        ended_reason: None,
+                    }],
+                },
+            )
+            .unwrap();
+        }
+        let old = body(
+            call(
+                state.clone(),
+                authorized(&cookie, Method::GET, &format!("{list}?through=1"), ""),
+            )
+            .await,
+            StatusCode::OK,
+        )
+        .await;
+        assert_eq!(old["items"], json!([]));
+        let fresh = body(
+            call(state.clone(), authorized(&cookie, Method::GET, list, "")).await,
+            StatusCode::OK,
+        )
+        .await;
+        assert_eq!(fresh["items"][0]["latest_transition_sequence"], "3");
+        assert_eq!(fresh["items"][0]["is_acknowledged"], false);
+        assert_eq!(
+            call(
+                state.clone(),
+                authorized(&cookie, Method::POST, path, &input)
+            )
+            .await
+            .status(),
+            StatusCode::CONFLICT
+        );
+        let unchanged = body(
+            call(state, authorized(&cookie, Method::GET, list, "")).await,
+            StatusCode::OK,
+        )
+        .await;
+        assert_eq!(fresh, unchanged);
     }
 
     #[tokio::test]

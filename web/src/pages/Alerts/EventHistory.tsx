@@ -7,10 +7,10 @@ import {
   Input,
   Modal,
   Space,
-  Table,
   Typography,
 } from "antd";
 import type { ColumnsType } from "antd/es/table";
+import Table from "../../components/DataTable";
 import { Link } from "@umijs/max";
 import {
   useEffect,

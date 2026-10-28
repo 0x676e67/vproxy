@@ -50,7 +50,7 @@ export function AddressFinder({
     >
       <Space orientation="vertical" size={8} className="full-width">
         <label htmlFor={inputId}>{t("resources.lookupId")}</label>
-        <div className="management-filter-bar">
+        <div className="management-filter-bar management-address-search">
           <Input
             id={inputId}
             value={draft}
@@ -61,7 +61,6 @@ export function AddressFinder({
             aria-invalid={invalid}
             aria-describedby={invalid ? `${inputId}-error` : undefined}
             className="managed-identifier"
-            style={{ flex: "1 1 16rem", minWidth: 0 }}
             onChange={(event) => {
               setDraft(event.target.value);
               setInvalid(false);

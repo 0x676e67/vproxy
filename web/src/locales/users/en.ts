@@ -82,7 +82,7 @@ export default {
   "users.historyReservedHint":
     "An ID was reserved, but no execution result is available. Reading it will not execute the operation. Check the current state first.",
   "menu.users": "Proxy users",
-  "users.title": "Proxy access management",
+  "users.title": "Proxy users",
   "users.description":
     "Manage the selected node's proxy users and machine credentials. Administrator accounts and node mTLS identities are separate.",
   "users.policy": "Policy details",

@@ -637,34 +637,21 @@ function CurrentNodes() {
               className="node-card live-node-card"
               title={
                 <Space wrap>
-                  <Typography.Text className="node-title">
+                  <Typography.Title level={2} className="node-title">
                     {view.node.name}
-                  </Typography.Text>
+                  </Typography.Title>
                   <Tag color="blue">{t("node.local")}</Tag>
                 </Space>
               }
               variant="outlined"
+              extra={<Tag>{t("node.apiReadSuccess")}</Tag>}
             >
-              <Space orientation="vertical" className="full-width">
-                <Tag>{t("node.apiReadSuccess")}</Tag>
-                <FirstUse
-                  policy={view.policy}
-                  owner={owner}
-                  unavailable={disabled || !!error}
-                />
+              <Space orientation="vertical" size={16} className="full-width">
                 <Descriptions
-                  column={1}
+                  className="management-node-summary"
+                  layout="vertical"
+                  column={{ xs: 1, sm: 2, lg: 3 }}
                   items={[
-                    {
-                      key: "server-ip",
-                      label: t("control.serverIp"),
-                      children: t("control.serverIpUnregistered"),
-                    },
-                    {
-                      key: "egress-ip",
-                      label: t("control.egressIp"),
-                      children: t("control.egressUnknown"),
-                    },
                     {
                       key: "runtime",
                       label: t("users.proxyState"),
@@ -681,24 +668,17 @@ function CurrentNodes() {
                           )
                         : "—",
                     },
+                    {
+                      key: "server-ip",
+                      label: t("control.serverIp"),
+                      children: t("control.serverIpUnregistered"),
+                    },
+                    {
+                      key: "egress-ip",
+                      label: t("control.egressIp"),
+                      children: t("control.egressUnknown"),
+                    },
                   ]}
-                />
-                <Typography.Text type="secondary">
-                  {t("control.healthUnknown")}
-                </Typography.Text>
-                <CertificateStatus
-                  disabled={disabled}
-                  nodeId={view.node.node_id}
-                />
-                <MaintenanceStatus
-                  localNodeId={view.node.node_id}
-                  target={null}
-                  unavailable={busy || state.busy || view.loading || !!error}
-                />
-                <RuntimeStatus
-                  localNodeId={view.node.node_id}
-                  target={null}
-                  unavailable={busy || state.busy || view.loading || !!error}
                 />
                 <div className="management-node-actions">
                   <EndpointButton
@@ -712,52 +692,88 @@ function CurrentNodes() {
                     {t("traffic.open")}
                   </Link>
                 </div>
-                <Collapse
-                  ghost
-                  items={[
-                    {
-                      key: "details",
-                      label: t("control.nodeDetails"),
-                      children: (
-                        <Space orientation="vertical" className="full-width">
-                          <Typography.Text className="managed-identifier">
-                            {view.node.node_id}
-                          </Typography.Text>
-                          <Typography.Text type="secondary">
-                            v{view.node.version} · {view.node.os} /{" "}
-                            {view.node.arch}
-                          </Typography.Text>
-
-                          <Descriptions
-                            column={1}
-                            items={[
-                              {
-                                key: "saved",
-                                label: t("users.savedRevision"),
-                                children: view.policy?.saved_revision ?? "—",
-                              },
-                              {
-                                key: "applied",
-                                label: t("users.appliedRevision"),
-                                children: view.policy?.applied_revision ?? "—",
-                              },
-                            ]}
-                          />
-                          <CapabilityButton peer={null} disabled={disabled} />
-                        </Space>
-                      ),
-                    },
-                  ]}
+                <FirstUse
+                  policy={view.policy}
+                  owner={owner}
+                  unavailable={disabled || !!error}
                 />
+                <div className="management-node-tools">
+                  <CertificateStatus
+                    disabled={disabled}
+                    nodeId={view.node.node_id}
+                  />
+                  <MaintenanceStatus
+                    localNodeId={view.node.node_id}
+                    target={null}
+                    unavailable={busy || state.busy || view.loading || !!error}
+                  />
+                  <RuntimeStatus
+                    localNodeId={view.node.node_id}
+                    target={null}
+                    unavailable={busy || state.busy || view.loading || !!error}
+                  />
+                  <Collapse
+                    ghost
+                    items={[
+                      {
+                        key: "details",
+                        label: t("control.nodeDetails"),
+                        children: (
+                          <Space orientation="vertical" className="full-width">
+                            <Typography.Text type="secondary">
+                              {t("control.healthUnknown")}
+                            </Typography.Text>
+                            <Typography.Text className="managed-identifier">
+                              {view.node.node_id}
+                            </Typography.Text>
+                            <Typography.Text type="secondary">
+                              v{view.node.version} · {view.node.os} /{" "}
+                              {view.node.arch}
+                            </Typography.Text>
+
+                            <Descriptions
+                              column={1}
+                              items={[
+                                {
+                                  key: "saved",
+                                  label: t("users.savedRevision"),
+                                  children: view.policy?.saved_revision ?? "—",
+                                },
+                                {
+                                  key: "applied",
+                                  label: t("users.appliedRevision"),
+                                  children:
+                                    view.policy?.applied_revision ?? "—",
+                                },
+                              ]}
+                            />
+                            <CapabilityButton peer={null} disabled={disabled} />
+                          </Space>
+                        ),
+                      },
+                    ]}
+                  />
+                </div>
               </Space>
             </ProCard>
           )}
         </div>
-        <Alert
-          type="info"
-          showIcon
-          title={t("control.registryNotice")}
-          description={t("control.grantRequired")}
+        <Collapse
+          size="small"
+          items={[
+            {
+              key: "registration",
+              label: t("control.registrationHelp"),
+              children: (
+                <>
+                  <Typography.Paragraph>
+                    {t("control.registryNotice")}
+                  </Typography.Paragraph>
+                  {t("control.grantRequired")}
+                </>
+              ),
+            },
+          ]}
         />
         {view.targets && !view.targets.controller_available && (
           <Alert type="warning" showIcon title={t("control.tlsUnavailable")} />
@@ -833,6 +849,9 @@ function CurrentNodes() {
             },
           ]}
         />
+        <Typography.Title level={2} className="management-section-title">
+          {t("control.registeredNodes")}
+        </Typography.Title>
         <div className="node-filter-tools">
           <Input.Search
             className="node-filter"
@@ -903,9 +922,9 @@ function CurrentNodes() {
               key={target.node_id}
               className="node-card live-node-card"
               title={
-                <Typography.Text className="node-title">
+                <Typography.Title level={3} className="node-title">
                   {target.name}
-                </Typography.Text>
+                </Typography.Title>
               }
               variant="outlined"
               extra={
@@ -924,7 +943,9 @@ function CurrentNodes() {
             >
               <Space orientation="vertical" className="full-width">
                 <Descriptions
-                  column={1}
+                  className="management-node-summary"
+                  layout="vertical"
+                  column={{ xs: 1, sm: 2 }}
                   items={[
                     {
                       key: "server-ip",

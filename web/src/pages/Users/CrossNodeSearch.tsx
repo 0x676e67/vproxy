@@ -8,11 +8,11 @@ import {
   Modal,
   Select,
   Space,
-  Table,
   Tag,
   Typography,
 } from "antd";
 import { useEffect, useRef, useState } from "react";
+import Table from "../../components/DataTable";
 import {
   ApiError,
   apiError,

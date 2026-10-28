@@ -14,6 +14,16 @@ import alertEvents from "./alertEvents/zh";
 import notifications from "./notifications/zh";
 import service from "./service/zh";
 export default {
+  "theme.title": "主题",
+  "theme.current": "当前主题",
+  "theme.light": "浅色",
+  "theme.dark": "深色",
+  "layout.expandNavigation": "展开侧栏",
+  "layout.collapseNavigation": "收起侧栏",
+  "layout.openNavigation": "打开导航",
+  "layout.closeNavigation": "关闭导航",
+  "control.registeredNodes": "已登记节点",
+  "control.registrationHelp": "节点接入说明",
   ...service,
   ...users,
   ...control,

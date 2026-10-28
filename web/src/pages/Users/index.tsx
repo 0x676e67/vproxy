@@ -9,7 +9,6 @@ import {
   Modal,
   Result,
   Space,
-  Table,
   Tag,
   Typography,
 } from "antd";
@@ -37,6 +36,7 @@ import type {
 } from "../../api/targets";
 import { useManagement } from "../../auth/context";
 import ManagementGate from "../../components/ManagementGate";
+import Table from "../../components/DataTable";
 import { useMessages } from "../../hooks/useMessages";
 import type { MessageKey } from "../../hooks/useMessages";
 import Credentials, {
@@ -2040,11 +2040,7 @@ function Users({
     },
   ];
   return (
-    <PageContainer
-      className="management-page"
-      title={t("users.title")}
-      content={t("users.description")}
-    >
+    <PageContainer className="management-page" title={t("users.title")}>
       <section ref={usersRegion} tabIndex={-1} aria-label={t("users.title")}>
         <Space orientation="vertical" size={16} className="full-width">
           <ScopePicker
@@ -2159,13 +2155,9 @@ function Users({
             />
           )}
           {!selected && !form && !confirmation && workflowNotice}
-          <ProCard
-            title={t("users.proxyState")}
-            variant="outlined"
-            loading={view.loading && !view.policy}
-          >
+          <section aria-label={t("users.proxyState")} aria-busy={view.loading}>
             {view.policy ? (
-              <Space orientation="vertical" className="full-width">
+              <div className="management-policy-summary">
                 <Space wrap>
                   <Tag
                     color={
@@ -2202,6 +2194,9 @@ function Users({
                       label: t("users.policy"),
                       children: (
                         <>
+                          <Typography.Paragraph type="secondary">
+                            {t("users.description")}
+                          </Typography.Paragraph>
                           <Descriptions
                             column={{ xs: 1, sm: 2, lg: 3 }}
                             items={[
@@ -2241,15 +2236,13 @@ function Users({
                     },
                   ]}
                 />
-              </Space>
+              </div>
             ) : (
               <Typography.Text type="secondary">—</Typography.Text>
             )}
-          </ProCard>
-          <ProCard
-            title={t("users.list")}
-            variant="outlined"
-            extra={
+          </section>
+          <ProCard variant="outlined">
+            <div className="management-list-toolbar">
               <Space wrap>
                 <Checkbox
                   checked={includeDeleted}
@@ -2361,8 +2354,7 @@ function Users({
                   {t("users.crossOpen")}
                 </Button>
               </Space>
-            }
-          >
+            </div>
             {locateUserId &&
               !view.loading &&
               (view.page !== null || locationCancelled) && (
@@ -2391,12 +2383,6 @@ function Users({
                   />
                 </div>
               )}
-            <Alert
-              type="info"
-              showIcon
-              title={t("users.admissionHint")}
-              className="management-form-notice"
-            />
             <UserSearch
               value={search}
               resetToken={searchResetToken}
@@ -2442,6 +2428,12 @@ function Users({
                 ),
               }}
             />
+            <Typography.Paragraph
+              type="secondary"
+              className="management-admission-note"
+            >
+              {t("users.admissionHint")}
+            </Typography.Paragraph>
             <Space wrap>
               <Button
                 disabled={

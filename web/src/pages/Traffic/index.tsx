@@ -10,12 +10,12 @@ import {
   Result,
   Select,
   Space,
-  Table,
   Tag,
   Tooltip,
   Typography,
 } from "antd";
 import type { ColumnsType } from "antd/es/table";
+import Table from "../../components/DataTable";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { apiError, type ApiError } from "../../api/client";
 import { errorMessage } from "../../api/messages";
@@ -707,7 +707,16 @@ function Workspace({
             );
           }}
         />
-        <Alert type="info" showIcon title={t("traffic.definition")} />
+        <Collapse
+          size="small"
+          items={[
+            {
+              key: "definition",
+              label: t("traffic.about"),
+              children: t("traffic.definition"),
+            },
+          ]}
+        />
         <>
           <Typography.Text type="secondary">
             {t(peer === null ? "traffic.local" : "traffic.remoteHint")}

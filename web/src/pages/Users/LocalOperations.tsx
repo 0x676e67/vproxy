@@ -5,11 +5,11 @@ import {
   Drawer,
   Input,
   Space,
-  Table,
   Tag,
   Typography,
 } from "antd";
 import { useEffect, useRef, useState } from "react";
+import Table from "../../components/DataTable";
 import { ApiError, apiError, type ManagementClient } from "../../api/client";
 import { errorMessage } from "../../api/messages";
 import { canonicalId } from "../../api/proxy";

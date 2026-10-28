@@ -233,7 +233,7 @@ function refresh() {
 const mutations = () => requests.filter((request) => request.method !== "GET");
 
 describe("first-use guidance without provisioning side effects", () => {
-  it("opens the account, listener and connection steps without requests, and respects manual collapse", () => {
+  it("keeps guidance optional on a running node and respects manual disclosure without requests", () => {
     const view = render(
       <Shell>
         <FirstUse policy={policy()} owner={owner()} unavailable={false} />
@@ -241,6 +241,8 @@ describe("first-use guidance without provisioning side effects", () => {
     );
     const region = firstUse();
     const button = collapseButton(region, messages["setup.firstUse.title"]);
+    expect(button.getAttribute("aria-expanded")).toBe("false");
+    enter(button);
     expect(button.getAttribute("aria-expanded")).toBe("true");
     expect(
       within(region)
@@ -373,20 +375,24 @@ describe("first-use guidance without provisioning side effects", () => {
     const card = region.closest<HTMLElement>(".live-node-card")!;
     expect(card.parentElement?.className).toBe("node-local");
     for (const advanced of [
-      screen.getByText(messages["control.registryNotice"]),
+      screen.getByRole("button", {
+        name: messages["control.registrationHelp"],
+      }),
       screen.getByRole("searchbox", { name: messages["control.searchNodes"] }),
-      within(card).getByText(messages["control.serverIp"]),
     ]) {
       expect(
         region.compareDocumentPosition(advanced) &
           Node.DOCUMENT_POSITION_FOLLOWING,
       ).not.toBe(0);
     }
+    expect(
+      within(card)
+        .getByText(messages["control.serverIp"])
+        .compareDocumentPosition(region) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).not.toBe(0);
     const button = collapseButton(region, messages["setup.firstUse.title"]);
-    expect(button.getAttribute("aria-expanded")).toBe("true");
-    expect(button.tabIndex).toBe(0);
-    enter(button);
     expect(button.getAttribute("aria-expanded")).toBe("false");
+    expect(button.tabIndex).toBe(0);
     enter(button);
     expect(button.getAttribute("aria-expanded")).toBe("true");
     expect(
@@ -425,7 +431,7 @@ describe("first-use guidance without provisioning side effects", () => {
         : undefined;
     mountNodes();
     await nodesReady();
-    const guide = firstUse();
+    const guide = expand();
     const warning = screen.getByText(messages["control.locallyManaged"]);
     expect(
       warning.compareDocumentPosition(guide) & Node.DOCUMENT_POSITION_FOLLOWING,

@@ -1,11 +1,87 @@
 {
   "paths": {
+    "/api/v1/alert-episodes": {
+      "get": {
+        "operationId": "listUnreadAlertEpisodes",
+        "tags": ["Operations"],
+        "summary": "Read unread notifications at a fixed transition watermark",
+        "description": "Schema21, Session only. Returns up to32 unread local retained episode projections, descending by ID. Reuse through_sequence as through when paging so new transitions stay outside this action. Missing history never proves health. Reads never acknowledge or contact peers.",
+        "security": [{ "Session": [] }],
+        "x-vproxy-max-query-bytes": 256,
+        "x-vproxy-max-response-bytes": 131072,
+        "parameters": [
+          {
+            "in": "query",
+            "name": "before",
+            "schema": { "$ref": "#/components/schemas/Revision" }
+          },
+          {
+            "in": "query",
+            "name": "through",
+            "schema": { "$ref": "#/components/schemas/Counter" }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Unread retained records, not current health.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/AlertUnreadPage" }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/Error" },
+          "403": { "$ref": "#/components/responses/Error" },
+          "409": { "$ref": "#/components/responses/Error" },
+          "503": { "$ref": "#/components/responses/Error" },
+          "default": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/api/v1/alert-episodes/acknowledge": {
+      "post": {
+        "operationId": "acknowledgeAlertHistoryBatch",
+        "tags": ["Operations"],
+        "summary": "Mark a bounded set of original transitions as read",
+        "description": "Schema21, Session/CSRF/Origin, no query. At most32 unique episode IDs and their exact expected transition sequences commit in one transaction. A stale node or transition returns409 with no batch writes. Duplicate confirmed states are idempotent. Does not resolve alerts or acknowledge new transitions. A lost reply or5xx is unknown; retain every original intent and inspect each original episode, never automatically re-POST.",
+        "security": [{ "Session": [], "Csrf": [] }],
+        "x-vproxy-max-query-bytes": 0,
+        "x-vproxy-max-response-bytes": 131072,
+        "parameters": [{ "$ref": "#/components/parameters/Origin" }],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AlertAcknowledgementBatch"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Original projections in input order; health/status is unchanged.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AlertAcknowledgementBatchResult"
+                }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/Error" },
+          "403": { "$ref": "#/components/responses/Error" },
+          "404": { "$ref": "#/components/responses/Error" },
+          "409": { "$ref": "#/components/responses/Error" },
+          "503": { "$ref": "#/components/responses/Error" },
+          "default": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
     "/api/v1/alert-events": {
       "get": {
         "operationId": "listAlertHistoryEvents",
-        "tags": [
-          "Operations"
-        ],
+        "tags": ["Operations"],
         "summary": "Read retained local alert transitions",
         "description": "Schema 21, Session only. One local SQLite snapshot rechecks the administrator. No remote service, collection, repair, replay or authority restoration. Optional origin/episode filters affect rows only. Descending exclusive sequence pagination; decode query names before duplicate checks, bound encoded query to 1024 bytes. Neither restart nor retention establishes recovery; empty history does not prove health.",
         "security": [
@@ -120,9 +196,7 @@
       ],
       "get": {
         "operationId": "getAlertHistoryEvent",
-        "tags": [
-          "Operations"
-        ],
+        "tags": ["Operations"],
         "summary": "Read one exact retained event",
         "description": "Schema 21, Session only; no query, including empty query. Exact original sequence. Missing/pruned means unavailable, not never occurred or safe to repeat.",
         "security": [
@@ -203,9 +277,7 @@
       ],
       "get": {
         "operationId": "getAlertHistoryEpisode",
-        "tags": [
-          "Operations"
-        ],
+        "tags": ["Operations"],
         "summary": "Read the retained episode projection",
         "description": "Schema 21, Session only; no query, including empty query. Latest retained projection for this original episode, separate from live health. After a lost acknowledgement reply, this establishes only that a state was reviewed, not which particular request succeeded.",
         "security": [
@@ -286,9 +358,7 @@
       ],
       "post": {
         "operationId": "acknowledgeAlertHistoryEpisode",
-        "tags": [
-          "Operations"
-        ],
+        "tags": ["Operations"],
         "summary": "Record review of one exact incident transition",
         "description": "Schema 21, Session/CSRF/Origin only; no query. Administrator, expected local node, original episode and latest transition rechecked in one transaction. Does not change health/status/code. Same-state repeat returns original acknowledgement without appending or attributing another actor. Confirmed 409 alert_history_conflict means no write; re-read before a new explicit confirmation. Lost reply or 5xx is unknown: retain original identity and inspect original episode, never automatically re-POST or change expected_transition_sequence.",
         "security": [
@@ -384,9 +454,7 @@
     "/api/v1/alert-summary": {
       "get": {
         "operationId": "getAlertHistorySummary",
-        "tags": [
-          "Operations"
-        ],
+        "tags": ["Operations"],
         "summary": "Count retained unacknowledged states",
         "description": "Schema 21, Session only; no query, including empty query. One local retained snapshot, no remote query/probe. Counts include ended states still needing review and exclude pruned rows; they are not unresolved failure counts.",
         "security": [
@@ -455,12 +523,61 @@
     }
   },
   "schemas": {
+    "AlertUnreadPage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["node_id", "items", "next_cursor", "through_sequence"],
+      "properties": {
+        "node_id": { "$ref": "#/components/schemas/Id" },
+        "items": {
+          "type": "array",
+          "maxItems": 32,
+          "items": { "$ref": "#/components/schemas/AlertHistoryEpisode" }
+        },
+        "next_cursor": { "$ref": "#/components/schemas/NullableRevision" },
+        "through_sequence": { "$ref": "#/components/schemas/Counter" }
+      }
+    },
+    "AlertAcknowledgementBatch": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["expected_node_id", "items"],
+      "properties": {
+        "expected_node_id": { "$ref": "#/components/schemas/Id" },
+        "items": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 32,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["episode_id", "expected_transition_sequence"],
+            "properties": {
+              "episode_id": { "$ref": "#/components/schemas/Revision" },
+              "expected_transition_sequence": {
+                "$ref": "#/components/schemas/Revision"
+              }
+            }
+          }
+        }
+      }
+    },
+    "AlertAcknowledgementBatchResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["node_id", "items"],
+      "properties": {
+        "node_id": { "$ref": "#/components/schemas/Id" },
+        "items": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 32,
+          "items": { "$ref": "#/components/schemas/AlertHistoryEpisode" }
+        }
+      }
+    },
     "AlertHistoryEndReason": {
-      "enum": [
-        "source_unmonitored",
-        "monitor_restarted",
-        null
-      ],
+      "enum": ["source_unmonitored", "monitor_restarted", null],
       "description": "Source loss or observer restart, never a successful health result."
     },
     "AlertHistoryEvent": {
@@ -514,17 +631,10 @@
           "$ref": "#/components/schemas/NullableId"
         },
         "check": {
-          "enum": [
-            "bind",
-            "tcp",
-            null
-          ]
+          "enum": ["bind", "tcp", null]
         },
         "target": {
-          "type": [
-            "string",
-            "null"
-          ],
+          "type": ["string", "null"],
           "maxLength": 64
         },
         "code": {
@@ -606,10 +716,7 @@
           "then": {
             "properties": {
               "end_reason": {
-                "enum": [
-                  "source_unmonitored",
-                  "monitor_restarted"
-                ]
+                "enum": ["source_unmonitored", "monitor_restarted"]
               }
             }
           },
@@ -635,10 +742,7 @@
                 "$ref": "#/components/schemas/Id"
               },
               "check": {
-                "enum": [
-                  "bind",
-                  "tcp"
-                ]
+                "enum": ["bind", "tcp"]
               }
             },
             "allOf": [
@@ -683,11 +787,7 @@
           "if": {
             "properties": {
               "kind": {
-                "enum": [
-                  "management_https",
-                  "node_tls",
-                  "remote_observation"
-                ]
+                "enum": ["management_https", "node_tls", "remote_observation"]
               }
             }
           },
@@ -780,17 +880,10 @@
           "$ref": "#/components/schemas/NullableId"
         },
         "check": {
-          "enum": [
-            "bind",
-            "tcp",
-            null
-          ]
+          "enum": ["bind", "tcp", null]
         },
         "target": {
-          "type": [
-            "string",
-            "null"
-          ],
+          "type": ["string", "null"],
           "maxLength": 64
         },
         "code": {
@@ -846,10 +939,7 @@
           "then": {
             "properties": {
               "end_reason": {
-                "enum": [
-                  "source_unmonitored",
-                  "monitor_restarted"
-                ]
+                "enum": ["source_unmonitored", "monitor_restarted"]
               }
             }
           },
@@ -927,10 +1017,7 @@
                 "$ref": "#/components/schemas/Id"
               },
               "check": {
-                "enum": [
-                  "bind",
-                  "tcp"
-                ]
+                "enum": ["bind", "tcp"]
               }
             },
             "allOf": [
@@ -975,11 +1062,7 @@
           "if": {
             "properties": {
               "kind": {
-                "enum": [
-                  "management_https",
-                  "node_tls",
-                  "remote_observation"
-                ]
+                "enum": ["management_https", "node_tls", "remote_observation"]
               }
             }
           },
@@ -1097,10 +1180,7 @@
     "AlertHistoryAcknowledgementInput": {
       "type": "object",
       "additionalProperties": false,
-      "required": [
-        "expected_node_id",
-        "expected_transition_sequence"
-      ],
+      "required": ["expected_node_id", "expected_transition_sequence"],
       "properties": {
         "expected_node_id": {
           "$ref": "#/components/schemas/Id"

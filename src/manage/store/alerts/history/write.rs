@@ -80,4 +80,21 @@ impl Writer<'_> {
             }
         }
     }
+
+    /// Uses the same held transaction and checkpoint budget as one exact
+    /// acknowledgement; any error aborts the enclosing journal operation.
+    pub(in crate::manage) fn acknowledge_batch(
+        &mut self,
+        actor: &str,
+        inputs: &[Ack],
+    ) -> io::Result<Vec<Episode>> {
+        validate_ack_batch(inputs)?;
+        match self {
+            Self::Native(dir, gate) => super::acknowledge_batch(dir, gate, actor, inputs),
+            #[cfg(feature = "witness-journal")]
+            Self::Source { tx, checkpoints } => {
+                acknowledge_batch_in(tx, actor, inputs, Some(*checkpoints))
+            }
+        }
+    }
 }

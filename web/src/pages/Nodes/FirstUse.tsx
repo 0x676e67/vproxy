@@ -1,5 +1,5 @@
 import { Link } from "@umijs/max";
-import { Collapse, Descriptions, Space, Typography } from "antd";
+import { Collapse, Typography } from "antd";
 import type { PolicyStatus } from "../../api/proxy";
 import type { Owner } from "../../api/targets";
 import { useMessages } from "../../hooks/useMessages";
@@ -29,69 +29,51 @@ export default function FirstUse({
     <section aria-label={t("setup.firstUse.title")}>
       <Collapse
         size="small"
-        defaultActiveKey={["first-use"]}
+        defaultActiveKey={policy?.proxy_running ? [] : ["first-use"]}
         items={[
           {
             key: "first-use",
             label: t("setup.firstUse.title"),
             children: (
-              <Descriptions
-                column={1}
-                layout="vertical"
-                size="small"
-                items={[
-                  {
-                    key: "users",
-                    label: t("setup.firstUse.users"),
-                    children: (
-                      <Space
-                        orientation="vertical"
-                        size={8}
-                        className="full-width"
-                      >
-                        <Typography.Text>
-                          {t(
-                            unavailable || !owner
-                              ? "setup.firstUse.ownerUnknown"
-                              : owner.controller_node_id === null
-                                ? "setup.firstUse.userHint"
-                                : "setup.firstUse.delegated",
-                          )}
-                        </Typography.Text>
-                        <Link to="/users">
-                          {t("setup.firstUse.manageUsers")}
-                        </Link>
-                      </Space>
-                    ),
-                  },
-                  {
-                    key: "listener",
-                    label: t("setup.firstUse.listener"),
-                    children: (
-                      <Space
-                        orientation="vertical"
-                        size={8}
-                        className="full-width"
-                      >
-                        <Typography.Text>{t(runtime)}</Typography.Text>
-                        <Link to="/service">{t("service.title")}</Link>
-                        <Typography.Text type="secondary">
-                          {t("setup.firstUse.notTested")}
-                        </Typography.Text>
-                      </Space>
-                    ),
-                  },
-                  {
-                    key: "endpoints",
-                    label: t("setup.firstUse.endpoints"),
-                    children: t(
+              <ol className="management-first-use" role="list">
+                <li>
+                  <Typography.Text strong>
+                    {t("setup.firstUse.users")}
+                  </Typography.Text>
+                  <Typography.Paragraph type="secondary">
+                    {t(
+                      unavailable || !owner
+                        ? "setup.firstUse.ownerUnknown"
+                        : owner.controller_node_id === null
+                          ? "setup.firstUse.userHint"
+                          : "setup.firstUse.delegated",
+                    )}
+                  </Typography.Paragraph>
+                  <Link to="/users">{t("setup.firstUse.manageUsers")}</Link>
+                </li>
+                <li>
+                  <Typography.Text strong>
+                    {t("setup.firstUse.listener")}
+                  </Typography.Text>
+                  <Typography.Paragraph>{t(runtime)}</Typography.Paragraph>
+                  <Typography.Paragraph type="secondary">
+                    {t("setup.firstUse.notTested")}
+                  </Typography.Paragraph>
+                  <Link to="/service">{t("service.title")}</Link>
+                </li>
+                <li>
+                  <Typography.Text strong>
+                    {t("setup.firstUse.endpoints")}
+                  </Typography.Text>
+                  <Typography.Paragraph type="secondary">
+                    {t(
                       unavailable
                         ? "setup.firstUse.endpointUnavailable"
                         : "setup.firstUse.endpointHint",
-                    ),
-                  },
-                ]}
-              />
+                    )}
+                  </Typography.Paragraph>
+                </li>
+              </ol>
             ),
           },
         ]}

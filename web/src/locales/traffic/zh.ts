@@ -1,8 +1,8 @@
 export default {
   "menu.traffic": "流量统计",
   "traffic.title": "流量统计",
-  "traffic.description":
-    "按节点、用户、凭证或实际选中的池查看成功提交的代理有效载荷。只读手动快照，不是实时带宽或计费账单。",
+  "traffic.description": "代理载荷的手动快照，不是实时带宽或计费账单。",
+  "traffic.about": "统计口径",
   "traffic.open": "流量",
   "traffic.source": "来源节点",
   "traffic.dimension": "统计对象",

@@ -1216,8 +1216,16 @@ function Catalog({
         )}
       </Space>
       <ProTable<Resource>
+        className="management-data-table"
         rowKey="id"
-        columns={columns}
+        columns={columns.map((column) => ({
+          ...column,
+          onCell: (record, index) => ({
+            ...column.onCell?.(record, index),
+            "data-label":
+              typeof column.title === "string" ? column.title : undefined,
+          }),
+        }))}
         dataSource={view.page?.items ?? []}
         loading={view.loading || state.busy}
         search={false}
