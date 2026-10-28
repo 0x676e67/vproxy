@@ -243,6 +243,22 @@ it.each(["light", "dark"] as const)(
       ).toBeGreaterThanOrEqual(4.5);
     }
     expect(consoleTheme(mode).components?.Tag).toMatchObject(tag);
+    expect(consoleTheme(mode).components?.Form).toMatchObject({
+      colorError: tag.colorError,
+      colorWarning: tag.colorWarning,
+    });
+    for (const text of [tag.colorError, tag.colorWarning]) {
+      for (const background of [
+        palette.canvas,
+        palette.surface,
+        palette.elevated,
+      ]) {
+        expect(
+          contrast(text, background),
+          `${mode} validation: ${text} on ${background}`,
+        ).toBeGreaterThanOrEqual(4.5);
+      }
+    }
     applyConsoleMode(mode);
     expect(
       document.documentElement.style.getPropertyValue("--console-canvas"),

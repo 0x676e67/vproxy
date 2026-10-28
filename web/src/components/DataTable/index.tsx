@@ -1,15 +1,28 @@
 import { Table, type TableProps } from "antd";
-import type { ColumnsType } from "antd/es/table";
+import type { ProColumns } from "@ant-design/pro-components";
+import type { ColumnsType, ColumnType } from "antd/es/table";
 import { useMemo } from "react";
+
+interface LabelledColumn<T extends object> {
+  title?: unknown;
+  children?: LabelledColumn<T>[];
+  onCell?: ColumnType<T>["onCell"];
+}
 
 /** Keep the same table, controls and focus order when records reflow on phones.
  * Field labels are derived from the existing headers, never a second schema. */
-function labelledColumns<T extends object>(
+export function labelledColumns<T extends object>(
   columns: ColumnsType<T>,
-): ColumnsType<T> {
-  return columns.map((column) => {
-    if ("children" in column) {
-      return { ...column, children: labelledColumns(column.children) };
+): ColumnsType<T>;
+export function labelledColumns<T extends object>(
+  columns: ProColumns<T>[],
+): ProColumns<T>[];
+export function labelledColumns<T extends object>(
+  columns: LabelledColumn<T>[],
+): LabelledColumn<T>[] {
+  return columns.map(function label(column): LabelledColumn<T> {
+    if (column.children) {
+      return { ...column, children: column.children.map(label) };
     }
     return {
       ...column,

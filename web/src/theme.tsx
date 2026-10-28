@@ -55,6 +55,12 @@ export function consoleTheme(
         ...previous.components?.Tag,
         ...consoleTagTokens[mode],
       },
+      Form: {
+        ...previous.components?.Form,
+        // Validation is body text, not the brighter error border or icon.
+        colorError: consoleTagTokens[mode].colorError,
+        colorWarning: consoleTagTokens[mode].colorWarning,
+      },
       Menu: {
         ...previous.components?.Menu,
         itemColor: palette.text,

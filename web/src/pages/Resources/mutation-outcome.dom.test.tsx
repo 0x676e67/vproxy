@@ -679,6 +679,11 @@ describe("resource mutation outcomes", () => {
     });
     expect(mutations()).toHaveLength(1);
     expect(revision).toBe("2");
+    const memberCell = within(drawer)
+      .getByText(ADDRESS, { exact: true })
+      .closest("td");
+    expect(memberCell?.getAttribute("data-label")).toBe("resources.id");
+    expect(memberCell?.closest(".management-data-table")).not.toBeNull();
     fireEvent.click(button("resources.removeMember", drawer));
     const removal = await waitFor(() => {
       const current = screen.queryAllByRole("dialog").find((candidate) =>

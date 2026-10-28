@@ -21,6 +21,7 @@ import {
 import { useManagement } from "../../auth/context";
 import type { Intent } from "../../auth/routing-changes";
 import { useMessages } from "../../hooks/useMessages";
+import { labelledColumns } from "../../components/DataTable";
 
 export type RoutingWork = (
   client: RoutingOperations,
@@ -255,8 +256,9 @@ export default function Members({
           />
         )}
         <ProTable<{ id: string }>
+          className="management-data-table"
           rowKey="id"
-          columns={columns}
+          columns={labelledColumns(columns)}
           dataSource={view.page?.items.map((id) => ({ id })) ?? []}
           loading={view.loading}
           search={false}

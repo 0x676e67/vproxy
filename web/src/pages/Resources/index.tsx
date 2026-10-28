@@ -57,6 +57,7 @@ import {
   type Token,
 } from "../../auth/routing-changes";
 import ManagementGate from "../../components/ManagementGate";
+import { labelledColumns } from "../../components/DataTable";
 import { useMessages, type MessageKey } from "../../hooks/useMessages";
 import Members, { type RoutingWork } from "./Members";
 import ResourceForm, { type ResourceFields } from "./ResourceForm";
@@ -1218,14 +1219,7 @@ function Catalog({
       <ProTable<Resource>
         className="management-data-table"
         rowKey="id"
-        columns={columns.map((column) => ({
-          ...column,
-          onCell: (record, index) => ({
-            ...column.onCell?.(record, index),
-            "data-label":
-              typeof column.title === "string" ? column.title : undefined,
-          }),
-        }))}
+        columns={labelledColumns(columns)}
         dataSource={view.page?.items ?? []}
         loading={view.loading || state.busy}
         search={false}

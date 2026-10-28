@@ -20,6 +20,7 @@ import type {
 import { errorMessage } from "../../api/messages";
 import { useManagement } from "../../auth/context";
 import { useMessages, type MessageKey } from "../../hooks/useMessages";
+import { labelledColumns } from "../../components/DataTable";
 import { readRoutingView, routingReadDisabled } from "../../api/remoteRouting";
 import { resourcesHref, type Target } from "../../api/targets";
 
@@ -307,11 +308,12 @@ export default function Health({
         />
       )}
       <ProTable<CheckRow>
+        className="management-data-table"
         headerTitle={t("resources.snapshotTitle", {
           time: time(view.received),
         })}
         rowKey="id"
-        columns={columns}
+        columns={labelledColumns(columns)}
         dataSource={rows}
         loading={view.loading || state.busy}
         options={false}

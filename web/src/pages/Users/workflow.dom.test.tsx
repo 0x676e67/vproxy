@@ -1219,6 +1219,39 @@ async function openCredentials() {
   fireEvent.click(button);
   return screen.findByRole("dialog");
 }
+
+it.each([
+  ["users.credentials", "关闭"],
+  ["users.edit", "users.cancel"],
+  ["resources.permission", "关闭"],
+  ["presets.title", "关闭"],
+  ["users.create", "users.cancel"],
+] as const)(
+  "returns %s dismissal to its control or scoped list without writing",
+  async (action, cancel) => {
+    mount();
+    await listingReady();
+    const source =
+      action === "users.create"
+        ? namedButton(action)
+        : within(await userRow()).getByRole("button", { name: action });
+    const region = source.closest("section")!;
+    fireEvent.click(source);
+    const dialog = await screen.findByRole("dialog");
+    await waitFor(() =>
+      expect(dialog.querySelector(".ant-btn-loading")).toBeNull(),
+    );
+    const close = within(dialog).getByRole("button", { name: cancel });
+    close.focus();
+    fireEvent.click(close);
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    await returnedFocus(source, region);
+    if (source.isConnected && !source.hasAttribute("disabled"))
+      expect(document.activeElement).toBe(source);
+    expect(mutations()).toHaveLength(0);
+  },
+);
+
 async function openCredentialReview(drawer: HTMLElement, action: string) {
   const button = await within(drawer).findByRole("button", { name: action });
   await waitFor(() =>

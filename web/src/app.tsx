@@ -23,7 +23,16 @@ import {
 export const antd: RuntimeAntdConfig = (memo) => {
   const mode = readConsoleMode();
   applyConsoleMode(mode);
-  return { ...memo, theme: consoleTheme(mode, memo.theme) };
+  return {
+    ...memo,
+    form: {
+      ...memo.form,
+      // Dialog bodies can scroll independently on short screens. Keep failed
+      // validation at the offending field instead of stranding focus at Save.
+      scrollToFirstError: memo.form?.scrollToFirstError ?? { focus: true },
+    },
+    theme: consoleTheme(mode, memo.theme),
+  };
 };
 
 // Umi's locale provider wraps innerProvider; rootContainer sits outside Intl.

@@ -339,7 +339,17 @@ textarea {
 
 .ant-drawer-body,
 .ant-modal-body {
+  min-width: 0;
   overscroll-behavior: contain;
+
+  .ant-space-item {
+    min-width: 0;
+    max-width: 100%;
+  }
+
+  .ant-descriptions-item-content {
+    overflow-wrap: anywhere;
+  }
 }
 
 .management-scope-bar,
@@ -681,18 +691,6 @@ textarea {
       gap: 0;
     }
 
-    .ant-btn,
-    .ant-input,
-    .ant-select {
-      min-height: 44px;
-    }
-
-    input,
-    textarea,
-    .ant-select-selection-item {
-      font-size: 16px;
-    }
-
     .ant-btn-link {
       display: inline-flex;
       align-items: center;
@@ -706,30 +704,145 @@ textarea {
   .management-page .ant-descriptions-row > td {
     padding-block-end: 8px;
   }
+}
 
-  .notification-inbox-body,
-  .credential-workspace-body {
+@media (max-width: 900px), (pointer: coarse) {
+  // Portaled editors are outside .management-page. Keep their actual controls
+  // usable with touch, including wide phones, numbers and affixed passwords.
+  .management-page,
+  .ant-modal,
+  .ant-drawer {
     .ant-btn,
     .ant-input,
+    .ant-input-affix-wrapper,
+    .ant-input-number,
     .ant-select {
       min-height: 44px;
     }
 
+    .ant-btn {
+      max-width: 100%;
+      height: auto;
+      white-space: normal;
+      overflow-wrap: anywhere;
+    }
+
+    .ant-input-affix-wrapper .ant-input {
+      min-height: 0;
+    }
+
+    .ant-input-number-input {
+      height: 42px;
+    }
+
     input,
     textarea,
+    .ant-input,
+    .ant-input-affix-wrapper input.ant-input,
+    .ant-input-number .ant-input-number-input,
     .ant-select-selection-item,
     .ant-select-content-value,
     .ant-select-content-placeholder {
       font-size: 16px;
     }
+
+    .ant-checkbox-wrapper,
+    .ant-radio-wrapper {
+      display: inline-flex;
+      align-items: center;
+      min-height: 44px;
+    }
+
+    .ant-typography .ant-typography-copy,
+    .ant-typography .ant-typography-edit {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-width: 44px;
+      min-height: 44px;
+      vertical-align: middle;
+    }
   }
 
-  // The shared footer rule below is equally specific and otherwise restores
-  // 32px actions inside this mobile toolbar.
-  .credential-workspace-body .connection-form-actions .ant-btn {
+  .ant-modal-root .ant-modal-wrap .ant-modal {
+    top: 16px;
+    padding-block-end: max(16px, env(safe-area-inset-bottom));
+  }
+
+  .ant-modal-root .ant-modal .ant-modal-container {
+    display: flex;
+    flex-direction: column;
+    max-height: calc(100vh - 32px);
+    max-height: calc(100dvh - 32px);
+
+    .ant-modal-header,
+    .ant-modal-footer {
+      flex-shrink: 0;
+    }
+
+    .ant-modal-body {
+      min-height: 0;
+      overflow-y: auto;
+    }
+  }
+
+  .ant-modal .ant-modal-header .ant-modal-title {
+    padding-inline-end: 32px;
+    overflow-wrap: anywhere;
+  }
+
+  .ant-modal .ant-modal-container .ant-modal-close {
+    width: 44px;
+    height: 44px;
+    inset-block-start: 8px;
+    inset-inline-end: 8px;
+  }
+
+  .ant-drawer .ant-drawer-header .ant-drawer-close {
+    min-width: 44px;
     min-height: 44px;
   }
 
+  .ant-drawer .ant-drawer-header .ant-drawer-title {
+    min-width: 0;
+    overflow-wrap: anywhere;
+  }
+
+  // Ant Design 6 names the panel "section", not the former "content".
+  .ant-drawer .ant-drawer-section .ant-drawer-header,
+  .ant-drawer .ant-drawer-section .ant-drawer-body,
+  .ant-drawer .ant-drawer-section .ant-drawer-footer {
+    padding: 16px;
+  }
+
+  .ant-modal .connection-form-actions .ant-btn,
+  .ant-drawer .connection-form-actions .ant-btn {
+    min-height: 44px;
+  }
+
+  .ant-modal-footer {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: flex-end;
+    gap: 8px;
+
+    .ant-btn + .ant-btn {
+      margin-inline-start: 0;
+    }
+
+    .ant-space {
+      flex-wrap: wrap;
+      max-width: 100%;
+    }
+  }
+
+  .ant-dropdown-menu-item {
+    min-height: 44px;
+    align-items: center;
+  }
+}
+
+@media (max-width: 900px) {
   .management-user-search .management-search-mode {
     flex-basis: 100px;
   }
@@ -756,6 +869,12 @@ textarea {
   // Reflow actual records, including their original buttons, rather than
   // rendering a duplicate mobile list or hiding actions behind a horizontal pan.
   .management-data-table {
+    .ant-tag {
+      max-width: 100%;
+      white-space: normal;
+      overflow-wrap: anywhere;
+    }
+
     .ant-table-content {
       overflow-x: visible !important;
     }
@@ -818,7 +937,18 @@ textarea {
         justify-self: start;
       }
 
-      &:last-child {
+      // Identity leads the record; a long name or IPv6 must not be squeezed
+      // into the value column used for short secondary fields.
+      &:first-child {
+        display: block;
+        padding-block-end: 12px;
+
+        &::before {
+          display: none;
+        }
+      }
+
+      &:last-child:has(button, a[href], [role="button"]) {
         display: block;
 
         &::before {
@@ -996,10 +1126,6 @@ textarea {
 }
 
 @media (max-width: 900px) {
-  .credential-workspace-body {
-    padding: 16px;
-  }
-
   .connection-workspace-grid {
     grid-template-columns: minmax(0, 1fr);
     gap: 24px;

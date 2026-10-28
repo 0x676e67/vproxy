@@ -367,6 +367,11 @@ describe("read-only scoped health guidance", () => {
   it("distinguishes bind, one TCP target and expired Unknown without probing when guidance opens", async () => {
     mount();
     await screen.findByText(EXPIRED_TARGET);
+    const healthRow = rowFor(EXPIRED_TARGET);
+    expect(healthRow.closest(".management-data-table")).not.toBeNull();
+    expect(healthRow.querySelector("td")?.getAttribute("data-label")).toBe(
+      messages["resources.ip"],
+    );
     expect(
       screen
         .getAllByRole("link", { name: ADDRESS })

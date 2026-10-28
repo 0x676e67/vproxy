@@ -2,7 +2,7 @@
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { useState } from "react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
-import { layout } from "./app";
+import { antd, layout } from "./app";
 import { ConsoleThemeProvider } from "./theme";
 import messages from "./locales/en-US";
 
@@ -23,6 +23,22 @@ beforeEach(() => vi.stubGlobal("__VPROXY_DEMO__", false));
 afterEach(() => {
   cleanup();
   vi.unstubAllGlobals();
+});
+
+it("focuses the first invalid field by default without replacing explicit form settings", () => {
+  const validateMessages = { required: "Complete this field" };
+  expect(
+    antd({ appConfig: {}, form: { requiredMark: false, validateMessages } })
+      .form,
+  ).toEqual({
+    requiredMark: false,
+    validateMessages,
+    scrollToFirstError: { focus: true },
+  });
+  expect(
+    antd({ appConfig: {}, form: { scrollToFirstError: false } }).form
+      ?.scrollToFirstError,
+  ).toBe(false);
 });
 
 it.each([false, true])(

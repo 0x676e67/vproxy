@@ -100,7 +100,7 @@ interface ReviewedConfirmation extends Confirmation {
 interface CancelFocus {
   epoch: number;
   targetId: string | null;
-  userId: string;
+  userId: string | null;
   region: "users" | "credentials";
   trigger: HTMLElement;
 }
@@ -355,6 +355,18 @@ function Users({
   } | null>(null);
   const [pendingCancelFocus, setPendingCancelFocus] =
     useState<CancelFocus | null>(null);
+  const editorFocus = useRef<CancelFocus | null>(null);
+  const rememberEditorFocus = (trigger: HTMLElement, userId: string | null) => {
+    setPendingCancelFocus(null);
+    editorFocus.current = { epoch, targetId, userId, region: "users", trigger };
+  };
+  const returnEditorFocus = (userId: string | null) => {
+    const remembered = editorFocus.current;
+    editorFocus.current = null;
+    // Automatically opened delivery views have no matching row trigger.
+    // Reuse the scoped idle-focus guard after conditional editors unmount.
+    if (remembered?.userId === userId) setPendingCancelFocus(remembered);
+  };
   const read = useRef<AbortController | null>(null);
   const write = useRef<AbortController | null>(null);
   const serial = useRef(0);
@@ -1909,7 +1921,7 @@ function Users({
           <Button
             size="small"
             disabled={access.readDisabled}
-            onClick={() => {
+            onClick={(event) => {
               if (
                 crossPhaseRef.current !== "closed" ||
                 operationRead.current ||
@@ -1917,6 +1929,7 @@ function Users({
               )
                 return;
               overlayOpening.current = true;
+              rememberEditorFocus(event.currentTarget, user.id);
               setRoutingUser(null);
               setPresetUser(null);
               setDelivery(null);
@@ -1928,7 +1941,7 @@ function Users({
           <Button
             size="small"
             disabled={access.readDisabled}
-            onClick={() => {
+            onClick={(event) => {
               if (
                 crossPhaseRef.current !== "closed" ||
                 operationRead.current ||
@@ -1936,6 +1949,7 @@ function Users({
               )
                 return;
               overlayOpening.current = true;
+              rememberEditorFocus(event.currentTarget, user.id);
               setSelected(null);
               setPresetUser(null);
               setRoutingUser(user);
@@ -1946,7 +1960,7 @@ function Users({
           <Button
             size="small"
             disabled={access.readDisabled}
-            onClick={() => {
+            onClick={(event) => {
               if (
                 crossPhaseRef.current !== "closed" ||
                 operationRead.current ||
@@ -1954,6 +1968,7 @@ function Users({
               )
                 return;
               overlayOpening.current = true;
+              rememberEditorFocus(event.currentTarget, user.id);
               setSelected(null);
               setRoutingUser(null);
               setPresetUser(user);
@@ -1964,13 +1979,14 @@ function Users({
           <Button
             size="small"
             disabled={disabled || user.deleted}
-            onClick={() => {
+            onClick={(event) => {
               if (
                 crossPhaseRef.current !== "closed" ||
                 latestView.current.loading
               )
                 return;
               overlayOpening.current = true;
+              rememberEditorFocus(event.currentTarget, user.id);
               setForm({
                 user,
                 revision: revision!,
@@ -2286,13 +2302,14 @@ function Users({
                 <Button
                   type="primary"
                   disabled={disabled}
-                  onClick={() => {
+                  onClick={(event) => {
                     if (
                       crossPhaseRef.current !== "closed" ||
                       latestView.current.loading
                     )
                       return;
                     overlayOpening.current = true;
+                    rememberEditorFocus(event.currentTarget, null);
                     setForm({
                       user: null,
                       revision: revision!,
@@ -2497,6 +2514,7 @@ function Users({
           close={() => {
             setSelected(null);
             setDelivery(null);
+            returnEditorFocus(selected.id);
           }}
           confirm={confirm}
           notice={!form && !confirmation ? workflowNotice : null}
@@ -2515,7 +2533,12 @@ function Users({
           }
           writeBlocked={disabled}
           peer={targetId}
-          close={() => !routingBusy && setRoutingUser(null)}
+          close={() => {
+            if (!routingBusy) {
+              setRoutingUser(null);
+              returnEditorFocus(routingUser.id);
+            }
+          }}
           onBusy={setRoutingBusy}
           saved={(result) => {
             setRoutingUser(null);
@@ -2537,7 +2560,12 @@ function Users({
           entity={{ kind: "user", id: presetUser.id, name: presetUser.name }}
           peer={targetId}
           writeBlocked={disabled || presetUser.deleted}
-          close={() => !routingBusy && setPresetUser(null)}
+          close={() => {
+            if (!routingBusy) {
+              setPresetUser(null);
+              returnEditorFocus(presetUser.id);
+            }
+          }}
           onBusy={setRoutingBusy}
           saved={(result) => {
             setPresetUser(null);
@@ -2558,7 +2586,12 @@ function Users({
           user={form.user}
           busy={busy}
           notice={workflowNotice}
-          close={() => !busy && setForm(null)}
+          close={() => {
+            if (!busy) {
+              setForm(null);
+              returnEditorFocus(form.user?.id ?? null);
+            }
+          }}
           submit={(input) =>
             form.readSerial !== serial.current
               ? Promise.resolve(false)
