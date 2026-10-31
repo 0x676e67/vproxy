@@ -22,6 +22,7 @@ import {
   nodeAlertPageFixture,
 } from "../../api/alerts.fixtures";
 import { jsonResponse, sessionFixture } from "../../api/client.fixtures";
+import { webhookFixture } from "../../api/notifications.fixtures";
 import { ManagementProvider, useManagement } from "../../auth/context";
 import messages from "../../locales/en-US";
 import ResourcesPage from "../Resources";
@@ -63,6 +64,7 @@ let visibility: DocumentVisibilityState;
 let requests: { query: string; method: string; signal: AbortSignal | null }[];
 let onRead: (url: URL) => Promise<Response>;
 let nodeReads: number;
+let webhookReads: string[];
 let remoteRequests: { url: URL; signal: AbortSignal | null }[];
 let onRemoteRead: (url: URL) => Promise<Response>;
 let addressRequests: { url: URL; signal: AbortSignal | null }[];
@@ -153,6 +155,7 @@ async function show() {
   });
 }
 beforeEach(() => {
+  webhookReads = [];
   authenticated = true;
   visibility = "visible";
   requests = [];
@@ -212,6 +215,10 @@ beforeEach(() => {
               expires_at: Math.floor(Date.now() / 1000) + 3600,
             })
           : jsonResponse({ error: { code: "authentication_required" } }, 403);
+      if (url.pathname === "/api/v1/notifications/webhook") {
+        webhookReads.push(init?.method ?? "GET");
+        return jsonResponse({ ...webhookFixture(), node_id: ALERT_NODE });
+      }
       if (url.pathname === "/api/v1/targets")
         return jsonResponse({
           items: [registeredTarget(ALERT_PEER), registeredTarget(OTHER_PEER)],
@@ -257,6 +264,33 @@ beforeEach(() => {
       return onRead(url);
     }),
   );
+});
+
+it("keeps notification settings outside record tabs and reads them only on demand", async () => {
+  mount();
+  await waitFor(() => expect(requests.length).toBeGreaterThan(0));
+  expect(
+    screen.queryByRole("tab", { name: messages["notifications.title"] }),
+  ).toBeNull();
+  expect(
+    screen.queryByRole("tab", { name: messages["fleet.title"] }),
+  ).toBeNull();
+  expect(webhookReads).toEqual([]);
+  fireEvent.click(
+    screen.getByRole("button", { name: messages["notifications.title"] }),
+  );
+  await waitFor(() => expect(webhookReads).toEqual(["GET"]));
+  const previous = requests.length;
+  fireEvent.click(
+    screen.getByRole("button", { name: messages["alerts.back"] }),
+  );
+  await waitFor(() => expect(requests.length).toBeGreaterThan(previous));
+  expect(
+    screen.getByRole("tab", { name: messages["alerts.active"] }),
+  ).toBeTruthy();
+  expect(remoteRequests).toHaveLength(0);
+  expect(webhookReads).toEqual(["GET"]);
+  expect(requests.every(({ method }) => method === "GET")).toBe(true);
 });
 
 describe("explicit selected-node operations alert reads", () => {
@@ -674,6 +708,9 @@ describe("alert observation and lifecycle display", () => {
     await screen.findByText(
       messages["alerts.code.remote_observation_unavailable"],
     );
+    fireEvent.click(
+      screen.getByRole("button", { name: messages["alerts.coverage"] }),
+    );
     expect(screen.getByText(messages["alerts.backgroundHint"])).toBeTruthy();
     expect(
       screen.getAllByText(messages["alerts.foreignObservation"]),
@@ -710,6 +747,10 @@ describe("alert observation and lifecycle display", () => {
         }),
       );
     mount();
+    await screen.findByText(messages["alerts.backgroundDisabled"]);
+    fireEvent.click(
+      screen.getByRole("button", { name: messages["alerts.coverage"] }),
+    );
     await screen.findByText(messages["alerts.backgroundDisabledHint"]);
     expect(screen.queryByText(messages["alerts.backgroundHint"])).toBeNull();
     expect(screen.queryByText(messages["alerts.status.recovered"])).toBeNull();
@@ -809,6 +850,9 @@ describe("alert observation and lifecycle display", () => {
         messages["alerts.code.proxy_tls_identity_metadata_unavailable"],
       ),
     ).toBeTruthy();
+    fireEvent.click(
+      screen.getByRole("button", { name: messages["alerts.coverage"] }),
+    );
     for (const label of [
       "alerts.localManagementHttps",
       "alerts.localNodeTls",
@@ -902,6 +946,9 @@ describe("alert observation and lifecycle display", () => {
     expect(
       screen.queryByRole("link", { name: messages["alerts.openTraffic"] }),
     ).toBeNull();
+    fireEvent.click(
+      screen.getByRole("button", { name: messages["alerts.coverage"] }),
+    );
     expect(
       screen.getByText(messages["alerts.localManagementHttps"]),
     ).toBeTruthy();

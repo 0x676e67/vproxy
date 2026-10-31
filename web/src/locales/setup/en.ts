@@ -13,7 +13,7 @@ export default {
   "setup.firstUse.manageUsers": "Open local users",
   "setup.firstUse.endpoints": "3. Copy a proxy link",
   "setup.firstUse.endpointHint":
-    "Under a user's Credentials, open Connection configuration, read or enter the password, then copy the link. New nodes use the host's default egress; IP resources are optional.",
+    "Open Connections for a user, choose a credential, then open Connection configuration to read or enter the password and copy the link. New nodes use the host's default egress; IP resources are optional.",
   "setup.firstUse.endpointUnavailable":
     "Refresh node status before checking users and connection configuration.",
   "setup.title": "Connect a node",

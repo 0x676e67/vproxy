@@ -917,7 +917,7 @@ mod tests {
         let backup = fixture.directory.join("private-migration-backup");
         files::create_directory(&backup)?;
         let migrated = super::super::migrate(&fixture.directory, &backup.join("before.sqlite3"))?;
-        assert_eq!(migrated.schema_version, 28);
+        assert_eq!(migrated.schema_version, super::super::SCHEMA_VERSION);
         let after = super::super::load_policy(&fixture.directory)?;
         assert_eq!(
             before.credentials[0].secret_digest,

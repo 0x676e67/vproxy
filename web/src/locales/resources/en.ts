@@ -4,8 +4,6 @@ export default {
   "resources.description":
     "Manage the selected node’s finite egress inventory and shared pools.",
   "resources.localOnly": "Local node only",
-  "resources.localHint":
-    "These resources belong to this node. Use the node selector to inspect or manage an enrolled target with IPAM v2 support.",
   "resources.remoteScope": "Selected target’s resources",
   "resources.remoteScopeHint":
     "Enrollment is not control authorization. The child must explicitly grant this controller ownership. Unsupported or failed reads never fall back to this machine.",
@@ -49,7 +47,6 @@ export default {
   "resources.revision": "Resource revision",
   "resources.globalRevision": "Global policy revision",
   "resources.health": "Health",
-  "resources.healthUnknown": "Not queried here",
   "resources.healthHint":
     "This inventory is not a health snapshot. Open Health observations for scoped evidence. Active is a selection policy state, not a reachability result.",
   "resources.register": "Register",

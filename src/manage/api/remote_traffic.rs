@@ -10,7 +10,7 @@ use super::{
     *,
 };
 use crate::{
-    access::Protocol,
+    access::traffic::PROTOCOLS,
     manage::{
         node::control::{self, Reply, Request as Operation},
         remote_traffic,
@@ -21,7 +21,7 @@ use crate::{
     },
 };
 
-const MAX_BYTES: usize = 32 * 1024;
+const MAX_BYTES: usize = 64 * 1024;
 const FRESH_MILLIS: u64 = 90_000;
 
 pub(super) fn routes(state: Arc<AppState>) -> Router<Arc<AppState>> {
@@ -184,8 +184,7 @@ async fn demand(
         .await
         .map_err(failure)?;
     let controller = state.controller.as_ref().ok_or_else(unavailable)?;
-    let reply = controller
-        .remote(peer.clone(), operation)
+    let reply = super::super::remote_traffic::request(controller, peer.clone(), operation)
         .await
         .map_err(failure)?;
     let current = policy
@@ -217,7 +216,7 @@ async fn demand(
 fn node_totals(snapshot: durable::NodeSnapshot) -> durable::Totals {
     durable::Totals {
         status: snapshot.status,
-        items: [Protocol::Http, Protocol::Socks5, Protocol::Masque]
+        items: PROTOCOLS
             .into_iter()
             .zip(snapshot.totals)
             .map(|(protocol, value)| durable::ProtocolTotal { protocol, value })
@@ -242,7 +241,7 @@ fn node_buckets(query: &Query, snapshot: durable::NodeSnapshot) -> durable::Buck
         .take(usize::try_from(query.limit).unwrap_or(50))
         .map(|window| durable::Bucket {
             window_id: window.window_id,
-            items: [Protocol::Http, Protocol::Socks5, Protocol::Masque]
+            items: PROTOCOLS
                 .into_iter()
                 .zip(window.values)
                 .filter_map(|(protocol, value)| {
@@ -280,8 +279,14 @@ async fn totals(
         let (source, reply) = demand(
             &state,
             peer,
-            Operation::TrafficTotals {
-                scope: query.scope.clone(),
+            if query.split {
+                Operation::TrafficTotalsV2 {
+                    scope: query.scope.clone(),
+                }
+            } else {
+                Operation::TrafficTotals {
+                    scope: query.scope.clone(),
+                }
             },
         )
         .await?;
@@ -313,11 +318,20 @@ async fn buckets(
         let (source, reply) = demand(
             &state,
             peer,
-            Operation::TrafficBuckets {
-                scope: query.scope.clone(),
-                resolution: query.resolution,
-                after: query.after,
-                limit: query.limit,
+            if query.split {
+                Operation::TrafficBucketsV2 {
+                    scope: query.scope.clone(),
+                    resolution: query.resolution,
+                    after: query.after,
+                    limit: query.limit,
+                }
+            } else {
+                Operation::TrafficBuckets {
+                    scope: query.scope.clone(),
+                    resolution: query.resolution,
+                    after: query.after,
+                    limit: query.limit,
+                }
             },
         )
         .await?;
@@ -372,6 +386,11 @@ mod tests {
     }
 
     fn snapshot(count: u64) -> durable::NodeSnapshot {
+        let zero = Snapshot {
+            upload: 0,
+            download: 0,
+            saturated: false,
+        };
         let value = Snapshot {
             upload: u64::MAX,
             download: u64::MAX,
@@ -379,6 +398,7 @@ mod tests {
         };
         durable::NodeSnapshot {
             status: durable::Status {
+                http_split: false,
                 node_id: id(1),
                 meter_epoch: id(2),
                 run_id: Some(id(3)),
@@ -390,7 +410,7 @@ mod tests {
                 last_checkpoint_at: Some(9_007_199_254_740_991),
                 meter_started_at: Some(0),
             },
-            totals: [value; 3],
+            totals: [value, value, value, zero, zero],
             floors: [Some(0); 3],
             minute: (0..count)
                 .map(|index| durable::Window {
@@ -399,6 +419,8 @@ mod tests {
                         Some(value),
                         if index == 1 { None } else { Some(value) },
                         Some(value),
+                        None,
+                        None,
                     ],
                 })
                 .collect(),
@@ -409,6 +431,7 @@ mod tests {
 
     fn query(after: Option<u64>, limit: u32) -> Query {
         Query {
+            split: false,
             scope: Scope::Node,
             protocol: None,
             resolution: durable::Resolution::Minute,

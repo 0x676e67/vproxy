@@ -1,8 +1,7 @@
 export default {
+  "alerts.back": "Back to alerts",
   "menu.alerts": "Alerts",
   "alerts.title": "Alerts",
-  "alerts.description":
-    "Read this management node's observations or a selected node's own alerts.",
   "alerts.active": "Active problems",
   "alerts.recent": "Recent records",
   "alerts.activeCount": "Total active problems",
@@ -16,8 +15,8 @@ export default {
   "alerts.localProxyExpected": "Local proxy expected to run",
   "alerts.remoteCached": "Locally stored remote records",
   "alerts.remoteObservation": "Background target observations",
-  "alerts.backgroundEnabled": "Enabled in node startup settings",
-  "alerts.backgroundDisabled": "Not enabled on this node",
+  "alerts.backgroundEnabled": "Background target collection enabled",
+  "alerts.backgroundDisabled": "Background target collection not enabled",
   "alerts.backgroundHint":
     "The node collects registered targets' own alerts without a browser. Unread, stale or failed sources remain unknown; zero recorded problems does not prove health. This does not send email, webhooks or other external notifications.",
   "alerts.backgroundDisabledHint":

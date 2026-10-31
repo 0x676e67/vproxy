@@ -2963,7 +2963,7 @@ mod tests {
                 &[SeriesSnapshot {
                     user_id: Arc::from(user.as_str()),
                     credential_id: Arc::from(credential.as_str()),
-                    protocol: Protocol::Http,
+                    protocol: crate::access::traffic::Protocol::Http,
                     value: Snapshot {
                         upload: 101,
                         download: 55,
@@ -2972,7 +2972,7 @@ mod tests {
                 }],
                 &[PoolSnapshot {
                     pool_id: Arc::from(pool.as_str()),
-                    protocol: Protocol::Http,
+                    protocol: crate::access::traffic::Protocol::Http,
                     value: Snapshot {
                         upload: 31,
                         download: 17,

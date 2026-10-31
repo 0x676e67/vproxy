@@ -8,9 +8,14 @@
 use std::collections::HashSet;
 
 use super::*;
+use crate::access::traffic::{
+    PROTOCOL_COUNT, PROTOCOLS, legacy_values, legacy_window, protocol_index,
+};
 use crate::{manage::store::traffic as durable, traffic::Snapshot};
 
 const PREFIX: &str = "/node/v1/traffic";
+const SPLIT_PREFIX: &str = "/node/v2/traffic";
+pub(super) const SPLIT_RESPONSE_BYTES: usize = 64 * 1024;
 const RESOURCE: &str = "proxy_traffic";
 const DEFINITION: &str = "accepted_effective_payload_v1";
 const MAX_TIME: u64 = 9_007_199_254_740_991;
@@ -63,7 +68,7 @@ impl From<durable::Status> for Metadata {
 }
 
 impl Metadata {
-    fn into_status(self, expected: &str) -> io::Result<durable::Status> {
+    fn into_status(self, expected: &str, split: bool) -> io::Result<durable::Status> {
         if !canonical_id(&self.meter_epoch)
             || self
                 .run_id
@@ -78,6 +83,7 @@ impl Metadata {
             return Err(invalid("invalid durable traffic metadata"));
         }
         Ok(durable::Status {
+            http_split: split,
             node_id: expected.to_owned(),
             meter_epoch: self.meter_epoch,
             run_id: self.run_id,
@@ -122,15 +128,12 @@ impl Counter {
 #[serde(deny_unknown_fields)]
 struct Window {
     window_id: String,
-    values: [Option<Counter>; 3],
+    values: Vec<Option<Counter>>,
 }
 
 impl From<durable::Window> for Window {
     fn from(value: durable::Window) -> Self {
-        Self {
-            window_id: value.window_id.to_string(),
-            values: value.values.map(|value| value.map(Counter::from)),
-        }
+        window_view(value, false)
     }
 }
 
@@ -138,7 +141,7 @@ impl From<durable::Window> for Window {
 #[serde(deny_unknown_fields)]
 struct NodeSnapshot {
     metadata: Metadata,
-    totals: [Counter; 3],
+    totals: Vec<Counter>,
     floors: [Option<String>; 3],
     minute: Vec<Window>,
     hour: Vec<Window>,
@@ -147,16 +150,61 @@ struct NodeSnapshot {
 
 impl From<durable::NodeSnapshot> for NodeSnapshot {
     fn from(value: durable::NodeSnapshot) -> Self {
-        Self {
-            metadata: value.status.into(),
-            totals: value.totals.map(Counter::from),
-            floors: value
-                .floors
-                .map(|value| value.map(|value| value.to_string())),
-            minute: value.minute.into_iter().map(Window::from).collect(),
-            hour: value.hour.into_iter().map(Window::from).collect(),
-            day: value.day.into_iter().map(Window::from).collect(),
-        }
+        snapshot_view(value, false)
+    }
+}
+
+fn wire_values(values: [Snapshot; PROTOCOL_COUNT], split: bool) -> Vec<Counter> {
+    if split {
+        values.into_iter().map(Counter::from).collect()
+    } else {
+        legacy_values(values)
+            .into_iter()
+            .map(Counter::from)
+            .collect()
+    }
+}
+
+fn window_view(value: durable::Window, split: bool) -> Window {
+    Window {
+        window_id: value.window_id.to_string(),
+        values: if split {
+            value
+                .values
+                .into_iter()
+                .map(|value| value.map(Counter::from))
+                .collect()
+        } else {
+            legacy_window(value.values)
+                .into_iter()
+                .map(|value| value.map(Counter::from))
+                .collect()
+        },
+    }
+}
+
+fn snapshot_view(value: durable::NodeSnapshot, split: bool) -> NodeSnapshot {
+    NodeSnapshot {
+        metadata: value.status.into(),
+        totals: wire_values(value.totals, split),
+        floors: value
+            .floors
+            .map(|value| value.map(|value| value.to_string())),
+        minute: value
+            .minute
+            .into_iter()
+            .map(|value| window_view(value, split))
+            .collect(),
+        hour: value
+            .hour
+            .into_iter()
+            .map(|value| window_view(value, split))
+            .collect(),
+        day: value
+            .day
+            .into_iter()
+            .map(|value| window_view(value, split))
+            .collect(),
     }
 }
 
@@ -187,7 +235,7 @@ impl From<&durable::Scope> for Scope {
 struct Totals {
     metadata: Metadata,
     scope: Scope,
-    values: [Counter; 3],
+    values: Vec<Counter>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -204,20 +252,70 @@ struct Buckets {
 pub(super) fn is_request(operation: &Request) -> bool {
     matches!(
         operation,
-        Request::TrafficSnapshot | Request::TrafficTotals { .. } | Request::TrafficBuckets { .. }
+        Request::TrafficSnapshot
+            | Request::TrafficTotals { .. }
+            | Request::TrafficBuckets { .. }
+            | Request::TrafficSnapshotV2
+            | Request::TrafficTotalsV2 { .. }
+            | Request::TrafficBucketsV2 { .. }
     )
 }
 
+pub(super) fn is_split(operation: &Request) -> bool {
+    matches!(
+        operation,
+        Request::TrafficSnapshotV2
+            | Request::TrafficTotalsV2 { .. }
+            | Request::TrafficBucketsV2 { .. }
+    )
+}
+
+impl Request {
+    /// A bounded read-only fallback. It is never constructed for mutations,
+    /// transport failures, changed authorization or malformed reply bodies.
+    pub(in crate::manage) fn legacy_traffic(&self) -> Option<Self> {
+        match self {
+            Self::TrafficSnapshotV2 => Some(Self::TrafficSnapshot),
+            Self::TrafficTotalsV2 { scope } => Some(Self::TrafficTotals {
+                scope: scope.clone(),
+            }),
+            Self::TrafficBucketsV2 {
+                scope,
+                resolution,
+                after,
+                limit,
+            } => Some(Self::TrafficBuckets {
+                scope: scope.clone(),
+                resolution: *resolution,
+                after: *after,
+                limit: *limit,
+            }),
+            _ => None,
+        }
+    }
+}
+
 pub(super) fn encode(operation: &Request) -> io::Result<(Method, String, Vec<u8>)> {
+    let prefix = if is_split(operation) {
+        SPLIT_PREFIX
+    } else {
+        PREFIX
+    };
     let path = match operation {
-        Request::TrafficSnapshot => format!("{PREFIX}/snapshot"),
-        Request::TrafficTotals { scope } => {
+        Request::TrafficSnapshot | Request::TrafficSnapshotV2 => format!("{prefix}/snapshot"),
+        Request::TrafficTotals { scope } | Request::TrafficTotalsV2 { scope } => {
             validate_scope(scope, false)?;
             let mut query = url::form_urlencoded::Serializer::new(String::new());
             scope_query(&mut query, scope);
-            format!("{PREFIX}?{}", query.finish())
+            format!("{prefix}?{}", query.finish())
         }
         Request::TrafficBuckets {
+            scope,
+            resolution,
+            after,
+            limit,
+        }
+        | Request::TrafficBucketsV2 {
             scope,
             resolution,
             after,
@@ -234,7 +332,7 @@ pub(super) fn encode(operation: &Request) -> io::Result<(Method, String, Vec<u8>
             if let Some(after) = after {
                 query.append_pair("after", &after.to_string());
             }
-            format!("{PREFIX}/buckets?{}", query.finish())
+            format!("{prefix}/buckets?{}", query.finish())
         }
         _ => return Err(invalid("fixed traffic request required")),
     };
@@ -270,6 +368,7 @@ pub(super) fn decode(
     expected: &str,
     authorization: store::RemoteAuthorization,
 ) -> io::Result<Reply> {
+    let split = is_split(operation);
     if authorization.node_id != expected
         || !canonical_id(expected)
         || authorization.authorization_revision == 0
@@ -279,16 +378,16 @@ pub(super) fn decode(
         return Err(invalid("traffic proof does not match the selected target"));
     }
     match operation {
-        Request::TrafficSnapshot => {
-            let value: NodeSnapshot = envelope(bytes, expected)?;
+        Request::TrafficSnapshot | Request::TrafficSnapshotV2 => {
+            let value: NodeSnapshot = envelope(bytes, expected, split)?;
             let floors = snapshot_floors(value.floors)?;
             let snapshot = durable::NodeSnapshot {
-                status: value.metadata.into_status(expected)?,
-                totals: counters(value.totals)?,
+                status: value.metadata.into_status(expected, split)?,
+                totals: counters(value.totals, split)?,
                 floors,
-                minute: windows(value.minute, 60_000, 60, None)?,
-                hour: windows(value.hour, 3_600_000, 48, None)?,
-                day: windows(value.day, 86_400_000, 30, None)?,
+                minute: windows(value.minute, 60_000, 60, None, split)?,
+                hour: windows(value.hour, 3_600_000, 48, None, split)?,
+                day: windows(value.day, 86_400_000, 30, None, split)?,
             };
             // Import and the wire client share domain bounds, including the
             // relationship between retained windows and cumulative totals.
@@ -298,17 +397,17 @@ pub(super) fn decode(
                 value: snapshot,
             })))
         }
-        Request::TrafficTotals { scope } => {
+        Request::TrafficTotals { scope } | Request::TrafficTotalsV2 { scope } => {
             validate_scope(scope, false)?;
-            let value: Totals = envelope(bytes, expected)?;
+            let value: Totals = envelope(bytes, expected, split)?;
             if value.scope != Scope::from(scope) {
                 return Err(invalid("traffic totals changed their selected scope"));
             }
             Ok(Reply::TrafficTotals(Box::new(Fetched {
                 authorization,
                 value: durable::Totals {
-                    status: value.metadata.into_status(expected)?,
-                    items: protocol_values(counters(value.values)?),
+                    status: value.metadata.into_status(expected, split)?,
+                    items: protocol_values(counters(value.values, split)?),
                 },
             })))
         }
@@ -317,9 +416,15 @@ pub(super) fn decode(
             resolution,
             after,
             limit,
+        }
+        | Request::TrafficBucketsV2 {
+            scope,
+            resolution,
+            after,
+            limit,
         } => {
             validate_scope(scope, true)?;
-            let value: Buckets = envelope(bytes, expected)?;
+            let value: Buckets = envelope(bytes, expected, split)?;
             if value.scope != Scope::from(scope)
                 || value.resolution != resolution_name(*resolution)
                 || !(1..=50).contains(limit)
@@ -333,6 +438,7 @@ pub(super) fn decode(
                 resolution_width(*resolution),
                 *limit as usize,
                 *after,
+                split,
             )?;
             let next_cursor = value
                 .next_cursor
@@ -355,7 +461,7 @@ pub(super) fn decode(
             Ok(Reply::TrafficBuckets(Box::new(Fetched {
                 authorization,
                 value: durable::BucketPage {
-                    status: value.metadata.into_status(expected)?,
+                    status: value.metadata.into_status(expected, split)?,
                     items: items
                         .into_iter()
                         .map(|window| durable::Bucket {
@@ -363,12 +469,9 @@ pub(super) fn decode(
                             items: window
                                 .values
                                 .into_iter()
-                                .enumerate()
-                                .filter_map(|(index, value)| {
-                                    value.map(|value| durable::ProtocolTotal {
-                                        protocol: protocol(index),
-                                        value,
-                                    })
+                                .zip(PROTOCOLS)
+                                .filter_map(|(value, protocol)| {
+                                    value.map(|value| durable::ProtocolTotal { protocol, value })
                                 })
                                 .collect(),
                         })
@@ -382,13 +485,23 @@ pub(super) fn decode(
     }
 }
 
-fn envelope<T: serde::de::DeserializeOwned>(bytes: &[u8], expected: &str) -> io::Result<T> {
-    if bytes.len() > MAX_RESPONSE_BYTES {
+fn envelope<T: serde::de::DeserializeOwned>(
+    bytes: &[u8],
+    expected: &str,
+    split: bool,
+) -> io::Result<T> {
+    if bytes.len()
+        > if split {
+            SPLIT_RESPONSE_BYTES
+        } else {
+            MAX_RESPONSE_BYTES
+        }
+    {
         return Err(invalid("traffic response exceeds its size limit"));
     }
     let envelope: Envelope<T> =
         serde_json::from_slice(bytes).map_err(|_| invalid("invalid traffic response JSON"))?;
-    if envelope.version != 1
+    if envelope.version != if split { 2 } else { 1 }
         || envelope.node_id != expected
         || envelope.resource != RESOURCE
         || envelope.definition != DEFINITION
@@ -400,13 +513,15 @@ fn envelope<T: serde::de::DeserializeOwned>(bytes: &[u8], expected: &str) -> io:
     Ok(envelope.data)
 }
 
-fn counters(values: [Counter; 3]) -> io::Result<[Snapshot; 3]> {
-    let [http, socks, masque] = values;
-    Ok([
-        http.into_value()?,
-        socks.into_value()?,
-        masque.into_value()?,
-    ])
+fn counters(values: Vec<Counter>, split: bool) -> io::Result<[Snapshot; PROTOCOL_COUNT]> {
+    if values.len() != if split { PROTOCOL_COUNT } else { 3 } {
+        return Err(invalid("invalid traffic total positions"));
+    }
+    let mut restored = [ZERO; PROTOCOL_COUNT];
+    for (slot, value) in restored.iter_mut().zip(values) {
+        *slot = value.into_value()?;
+    }
+    Ok(restored)
 }
 
 fn snapshot_floors(values: [Option<String>; 3]) -> io::Result<[Option<u64>; 3]> {
@@ -429,6 +544,7 @@ fn windows(
     width: u64,
     limit: usize,
     after: Option<u64>,
+    split: bool,
 ) -> io::Result<Vec<durable::Window>> {
     if values.len() > limit {
         return Err(invalid("traffic window count exceeds its limit"));
@@ -443,14 +559,16 @@ fn windows(
         {
             return Err(invalid("invalid traffic window order or contents"));
         }
-        let [http, socks, masque] = value.values;
+        if value.values.len() != if split { PROTOCOL_COUNT } else { 3 } {
+            return Err(invalid("invalid traffic window positions"));
+        }
+        let mut restored = [None; PROTOCOL_COUNT];
+        for (slot, value) in restored.iter_mut().zip(value.values) {
+            *slot = value.map(Counter::into_value).transpose()?;
+        }
         windows.push(durable::Window {
             window_id,
-            values: [
-                http.map(Counter::into_value).transpose()?,
-                socks.map(Counter::into_value).transpose()?,
-                masque.map(Counter::into_value).transpose()?,
-            ],
+            values: restored,
         });
         previous = Some(window_id);
     }
@@ -479,22 +597,11 @@ fn canonical_id(value: &str) -> bool {
         && URL_SAFE_NO_PAD.encode(decoded) == value
 }
 
-fn protocol(index: usize) -> Protocol {
-    match index {
-        0 => Protocol::Http,
-        1 => Protocol::Socks5,
-        _ => Protocol::Masque,
-    }
-}
-
-fn protocol_values(values: [Snapshot; 3]) -> Vec<durable::ProtocolTotal> {
+fn protocol_values(values: [Snapshot; PROTOCOL_COUNT]) -> Vec<durable::ProtocolTotal> {
     values
         .into_iter()
-        .enumerate()
-        .map(|(index, value)| durable::ProtocolTotal {
-            protocol: protocol(index),
-            value,
-        })
+        .zip(PROTOCOLS)
+        .map(|(value, protocol)| durable::ProtocolTotal { protocol, value })
         .collect()
 }
 
@@ -519,6 +626,9 @@ pub(super) fn routes() -> Router<Arc<AppState>> {
         .route(PREFIX, get(totals))
         .route("/node/v1/traffic/buckets", get(buckets))
         .route("/node/v1/traffic/snapshot", get(snapshot))
+        .route(SPLIT_PREFIX, get(totals))
+        .route("/node/v2/traffic/buckets", get(buckets))
+        .route("/node/v2/traffic/snapshot", get(snapshot))
 }
 
 async fn snapshot(
@@ -534,7 +644,14 @@ async fn snapshot(
         .map_err(storage_error)?;
     checked_node(&value.status, &state.node_id)?;
     store::remote_traffic::validate_snapshot(&value).map_err(storage_error)?;
-    respond(&state.node_id, NodeSnapshot::from(value))
+    let split = uri.path().starts_with(SPLIT_PREFIX);
+    if split && !value.status.http_split {
+        return Err(ApiError::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "traffic_protocols_unsupported",
+        ));
+    }
+    respond(&state.node_id, snapshot_view(value, split), split)
 }
 
 async fn totals(
@@ -554,15 +671,21 @@ async fn totals(
         .await
         .map_err(storage_error)?;
     checked_node(&value.status, &state.node_id)?;
+    let split = uri.path().starts_with(SPLIT_PREFIX);
+    if split && !value.status.http_split {
+        return Err(ApiError::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "traffic_protocols_unsupported",
+        ));
+    }
     respond(
         &state.node_id,
         Totals {
             metadata: value.status.into(),
             scope: wire_scope,
-            values: total_values(value.items)
-                .map_err(storage_error)?
-                .map(Counter::from),
+            values: wire_values(total_values(value.items).map_err(storage_error)?, split),
         },
+        split,
     )
 }
 
@@ -596,25 +719,31 @@ async fn buckets(
         .await
         .map_err(storage_error)?;
     checked_node(&value.status, &state.node_id)?;
+    let split = uri.path().starts_with(SPLIT_PREFIX);
+    if split && !value.status.http_split {
+        return Err(ApiError::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "traffic_protocols_unsupported",
+        ));
+    }
     let items = value
         .items
         .into_iter()
         .map(|bucket| {
-            let mut values = [None; 3];
+            let mut values = [None; PROTOCOL_COUNT];
             for item in bucket.items {
-                let index = match item.protocol {
-                    Protocol::Http => 0,
-                    Protocol::Socks5 => 1,
-                    Protocol::Masque => 2,
-                };
+                let index = protocol_index(item.protocol);
                 if values[index].replace(item.value).is_some() {
                     return Err(invalid("duplicate durable traffic protocol"));
                 }
             }
-            Ok(Window::from(durable::Window {
-                window_id: bucket.window_id,
-                values,
-            }))
+            Ok(window_view(
+                durable::Window {
+                    window_id: bucket.window_id,
+                    values,
+                },
+                split,
+            ))
         })
         .collect::<io::Result<Vec<_>>>()
         .map_err(storage_error)?;
@@ -628,18 +757,15 @@ async fn buckets(
             next_cursor: value.next_cursor.map(|value| value.to_string()),
             floor: value.floor.map(|value| value.to_string()),
         },
+        split,
     )
 }
 
-fn total_values(items: Vec<durable::ProtocolTotal>) -> io::Result<[Snapshot; 3]> {
-    let mut values = [ZERO; 3];
-    let mut seen = [false; 3];
+fn total_values(items: Vec<durable::ProtocolTotal>) -> io::Result<[Snapshot; PROTOCOL_COUNT]> {
+    let mut values = [ZERO; PROTOCOL_COUNT];
+    let mut seen = [false; PROTOCOL_COUNT];
     for item in items {
-        let index = match item.protocol {
-            Protocol::Http => 0,
-            Protocol::Socks5 => 1,
-            Protocol::Masque => 2,
-        };
+        let index = protocol_index(item.protocol);
         if std::mem::replace(&mut seen[index], true) {
             return Err(invalid("duplicate durable traffic protocol"));
         }
@@ -717,14 +843,14 @@ fn parse(uri: &http::Uri, history: bool) -> Result<Request, ApiError> {
     }
 }
 
-fn respond<T: Serialize>(node_id: &str, data: T) -> Result<Response, ApiError> {
-    struct Bounded<'a>(&'a mut Vec<u8>);
+fn respond<T: Serialize>(node_id: &str, data: T, split: bool) -> Result<Response, ApiError> {
+    struct Bounded<'a>(&'a mut Vec<u8>, usize);
     impl io::Write for Bounded<'_> {
         fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
             self.0
                 .len()
                 .checked_add(bytes.len())
-                .filter(|length| *length <= MAX_RESPONSE_BYTES)
+                .filter(|length| *length <= self.1)
                 .ok_or_else(|| invalid("traffic response cap reached"))?;
             self.0.extend_from_slice(bytes);
             Ok(bytes.len())
@@ -733,11 +859,16 @@ fn respond<T: Serialize>(node_id: &str, data: T) -> Result<Response, ApiError> {
             Ok(())
         }
     }
-    let mut bytes = Vec::with_capacity(MAX_RESPONSE_BYTES);
+    let limit = if split {
+        SPLIT_RESPONSE_BYTES
+    } else {
+        MAX_RESPONSE_BYTES
+    };
+    let mut bytes = Vec::with_capacity(limit);
     serde_json::to_writer(
-        Bounded(&mut bytes),
+        Bounded(&mut bytes, limit),
         &Envelope {
-            version: 1,
+            version: if split { 2 } else { 1 },
             node_id: node_id.to_owned(),
             resource: RESOURCE.to_owned(),
             definition: DEFINITION.to_owned(),
@@ -777,6 +908,7 @@ mod tests {
     use serde_json::{Value, json};
 
     use super::*;
+    use crate::access::traffic::Protocol;
 
     fn id(byte: u8) -> String {
         URL_SAFE_NO_PAD.encode([byte; 16])
@@ -784,6 +916,7 @@ mod tests {
 
     fn status() -> durable::Status {
         durable::Status {
+            http_split: true,
             node_id: id(1),
             meter_epoch: id(2),
             run_id: Some(id(3)),
@@ -829,7 +962,7 @@ mod tests {
             ((last - count + 1)..=last)
                 .map(|window| durable::Window {
                     window_id: window * width,
-                    values: [Some(maximum); 3],
+                    values: [Some(maximum), Some(maximum), Some(maximum), None, None],
                 })
                 .collect()
         };
@@ -837,12 +970,13 @@ mod tests {
             &id(1),
             NodeSnapshot::from(durable::NodeSnapshot {
                 status: status(),
-                totals: [maximum; 3],
+                totals: [maximum, maximum, maximum, ZERO, ZERO],
                 floors: [Some(0); 3],
                 minute: windows(60_000, 60),
                 hour: windows(3_600_000, 48),
                 day: windows(86_400_000, 30),
             }),
+            false,
         )
         .unwrap();
         let bytes = response.into_body().collect().await.unwrap().to_bytes();
@@ -862,12 +996,70 @@ mod tests {
         assert_eq!(snapshot.authorization.authorization_revision, 7);
         assert!(Arc::ptr_eq(&snapshot.authorization.leaf, &leaf));
         assert_eq!(snapshot.value.status.cursor, i64::MAX as u64);
-        assert_eq!(snapshot.value.totals, [maximum; 3]);
+        assert_eq!(
+            snapshot.value.totals,
+            [maximum, maximum, maximum, ZERO, ZERO]
+        );
         assert_eq!(snapshot.value.minute.len(), 60);
         assert_eq!(snapshot.value.hour.len(), 48);
         assert_eq!(snapshot.value.day.len(), 30);
         // An open current run is a stored fact, not a fabricated crash overlay.
         assert!(!snapshot.value.status.clean && !snapshot.value.status.loss_possible);
+    }
+
+    #[tokio::test]
+    async fn split_snapshot_uses_versioned_positions_and_fits_its_bounded_body() {
+        let maximum = Snapshot {
+            upload: u64::MAX,
+            download: u64::MAX,
+            saturated: true,
+        };
+        let windows = |count: u64, width| {
+            (0..count)
+                .map(|position| durable::Window {
+                    window_id: position * width,
+                    values: [Some(maximum); PROTOCOL_COUNT],
+                })
+                .collect()
+        };
+        let view = durable::NodeSnapshot {
+            status: status(),
+            totals: [maximum; PROTOCOL_COUNT],
+            floors: [Some(0); 3],
+            minute: windows(60, 60_000),
+            hour: windows(48, 3_600_000),
+            day: windows(30, 86_400_000),
+        };
+        let response = respond(&id(1), snapshot_view(view, true), true).unwrap();
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        assert!(bytes.len() <= SPLIT_RESPONSE_BYTES);
+        let Reply::TrafficSnapshot(snapshot) =
+            decode(&Request::TrafficSnapshotV2, &bytes, &id(1), proof()).unwrap()
+        else {
+            panic!("snapshot reply")
+        };
+        assert!(snapshot.value.status.http_split);
+        assert_eq!(snapshot.value.totals, [maximum; PROTOCOL_COUNT]);
+        assert_eq!(
+            snapshot.value.minute[0].values,
+            [Some(maximum); PROTOCOL_COUNT]
+        );
+        assert!(decode(&Request::TrafficSnapshot, &bytes, &id(1), proof()).is_err());
+        let mut wrong: Value = serde_json::from_slice(&bytes).unwrap();
+        wrong["data"]["totals"].as_array_mut().unwrap().pop();
+        assert!(
+            decode(
+                &Request::TrafficSnapshotV2,
+                &serde_json::to_vec(&wrong).unwrap(),
+                &id(1),
+                proof()
+            )
+            .is_err()
+        );
+        let (method, path, body) = encode(&Request::TrafficSnapshotV2).unwrap();
+        assert_eq!(method, Method::GET);
+        assert_eq!(path, "/node/v2/traffic/snapshot");
+        assert!(body.is_empty());
     }
 
     #[test]
@@ -997,7 +1189,7 @@ mod tests {
         assert_eq!(page.value.items[0].items.len(), 1);
         assert!(matches!(
             page.value.items[0].items[0].protocol,
-            Protocol::Http
+            Protocol::HttpLegacy
         ));
         assert!(matches!(
             page.value.items[1].items[0].protocol,

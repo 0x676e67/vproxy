@@ -41,6 +41,7 @@ export default {
   ...notifications,
   "menu.nodes": "节点管理",
   "app.language": "界面语言",
+  "app.tools": "工具",
   "app.projectRepository": "GitHub 项目仓库",
   "app.pageUnavailable": "页面未能显示",
   "app.pageReloadNotice":

@@ -275,6 +275,8 @@ async fn once(
         endpoints::SETTINGS_RESPONSE_BYTES
     } else if matches!(operation, Request::Witness(_)) {
         witness::MAX_RESPONSE_BYTES
+    } else if traffic::is_split(&operation) {
+        traffic::SPLIT_RESPONSE_BYTES
     } else {
         MAX_RESPONSE_BYTES
     };
@@ -523,6 +525,9 @@ pub(super) fn encode(operation: &Request) -> io::Result<(Method, String, Vec<u8>
         | Request::PoolPreset { .. }
         | Request::PresetCatalog => return presets::encode(operation),
         Request::TrafficSnapshot
+        | Request::TrafficSnapshotV2
+        | Request::TrafficTotalsV2 { .. }
+        | Request::TrafficBucketsV2 { .. }
         | Request::TrafficTotals { .. }
         | Request::TrafficBuckets { .. } => {
             return traffic::encode(operation);
@@ -751,6 +756,9 @@ pub(super) fn decode(
         | Request::PresetCatalog => presets::decode(operation, bytes, expected, status),
         Request::OperationsSnapshot
         | Request::TrafficSnapshot
+        | Request::TrafficSnapshotV2
+        | Request::TrafficTotalsV2 { .. }
+        | Request::TrafficBucketsV2 { .. }
         | Request::TrafficTotals { .. }
         | Request::TrafficBuckets { .. } => Err(invalid(
             "snapshot reply requires the verified TLS authorization proof",
@@ -1032,6 +1040,11 @@ fn remote_error_with_snapshot(
             "alerts_changed" if status == StatusCode::CONFLICT => Some("alerts_changed"),
             "traffic_busy" => Some("traffic_busy"),
             "traffic_unavailable" => Some("traffic_unavailable"),
+            "traffic_protocols_unsupported"
+                if allow_unsupported && status == StatusCode::SERVICE_UNAVAILABLE =>
+            {
+                Some("traffic_protocols_unsupported")
+            }
             "proxy_unavailable" => Some("proxy_unavailable"),
             "invalid_endpoint" => Some("invalid_endpoint"),
             "endpoint_revision_changed" => Some("endpoint_revision_changed"),

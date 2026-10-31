@@ -34,6 +34,20 @@ pub(crate) struct Snapshot {
     pub(crate) saturated: bool,
 }
 
+impl Snapshot {
+    /// Combine disjoint payload groups without wrapping either direction or
+    /// clearing a previous lower-bound marker. This does not add wire overhead.
+    pub(crate) fn sum(self, other: Self) -> Self {
+        let upload = self.upload.checked_add(other.upload);
+        let download = self.download.checked_add(other.download);
+        Self {
+            upload: upload.unwrap_or(u64::MAX),
+            download: download.unwrap_or(u64::MAX),
+            saturated: self.saturated || other.saturated || upload.is_none() || download.is_none(),
+        }
+    }
+}
+
 /// Directly held by the bounded registry and admitted flows. No identity lookup,
 /// lock, allocation, database operation or peer request occurs while adding bytes.
 pub(crate) struct Counter {

@@ -178,7 +178,10 @@ describe("managed connection configuration", () => {
     ]);
     const source = readFileSync(
       fileURLToPath(
-        new URL("../components/Presets/ConnectionModal.tsx", import.meta.url),
+        new URL(
+          "../components/Connections/ConnectionModal.tsx",
+          import.meta.url,
+        ),
       ),
       "utf8",
     );

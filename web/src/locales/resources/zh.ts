@@ -3,8 +3,6 @@ export default {
   "resources.title": "IP 资源",
   "resources.description": "管理所选节点的有限出口地址与共享地址池。",
   "resources.localOnly": "仅限本机节点",
-  "resources.localHint":
-    "这些资源属于本机；可通过节点选择器查看或管理已登记且支持 IPAM v2 的目标。",
   "resources.remoteScope": "所选目标的资源",
   "resources.remoteScopeHint":
     "登记不等于控制授权，子节点必须明确授予本控制节点 owner。读取失败或版本不支持时，不会回退操作本机资源。",
@@ -43,7 +41,6 @@ export default {
   "resources.revision": "资源版本",
   "resources.globalRevision": "全局策略版本",
   "resources.health": "健康状况",
-  "resources.healthUnknown": "此处未查询",
   "resources.healthHint":
     "资源清单不是健康快照，具体证据请查看健康观测；“启用”仅表示可参与选择，不代表网络可达。",
   "resources.register": "登记",

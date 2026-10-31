@@ -12,9 +12,57 @@ use std::{
 
 use crate::traffic::{Counter, Snapshot};
 
-use super::{MAX_CREDENTIALS, MAX_USERS, Policy, Protocol, routing::MAX_POOLS, valid_id};
+use super::{MAX_CREDENTIALS, MAX_USERS, Policy, routing::MAX_POOLS, valid_id};
 
-const PROTOCOLS: [Protocol; 3] = [Protocol::Http, Protocol::Socks5, Protocol::Masque];
+/// Accounting identity, separate from the backwards-compatible user permission.
+/// Slots 0..2 retain their durable meaning. Slot 0 is never used for new flows:
+/// old HTTP-family bytes cannot retrospectively identify proxy TLS transport.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum Protocol {
+    HttpLegacy,
+    Socks5,
+    Masque,
+    Http,
+    Https,
+}
+
+pub(crate) const PROTOCOL_COUNT: usize = 5;
+pub(crate) const PROTOCOLS: [Protocol; PROTOCOL_COUNT] = [
+    Protocol::HttpLegacy,
+    Protocol::Socks5,
+    Protocol::Masque,
+    Protocol::Http,
+    Protocol::Https,
+];
+
+impl From<super::Protocol> for Protocol {
+    fn from(value: super::Protocol) -> Self {
+        match value {
+            super::Protocol::Http => Self::Http,
+            super::Protocol::Socks5 => Self::Socks5,
+            super::Protocol::Masque => Self::Masque,
+        }
+    }
+}
+
+/// Compatibility projection only: older read protocols have one HTTP-family
+/// position. Never write this combined value back into the historical slot.
+pub(crate) fn legacy_values(values: [Snapshot; PROTOCOL_COUNT]) -> [Snapshot; 3] {
+    [
+        values[0].sum(values[3]).sum(values[4]),
+        values[1],
+        values[2],
+    ]
+}
+
+pub(crate) fn legacy_window(values: [Option<Snapshot>; PROTOCOL_COUNT]) -> [Option<Snapshot>; 3] {
+    let http = [values[0], values[3], values[4]]
+        .into_iter()
+        .flatten()
+        .reduce(Snapshot::sum);
+    [http, values[1], values[2]]
+}
 const MAX_SERIES: usize = MAX_CREDENTIALS * PROTOCOLS.len();
 const ZERO: Snapshot = Snapshot {
     upload: 0,
@@ -58,12 +106,12 @@ pub(crate) struct PoolSnapshot {
 struct CredentialMeters {
     user_id: Arc<str>,
     credential_id: Arc<str>,
-    values: [Arc<Counter>; 3],
+    values: [Arc<Counter>; PROTOCOL_COUNT],
 }
 
 struct PoolMeters {
     id: Arc<str>,
-    values: [Arc<Counter>; 3],
+    values: [Arc<Counter>; PROTOCOL_COUNT],
 }
 
 /// Permanent identity capacity bounds retained meters, including deleted or
@@ -75,7 +123,7 @@ pub(crate) struct Registry {
 }
 
 impl Registry {
-    /// Restore at most 8192 credentials / 24576 protocol series. Missing protocol
+    /// Restore at most 8192 credentials / 40960 protocol series. Missing protocol
     /// rows start at zero; duplicate rows and changing a credential's user fail.
     /// Construction performs no I/O and returns no partially initialized owner.
     pub(crate) fn new(seed: Vec<Seed>) -> io::Result<Arc<Self>> {
@@ -84,7 +132,7 @@ impl Registry {
         }
         struct Pending {
             user_id: String,
-            values: [Option<Snapshot>; 3],
+            values: [Option<Snapshot>; PROTOCOL_COUNT],
         }
         let mut pending: HashMap<String, Pending> = HashMap::new();
         let mut users = HashSet::new();
@@ -97,7 +145,7 @@ impl Registry {
                 .entry(value.credential_id)
                 .or_insert_with(|| Pending {
                     user_id: value.user_id.clone(),
-                    values: [None; 3],
+                    values: [None; PROTOCOL_COUNT],
                 });
             if entry.user_id != value.user_id {
                 return Err(invalid("traffic credential cannot change its user"));
@@ -135,12 +183,14 @@ impl Registry {
         if pools.len() > MAX_POOLS * PROTOCOLS.len() {
             return Err(invalid("traffic pool seed exceeds capacity"));
         }
-        let mut pending: HashMap<String, [Option<Snapshot>; 3]> = HashMap::new();
+        let mut pending: HashMap<String, [Option<Snapshot>; PROTOCOL_COUNT]> = HashMap::new();
         for pool in pools {
             if !valid_id(&pool.pool_id) {
                 return Err(invalid("invalid traffic pool identity"));
             }
-            let values = pending.entry(pool.pool_id).or_insert([None; 3]);
+            let values = pending
+                .entry(pool.pool_id)
+                .or_insert([None; PROTOCOL_COUNT]);
             if values[protocol_index(pool.protocol)]
                 .replace(pool.value)
                 .is_some()
@@ -318,11 +368,13 @@ impl Registry {
     }
 }
 
-pub(super) const fn protocol_index(protocol: Protocol) -> usize {
+pub(crate) const fn protocol_index(protocol: Protocol) -> usize {
     match protocol {
-        Protocol::Http => 0,
+        Protocol::HttpLegacy => 0,
         Protocol::Socks5 => 1,
         Protocol::Masque => 2,
+        Protocol::Http => 3,
+        Protocol::Https => 4,
     }
 }
 
@@ -341,7 +393,7 @@ mod tests {
     use super::*;
     use crate::{
         access::{
-            Reader,
+            Protocol as AccessProtocol, Reader,
             tests::{LOGIN, policy, secret},
         },
         traffic::Direction,
@@ -355,6 +407,57 @@ mod tests {
             .find(|row| row.credential_id.as_ref() == credential && row.protocol == protocol)
             .unwrap()
             .value
+    }
+
+    #[test]
+    fn http_and_https_keep_one_permission_and_concurrency_budget_but_separate_meters() {
+        let initial = policy(1, 2);
+        let credential = initial.credentials[0].id.clone();
+        let registry = Registry::new(vec![Seed {
+            user_id: initial.users[0].id.clone(),
+            credential_id: credential.clone(),
+            protocol: Protocol::HttpLegacy,
+            value: Snapshot {
+                upload: 7,
+                download: 11,
+                saturated: false,
+            },
+        }])
+        .unwrap();
+        let reader = Reader::with_traffic(initial.clone(), registry.clone()).unwrap();
+        let plain = reader.authenticate_http(LOGIN, &secret(), false).unwrap();
+        let secure = reader.authenticate_http(LOGIN, &secret(), true).unwrap();
+        assert!(matches!(
+            reader.authenticate_http(LOGIN, &secret(), true),
+            Err(super::super::Error::Capacity)
+        ));
+        plain.lease.meter(Direction::Upload).add(3);
+        secure.lease.meter(Direction::Upload).add(5);
+        secure.lease.meter(Direction::Download).add(13);
+        drop((plain, secure));
+        assert_eq!(
+            value(&registry, &credential, Protocol::HttpLegacy).upload,
+            7
+        );
+        assert_eq!(value(&registry, &credential, Protocol::Http).upload, 3);
+        assert_eq!(
+            value(&registry, &credential, Protocol::Https),
+            Snapshot {
+                upload: 5,
+                download: 13,
+                saturated: false
+            }
+        );
+        let mut restricted = initial;
+        restricted.revision = 2;
+        restricted.users[0].protocols = vec![AccessProtocol::Socks5];
+        reader.publish(restricted).unwrap();
+        for encrypted in [false, true] {
+            assert!(matches!(
+                reader.authenticate_http(LOGIN, &secret(), encrypted),
+                Err(super::super::Error::Denied)
+            ));
+        }
     }
 
     #[test]
@@ -375,11 +478,11 @@ mod tests {
         .unwrap();
         let reader = Reader::with_traffic(initial, registry.clone()).unwrap();
         let old = reader
-            .authenticate(LOGIN, &secret(), Protocol::Http)
+            .authenticate(LOGIN, &secret(), AccessProtocol::Http)
             .unwrap();
         old.lease.meter(Direction::Upload).add(3);
         let other = reader
-            .authenticate(LOGIN, &secret(), Protocol::Socks5)
+            .authenticate(LOGIN, &secret(), AccessProtocol::Socks5)
             .unwrap();
         other.lease.meter(Direction::Download).add(5);
         let mut rotated = policy(2, 8);
@@ -389,7 +492,7 @@ mod tests {
             crate::access::digest_secret(&credential, new_secret.as_bytes());
         reader.publish(rotated).unwrap();
         let current = reader
-            .authenticate(LOGIN, new_secret.as_bytes(), Protocol::Http)
+            .authenticate(LOGIN, new_secret.as_bytes(), AccessProtocol::Http)
             .unwrap();
         current.lease.meter(Direction::Download).add(13);
         let mut deleted = policy(3, 8);
@@ -415,7 +518,7 @@ mod tests {
                 saturated: false
             }
         );
-        assert_eq!(registry.snapshot().unwrap().len(), 3);
+        assert_eq!(registry.snapshot().unwrap().len(), PROTOCOL_COUNT);
     }
 
     #[test]
@@ -441,7 +544,7 @@ mod tests {
         let mut stale = policy(1, 2);
         stale.credentials[0].id = URL_SAFE_NO_PAD.encode([90; 16]);
         assert!(reader.publish(stale).is_err());
-        assert_eq!(registry.snapshot().unwrap().len(), 3);
+        assert_eq!(registry.snapshot().unwrap().len(), PROTOCOL_COUNT);
         let mut reassigned = policy(2, 2);
         let mut other_user = reassigned.users[0].clone();
         other_user.id = URL_SAFE_NO_PAD.encode([91; 16]);
@@ -466,7 +569,7 @@ mod tests {
         assert!(reader.publish(reassigned).is_err());
         assert_eq!(reader.revision().unwrap(), 1);
         let rows = registry.snapshot().unwrap();
-        assert_eq!(rows.len(), 3);
+        assert_eq!(rows.len(), PROTOCOL_COUNT);
         assert!(
             rows.iter()
                 .all(|row| row.user_id.as_ref() == user && row.credential_id.as_ref() == credential)
@@ -535,25 +638,34 @@ mod tests {
             .authenticate(
                 &format!("{LOGIN}-pool-{}", "1e".repeat(16)),
                 &secret(),
-                Protocol::Http,
+                AccessProtocol::Http,
             )
             .unwrap();
         let b = reader
             .authenticate(
                 &format!("{LOGIN}-pool-{}", "1f".repeat(16)),
                 &secret(),
-                Protocol::Http,
+                AccessProtocol::Http,
             )
             .unwrap();
         let exit = reader
             .authenticate(
                 &format!("{LOGIN}-exit-{}", "14".repeat(16)),
                 &secret(),
-                Protocol::Http,
+                AccessProtocol::Http,
             )
             .unwrap();
         assert_eq!(a.source, b.source);
         assert_eq!(a.source, exit.source);
+        let secure = reader
+            .authenticate_http(
+                &format!("{LOGIN}-pool-{}", "1e".repeat(16)),
+                &secret(),
+                true,
+            )
+            .unwrap();
+        assert_eq!(secure.source, a.source);
+        secure.lease.meter(Direction::Upload).add(17);
         a.lease.meter(Direction::Upload).add(3);
         b.lease.meter(Direction::Upload).add(11);
         exit.lease.meter(Direction::Upload).add(13);
@@ -566,14 +678,24 @@ mod tests {
                 .authenticate(
                     &format!("{LOGIN}-pool-{}", "1e".repeat(16)),
                     &secret(),
-                    Protocol::Http
+                    AccessProtocol::Http
                 )
                 .is_err()
         );
         a.lease.meter(Direction::Upload).add(5);
-        drop((a, b, exit, reader));
+        drop((a, b, exit, secure, reader));
         assert_eq!(value(&registry, &credential, Protocol::Http).upload, 32);
+        assert_eq!(value(&registry, &credential, Protocol::Https).upload, 17);
         let values = registry.pool_snapshot().unwrap();
+        assert_eq!(
+            values
+                .iter()
+                .find(|v| v.pool_id.as_ref() == pool_a && v.protocol == Protocol::Https)
+                .unwrap()
+                .value
+                .upload,
+            17
+        );
         assert_eq!(
             values
                 .iter()
@@ -625,6 +747,9 @@ mod tests {
             ));
         assert!(Reader::with_traffic(candidate, registry.clone()).is_err());
         assert!(registry.snapshot().unwrap().is_empty());
-        assert_eq!(registry.pool_snapshot().unwrap().len(), MAX_POOLS * 3);
+        assert_eq!(
+            registry.pool_snapshot().unwrap().len(),
+            MAX_POOLS * PROTOCOL_COUNT
+        );
     }
 }

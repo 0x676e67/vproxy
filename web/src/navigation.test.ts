@@ -196,15 +196,16 @@ describe("fixed internal navigation boundary", () => {
     // Historical foreign observations expose one reviewed source-node link.
     // A stopped local connection form also offers its fixed service-page link.
     expect(serviceLinks.sort()).toEqual([
-      "components/Presets/ConnectionModal.tsx",
+      "components/Connections/ConnectionModal.tsx",
       "pages/Nodes/FirstUse.tsx",
+      "pages/Nodes/LiveNodes.tsx",
       "pages/Nodes/LiveNodes.tsx",
       "pages/Users/index.tsx",
     ]);
     expect(projectLinks).toBe(1);
     // The inbox adds three reviewed history links and replaces its old bell
     // link with a native dialog button: net two additional canonical links.
-    expect(links).toBe(35);
+    expect(links).toBe(36);
   });
 
   it("rejects URL and pattern input before canonical identifiers reach navigation", () => {

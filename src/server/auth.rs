@@ -18,10 +18,12 @@ impl From<AuthMode> for Source {
     }
 }
 
-/// Application protocol, independent of whether a HTTP listener uses TLS.
+/// Actual client-to-proxy service. HTTP and HTTPS share one access permission,
+/// but retain separate accounting identities; CONNECT targets do not select it.
 #[derive(Clone, Copy)]
 pub(crate) enum Service {
     Http,
+    Https,
     #[cfg(feature = "management")]
     Socks5,
     Masque,
@@ -146,22 +148,23 @@ impl Source {
             #[cfg(feature = "management")]
             Self::Managed(reader) => {
                 let protocol = match _service {
-                    Service::Http => crate::access::Protocol::Http,
+                    Service::Http | Service::Https => crate::access::Protocol::Http,
                     Service::Socks5 => crate::access::Protocol::Socks5,
                     Service::Masque => crate::access::Protocol::Masque,
                 };
-                let result = reader
-                    .authenticate(
-                        username.ok_or(Error::InvalidCredentials)?,
-                        password.ok_or(Error::InvalidCredentials)?,
-                        protocol,
-                    )
-                    .map_err(|error| match error {
-                        crate::access::Error::InvalidCredentials => Error::InvalidCredentials,
-                        crate::access::Error::Denied => Error::Denied,
-                        crate::access::Error::Unavailable => Error::Unavailable,
-                        crate::access::Error::Capacity => Error::Capacity,
-                    })?;
+                let username = username.ok_or(Error::InvalidCredentials)?;
+                let password = password.ok_or(Error::InvalidCredentials)?;
+                let result = if matches!(_service, Service::Https) {
+                    reader.authenticate_http(username, password, true)
+                } else {
+                    reader.authenticate(username, password, protocol)
+                }
+                .map_err(|error| match error {
+                    crate::access::Error::InvalidCredentials => Error::InvalidCredentials,
+                    crate::access::Error::Denied => Error::Denied,
+                    crate::access::Error::Unavailable => Error::Unavailable,
+                    crate::access::Error::Capacity => Error::Capacity,
+                })?;
                 // Stable non-secret IDs let an operator correlate a flow with
                 // its policy; wire login, extensions and secret stay absent.
                 tracing::trace!(

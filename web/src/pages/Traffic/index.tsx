@@ -19,7 +19,7 @@ import Table from "../../components/DataTable";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { apiError, type ApiError } from "../../api/client";
 import { errorMessage } from "../../api/messages";
-import { canonicalId, type ProxyProtocol } from "../../api/proxy";
+import { canonicalId } from "../../api/proxy";
 import {
   compactBytes,
   exactBytes,
@@ -33,13 +33,15 @@ import {
   type TrafficMetadata,
   type TrafficScope,
   type TrafficTotal,
+  type TrafficTotals,
   type TrafficSource,
   type TrafficView,
+  type TrafficProtocol,
 } from "../../api/traffic";
 import { useManagement } from "../../auth/context";
 import ManagementGate from "../../components/ManagementGate";
 import { useMessages } from "../../hooks/useMessages";
-import ScopePicker from "../Users/ScopePicker";
+import ScopePicker from "../../components/ScopePicker";
 import ScopeError from "../../components/ScopeError";
 import { useScopeNavigation } from "../../routing/ScopeNavigation";
 
@@ -74,8 +76,10 @@ function BytesView({
     </Tooltip>
   );
 }
-const protocolLabel = (value: ProxyProtocol) =>
-  value === "http" ? "HTTP / HTTPS" : value.toUpperCase();
+const protocolLabel = (
+  value: TrafficProtocol,
+  t: ReturnType<typeof useMessages>["t"],
+) => (value === "http_legacy" ? t("traffic.httpLegacy") : value.toUpperCase());
 
 function SourceNotice({ source }: { source: TrafficSource }) {
   const { t, intl } = useMessages();
@@ -129,8 +133,14 @@ function SourceNotice({ source }: { source: TrafficSource }) {
   );
 }
 
-function Provenance({ value }: { value: TrafficMetadata }) {
-  const { t } = useMessages();
+function Provenance({
+  value,
+  runtime,
+}: {
+  value: TrafficMetadata;
+  runtime?: TrafficTotals;
+}) {
+  const { t, intl } = useMessages();
   const time = useTrafficTime();
   return (
     <Collapse
@@ -142,6 +152,28 @@ function Provenance({ value }: { value: TrafficMetadata }) {
             <Descriptions
               column={{ xs: 1, md: 2 }}
               items={[
+                ...(runtime
+                  ? [
+                      {
+                        key: "run",
+                        label: t("traffic.run"),
+                        children: runtime.active_run_id ?? "—",
+                      },
+                      {
+                        key: "cycle",
+                        label: t("traffic.completedAt"),
+                        children: time(runtime.last_completed_cycle_at_unix_ms),
+                      },
+                      {
+                        key: "age",
+                        label: t("traffic.cycleAge"),
+                        children:
+                          runtime.last_completed_cycle_age_millis === null
+                            ? "—"
+                            : `${intl.formatNumber(runtime.last_completed_cycle_age_millis)} ms`,
+                      },
+                    ]
+                  : []),
                 {
                   key: "node",
                   label: t("traffic.origin"),
@@ -211,6 +243,7 @@ export function Completeness({
 }) {
   const { t } = useMessages();
   const warnings = [
+    ...(value.http_split === false ? [t("traffic.httpUnsplit")] : []),
     ...(remote && !value.last_run_clean ? [t("traffic.remoteOpenRun")] : []),
     ...(value.loss_possible ? [t("traffic.loss")] : []),
     ...(value.history_gap ? [t("traffic.gap")] : []),
@@ -243,7 +276,7 @@ export function Completeness({
 interface HistoryRow {
   key: string;
   window_id: string;
-  protocol: ProxyProtocol;
+  protocol: TrafficProtocol;
   sample: BucketTotal | null;
 }
 
@@ -256,11 +289,11 @@ function Snapshot({
 }: {
   peer: string | null;
   scope: TrafficScope;
-  protocol?: ProxyProtocol;
+  protocol?: TrafficProtocol;
   resolution: Resolution;
   onBusy: (busy: boolean) => void;
 }) {
-  const { t, intl } = useMessages();
+  const { t } = useMessages();
   const time = useTrafficTime();
   const { controller, state } = useManagement();
   const session = state.session;
@@ -359,7 +392,7 @@ function Snapshot({
     {
       title: t("traffic.protocol"),
       dataIndex: "protocol",
-      render: protocolLabel,
+      render: (value: TrafficProtocol) => protocolLabel(value, t),
     },
     {
       title: t("traffic.durableUpload"),
@@ -416,13 +449,19 @@ function Snapshot({
   ];
   const rows: HistoryRow[] =
     history?.items.flatMap((bucket) =>
-      (protocol ? [protocol] : trafficProtocols).map((protocol) => ({
-        key: `${bucket.window_id}:${protocol}`,
-        window_id: bucket.window_id,
-        protocol,
-        sample:
-          bucket.items.find((sample) => sample.protocol === protocol) ?? null,
-      })),
+      (protocol ? [protocol] : trafficProtocols)
+        .filter(
+          (value) =>
+            history.http_split !== false ||
+            (value !== "http" && value !== "https"),
+        )
+        .map((protocol) => ({
+          key: `${bucket.window_id}:${protocol}`,
+          window_id: bucket.window_id,
+          protocol,
+          sample:
+            bucket.items.find((sample) => sample.protocol === protocol) ?? null,
+        })),
     ) ?? [];
   const historyColumns: ColumnsType<HistoryRow> = [
     // window_id is a validated safe timestamp, never a byte counter.
@@ -434,7 +473,7 @@ function Snapshot({
     {
       title: t("traffic.protocol"),
       dataIndex: "protocol",
-      render: protocolLabel,
+      render: (value: TrafficProtocol) => protocolLabel(value, t),
     },
     {
       title: t("traffic.upload"),
@@ -522,29 +561,6 @@ function Snapshot({
                 checkpointStage={totals.checkpoint_failure_stage}
                 remote={view.totalsSource !== null}
               />
-              <Descriptions
-                column={{ xs: 1, md: 2 }}
-                items={[
-                  {
-                    key: "run",
-                    label: t("traffic.run"),
-                    children: totals.active_run_id ?? "—",
-                  },
-                  {
-                    key: "cycle",
-                    label: t("traffic.completedAt"),
-                    children: time(totals.last_completed_cycle_at_unix_ms),
-                  },
-                  {
-                    key: "age",
-                    label: t("traffic.cycleAge"),
-                    children:
-                      totals.last_completed_cycle_age_millis === null
-                        ? "—"
-                        : `${intl.formatNumber(totals.last_completed_cycle_age_millis)} ms`,
-                  },
-                ]}
-              />
               <Table<TrafficTotal>
                 rowKey="protocol"
                 columns={columns}
@@ -552,7 +568,7 @@ function Snapshot({
                 pagination={false}
                 scroll={{ x: 720 }}
               />
-              <Provenance value={totals} />
+              <Provenance value={totals} runtime={totals} />
             </>
           )}
         </Space>
@@ -707,16 +723,6 @@ function Workspace({
             );
           }}
         />
-        <Collapse
-          size="small"
-          items={[
-            {
-              key: "definition",
-              label: t("traffic.about"),
-              children: t("traffic.definition"),
-            },
-          ]}
-        />
         <>
           <Typography.Text type="secondary">
             {t(peer === null ? "traffic.local" : "traffic.remoteHint")}
@@ -780,14 +786,16 @@ function Workspace({
                   { value: "all", label: t("traffic.allProtocols") },
                   ...trafficProtocols.map((value) => ({
                     value,
-                    label: protocolLabel(value),
+                    label: protocolLabel(value, t),
                   })),
                 ]}
                 onChange={(value) =>
                   selectScope(
                     trafficHref(scope, peer, {
                       protocol:
-                        value === "all" ? undefined : (value as ProxyProtocol),
+                        value === "all"
+                          ? undefined
+                          : (value as TrafficProtocol),
                       resolution,
                     }),
                   )
@@ -830,6 +838,16 @@ function Workspace({
             protocol={protocol}
             resolution={resolution}
             onBusy={setReading}
+          />
+          <Collapse
+            size="small"
+            items={[
+              {
+                key: "definition",
+                label: t("traffic.about"),
+                children: t("traffic.definition"),
+              },
+            ]}
           />
         </>
       </Space>

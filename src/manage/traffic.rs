@@ -19,7 +19,10 @@ use super::{
     store,
 };
 use crate::access::traffic::{PoolSnapshot, Registry, SeriesSnapshot};
-use crate::{access::Protocol, traffic::Snapshot};
+use crate::{
+    access::traffic::{PROTOCOL_COUNT, Protocol},
+    traffic::Snapshot,
+};
 
 const CHECKPOINT_INTERVAL: Duration = Duration::from_secs(5);
 const BATCH_LIMIT: usize = 256;
@@ -123,8 +126,8 @@ struct State {
     // Absolute values confirmed by storage. Filtering unchanged series here
     // keeps an idle 8192-credential node from opening 96 write transactions per
     // tick. Only a confirmed commit advances these bounded cold-path maps.
-    credentials: HashMap<Arc<str>, [Snapshot; 3]>,
-    pools: HashMap<Arc<str>, [Snapshot; 3]>,
+    credentials: HashMap<Arc<str>, [Snapshot; PROTOCOL_COUNT]>,
+    pools: HashMap<Arc<str>, [Snapshot; PROTOCOL_COUNT]>,
 }
 
 /// A cached checkpoint observation, not a promise of current wire throughput.
@@ -165,11 +168,14 @@ pub(super) async fn new(policy: Arc<Coordinator>) -> io::Result<(Handle, Runner)
     let mut credentials = HashMap::new();
     let mut pool_values = HashMap::new();
     for series in series {
-        credentials.entry(series.credential_id).or_insert([ZERO; 3])[index(series.protocol)] =
-            series.value;
+        credentials
+            .entry(series.credential_id)
+            .or_insert([ZERO; PROTOCOL_COUNT])[index(series.protocol)] = series.value;
     }
     for pool in pools {
-        pool_values.entry(pool.pool_id).or_insert([ZERO; 3])[index(pool.protocol)] = pool.value;
+        pool_values
+            .entry(pool.pool_id)
+            .or_insert([ZERO; PROTOCOL_COUNT])[index(pool.protocol)] = pool.value;
     }
     let handle = Handle(Arc::new(Shared {
         policy,
@@ -322,10 +328,14 @@ impl Handle {
                 }
                 state.durable = durable;
                 for (id, protocol, value) in confirmed_series {
-                    state.credentials.entry(id).or_insert([ZERO; 3])[index(protocol)] = value;
+                    state
+                        .credentials
+                        .entry(id)
+                        .or_insert([ZERO; PROTOCOL_COUNT])[index(protocol)] = value;
                 }
                 for (id, protocol, value) in confirmed_pools {
-                    state.pools.entry(id).or_insert([ZERO; 3])[index(protocol)] = value;
+                    state.pools.entry(id).or_insert([ZERO; PROTOCOL_COUNT])[index(protocol)] =
+                        value;
                 }
             }
             if drained {
@@ -426,11 +436,7 @@ pub(super) fn now() -> Option<u64> {
 }
 
 fn index(protocol: Protocol) -> usize {
-    match protocol {
-        Protocol::Http => 0,
-        Protocol::Socks5 => 1,
-        Protocol::Masque => 2,
-    }
+    crate::access::traffic::protocol_index(protocol)
 }
 
 /// A stored open marker is normal only for this process's matching active run.
@@ -477,7 +483,7 @@ mod tests {
                     1,
                     PolicyChange::CreateUser {
                         name: "source traffic owner".into(),
-                        protocols: vec![Protocol::Http],
+                        protocols: vec![crate::access::Protocol::Http],
                         concurrent_limit: 2,
                     },
                 )
@@ -498,7 +504,11 @@ mod tests {
             let admitted = live
                 .source
                 .reader()
-                .authenticate(&credential.login, secret.as_bytes(), Protocol::Http)
+                .authenticate(
+                    &credential.login,
+                    secret.as_bytes(),
+                    crate::access::Protocol::Http,
+                )
                 .map_err(|_| invalid())?;
             Ok((
                 credential.id,
@@ -619,7 +629,7 @@ mod tests {
                             .state()?
                             .credentials
                             .get(id.as_str())
-                            .ok_or_else(invalid)?[0],
+                            .ok_or_else(invalid)?[index(Protocol::Http)],
                         ZERO
                     );
                     // Existing admitted work retains its direct counter even while new
@@ -633,8 +643,8 @@ mod tests {
                             .state()?
                             .credentials
                             .get(id.as_str())
-                            .ok_or_else(invalid)?[0]
-                            .upload,
+                            .ok_or_else(invalid)?[index(Protocol::Http)]
+                        .upload,
                         92
                     );
                     handle.checkpoint().await?;
@@ -948,7 +958,7 @@ mod tests {
                     revision,
                     PolicyChange::CreateUser {
                         name: "counter owner".into(),
-                        protocols: vec![Protocol::Http],
+                        protocols: vec![crate::access::Protocol::Http],
                         concurrent_limit: 8,
                     },
                 )
@@ -1005,7 +1015,11 @@ mod tests {
             let admitted = fixture
                 .policy()
                 .reader()
-                .authenticate(&self.login, self.secret.as_bytes(), Protocol::Http)
+                .authenticate(
+                    &self.login,
+                    self.secret.as_bytes(),
+                    crate::access::Protocol::Http,
+                )
                 .expect("real managed admission");
             assert_eq!(admitted.lease.user_id.as_ref(), self.user);
             // A queued DATA/writer may outlive the authentication result itself.
@@ -1303,7 +1317,7 @@ mod tests {
                 .state()?
                 .credentials
                 .get(identity.credential.as_str())
-                .unwrap()[0],
+                .unwrap()[index(Protocol::Http)],
             confirmed
         );
         assert_eq!(
@@ -1380,7 +1394,9 @@ mod tests {
         let sampled = handle.sample().await?.0;
         let value = sampled
             .into_iter()
-            .find(|row| row.credential_id.as_ref() == identity.credential)
+            .find(|row| {
+                row.credential_id.as_ref() == identity.credential && row.protocol == Protocol::Http
+            })
             .expect("live credential sample")
             .value;
         assert_eq!(value.upload, 17);
@@ -1451,7 +1467,7 @@ mod tests {
         assert_eq!(delayed.completion_sequence, before.completion_sequence);
         assert_eq!(fixture.total(&identity.credential)?, confirmed);
         assert_eq!(
-            handle.state()?.credentials[identity.credential.as_str()][0],
+            handle.state()?.credentials[identity.credential.as_str()][index(Protocol::Http)],
             confirmed
         );
         let retained = handle.0.registry.snapshot()?;
@@ -1520,7 +1536,7 @@ mod tests {
         assert_eq!(delayed.completion_sequence, before.completion_sequence);
         assert_eq!(fixture.total(&identity.credential)?, confirmed);
         assert_eq!(
-            handle.state()?.credentials[identity.credential.as_str()][0],
+            handle.state()?.credentials[identity.credential.as_str()][index(Protocol::Http)],
             confirmed
         );
         assert_eq!(
@@ -1586,7 +1602,11 @@ mod tests {
         assert!(
             policy
                 .reader()
-                .authenticate(&identity.login, identity.secret.as_bytes(), Protocol::Http)
+                .authenticate(
+                    &identity.login,
+                    identity.secret.as_bytes(),
+                    crate::access::Protocol::Http
+                )
                 .is_err()
         );
         // Simulate the already admitted proxy draining after its supervisor stopped

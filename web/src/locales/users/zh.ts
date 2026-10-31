@@ -1,4 +1,5 @@
 export default {
+  "users.moreActions": "更多",
   "users.readPassword": "重新读取密码",
   "users.passwordNotSaved":
     "此凭证没有可恢复的密码副本。请使用原密码，或关闭窗口后主动轮换一次。",
@@ -114,6 +115,7 @@ export default {
   "users.name": "显示名称",
   "users.nameRule": "请输入 1–128 字节 UTF-8 文本，不能有控制字符或首尾空白",
   "users.protocols": "允许协议",
+  "users.httpShared": "此权限同时允许 HTTP 和 HTTPS 代理；流量分别统计。",
   "users.noProtocols": "不允许任何协议",
   "users.limit": "每用户并发操作上限",
   "users.limitRule": "请输入 1 至 1,000,000 的整数",

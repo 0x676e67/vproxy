@@ -1,7 +1,7 @@
 export default {
+  "alerts.back": "返回告警",
   "menu.alerts": "告警",
   "alerts.title": "告警",
-  "alerts.description": "查看本管理节点的观测，或所选节点自身的告警。",
   "alerts.active": "活动问题",
   "alerts.recent": "近期记录",
   "alerts.activeCount": "活动问题总数",
@@ -15,8 +15,8 @@ export default {
   "alerts.localProxyExpected": "本机代理预计运行",
   "alerts.remoteCached": "本地保存的远端记录",
   "alerts.remoteObservation": "后台目标节点观察",
-  "alerts.backgroundEnabled": "已在节点启动配置中启用",
-  "alerts.backgroundDisabled": "此节点未启用",
+  "alerts.backgroundEnabled": "后台目标节点采集已启用",
+  "alerts.backgroundDisabled": "后台目标节点采集未启用",
   "alerts.backgroundHint":
     "节点会在浏览器关闭后继续采集已登记目标自身的告警。未读取、陈旧或失败的来源仍为未知；零条问题记录不代表健康。此功能不会发送邮件、Webhook 等外部通知。",
   "alerts.backgroundDisabledHint":

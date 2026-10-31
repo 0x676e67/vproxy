@@ -82,6 +82,12 @@ pub(super) fn start_run_in(
 ) -> io::Result<Run> {
     require_transaction(transaction)?;
     let mut state = state_in(transaction)?;
+    if !state.status.http_split {
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "split traffic accounting requires explicit schema migration",
+        ));
+    }
     validate_counts(transaction, &state)?;
     if state.status.meter_epoch != expected_epoch || state.status.cursor != expected_cursor {
         return Err(conflict("traffic restoration is no longer current"));

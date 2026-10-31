@@ -5,7 +5,8 @@ const settings: Partial<ProSettings> = {
   title: "vproxy",
   navTheme: "light",
   colorPrimary: consolePalette.accent,
-  // Keep global account/language actions out of the collapsible navigation rail.
+  // This ProLayout version omits the desktop header in `side` mode.
+  // Retain its header and drawer; the shell aligns them with the full-height rail.
   layout: "mix",
   contentWidth: "Fluid",
   fixedHeader: true,

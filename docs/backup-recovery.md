@@ -71,3 +71,9 @@ vproxy manage migrate --data-dir /var/lib/vproxy/management   --backup /secure/b
 Inspect the result before starting the new binary. Reading a status page is not
 permission to migrate, and a backup is not a shortcut for rolling an active node
 back to an earlier identity.
+
+HTTP/HTTPS accounting separation requires schema 29. The migration keeps old
+combined counters and starts separate counters for new traffic; user permissions
+do not change. To roll back this upgrade, restore the stopped node's consistent
+pre-upgrade database together with its matching program. Replacing only the
+binary is not a database rollback.

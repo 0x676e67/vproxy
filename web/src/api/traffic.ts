@@ -5,7 +5,6 @@ import {
   count,
   endpointStatus,
   shape,
-  type ProxyProtocol,
 } from "./proxy";
 import type { ManagementClient } from "./client";
 
@@ -19,13 +18,18 @@ export type HistoryScope = Exclude<
   { kind: "credential"; id: string }
 >;
 export type Resolution = "minute" | "hour" | "day";
+/** Accounting vocabulary, separate from the compatible HTTP-family grant. */
+export type TrafficProtocol =
+  "http" | "https" | "socks5" | "masque" | "http_legacy";
 export interface TrafficOptions {
-  protocol?: ProxyProtocol;
+  protocol?: TrafficProtocol;
   resolution?: Resolution;
   after?: string;
   limit?: number;
 }
 export interface TrafficMetadata {
+  /** Absent in v1 reads; false means the source cannot separate HTTP and HTTPS. */
+  http_split?: boolean;
   definition: "accepted_effective_payload_v1";
   origin_node_id: string;
   meter_epoch: string;
@@ -40,7 +44,7 @@ export interface TrafficMetadata {
   scope: TrafficScope;
 }
 export interface TrafficTotal {
-  protocol: ProxyProtocol;
+  protocol: TrafficProtocol;
   durable_upload_bytes: string;
   durable_download_bytes: string;
   durable_saturated: boolean;
@@ -67,7 +71,7 @@ export interface TrafficTotals extends TrafficMetadata {
   items: TrafficTotal[];
 }
 export interface BucketTotal {
-  protocol: ProxyProtocol;
+  protocol: TrafficProtocol;
   upload_bytes: string;
   download_bytes: string;
   saturated: boolean;
@@ -114,7 +118,21 @@ export interface TrafficView {
   historyError: ApiError | null;
 }
 
-export const trafficProtocols = ["http", "socks5", "masque"] as const;
+export const trafficProtocols = [
+  "http",
+  "https",
+  "socks5",
+  "masque",
+  "http_legacy",
+] as const;
+const legacyProtocols = ["http", "socks5", "masque"] as const;
+const splitProtocols = [
+  "http_legacy",
+  "socks5",
+  "masque",
+  "http",
+  "https",
+] as const;
 const metadataKeys = [
   "definition",
   "origin_node_id",
@@ -137,8 +155,8 @@ const timestamp = (value: unknown): value is number | null =>
   value === null || count(value, Number.MAX_SAFE_INTEGER);
 const windowId = (value: unknown): value is string =>
   unsignedBytes(value) && BigInt(value) <= BigInt(Number.MAX_SAFE_INTEGER);
-const protocol = (value: unknown): value is ProxyProtocol =>
-  trafficProtocols.includes(value as ProxyProtocol);
+const protocol = (value: unknown): value is TrafficProtocol =>
+  trafficProtocols.some((item) => item === value);
 const width = (resolution: Resolution) =>
   ({ minute: 60_000n, hour: 3_600_000n, day: 86_400_000n })[resolution];
 
@@ -153,9 +171,14 @@ export function trafficScope(value: unknown): TrafficScope {
     return { kind: value.kind, id: value.id } as TrafficScope;
   throw new ApiError("format");
 }
-function metadata(value: Record<string, unknown>, scope: TrafficScope): void {
+function metadata(
+  value: Record<string, unknown>,
+  scope: TrafficScope,
+  split: boolean,
+): void {
   const actual = trafficScope(value.scope);
   if (
+    (split && typeof value.http_split !== "boolean") ||
     value.definition !== "accepted_effective_payload_v1" ||
     !canonicalId(value.origin_node_id) ||
     !canonicalId(value.meter_epoch) ||
@@ -177,6 +200,7 @@ export function trafficQuery(
   scope: TrafficScope,
   options: TrafficOptions = {},
   history = false,
+  split = false,
 ): string {
   const selected = trafficScope(scope);
   const keys = history
@@ -185,6 +209,7 @@ export function trafficQuery(
   if (Object.keys(options).some((key) => !keys.includes(key)))
     throw new ApiError("format");
   const query = new URLSearchParams({ scope: selected.kind });
+  if (split) query.set("protocol_format", "split");
   if (selected.id !== null) query.set("id", selected.id);
   for (const key of keys) {
     const value = options[key as keyof TrafficOptions];
@@ -202,7 +227,8 @@ export function trafficQuery(
 export function trafficTotals(
   value: unknown,
   scope: TrafficScope,
-  selected?: ProxyProtocol,
+  selected?: TrafficProtocol,
+  split = false,
 ): TrafficTotals {
   const hasStage =
     typeof value === "object" &&
@@ -210,6 +236,7 @@ export function trafficTotals(
     Object.hasOwn(value, "checkpoint_failure_stage");
   shape(value, [
     ...metadataKeys,
+    ...(split ? ["http_split"] : []),
     "active_run_id",
     "checkpoint_error",
     "last_completed_cycle_at_unix_ms",
@@ -217,7 +244,7 @@ export function trafficTotals(
     "items",
     ...(hasStage ? ["checkpoint_failure_stage"] : []),
   ]);
-  metadata(value, scope);
+  metadata(value, scope, split);
   if (
     !(value.active_run_id === null || canonicalId(value.active_run_id)) ||
     typeof value.checkpoint_error !== "boolean" ||
@@ -232,7 +259,12 @@ export function trafficTotals(
     !Array.isArray(value.items)
   )
     throw new ApiError("format");
-  const expected = selected ? [selected] : trafficProtocols;
+  const available = split
+    ? splitProtocols.slice(0, value.http_split ? 5 : 3)
+    : legacyProtocols;
+  const expected = selected
+    ? available.filter((item) => item === selected)
+    : available;
   if (value.items.length !== expected.length) throw new ApiError("format");
   const items = value.items.map((item, index): TrafficTotal => {
     shape(item, [
@@ -269,6 +301,12 @@ export function trafficTotals(
       throw new ApiError("format");
     return item as unknown as TrafficTotal;
   });
+  if (split)
+    items.sort(
+      (a, b) =>
+        trafficProtocols.indexOf(a.protocol) -
+        trafficProtocols.indexOf(b.protocol),
+    );
   return { ...value, items } as unknown as TrafficTotals;
 }
 
@@ -276,16 +314,21 @@ export function trafficHistory(
   value: unknown,
   scope: TrafficScope,
   options: TrafficOptions,
+  split = false,
 ): TrafficHistory {
   shape(value, [
     ...metadataKeys,
+    ...(split ? ["http_split"] : []),
     "resolution",
     "next_cursor",
     "retention_floor",
     "retention_gap",
     "items",
   ]);
-  metadata(value, scope);
+  metadata(value, scope, split);
+  const available: readonly TrafficProtocol[] = split
+    ? splitProtocols.slice(0, value.http_split ? 5 : 3)
+    : legacyProtocols;
   const resolution = options.resolution ?? "hour";
   if (
     scope.kind === "credential" ||
@@ -305,15 +348,16 @@ export function trafficHistory(
       BigInt(bucket.window_id) % width(resolution) !== 0n ||
       BigInt(bucket.window_id) <= previous ||
       !Array.isArray(bucket.items) ||
-      bucket.items.length > 3
+      bucket.items.length > available.length
     )
       throw new ApiError("format");
     previous = BigInt(bucket.window_id);
-    const seen = new Set<ProxyProtocol>();
+    const seen = new Set<TrafficProtocol>();
     const rows = bucket.items.map((row): BucketTotal => {
       shape(row, ["protocol", "upload_bytes", "download_bytes", "saturated"]);
       if (
         !protocol(row.protocol) ||
+        !available.includes(row.protocol) ||
         seen.has(row.protocol) ||
         (options.protocol !== undefined && row.protocol !== options.protocol) ||
         !unsignedBytes(row.upload_bytes) ||
@@ -434,7 +478,7 @@ export function trafficHref(
 export function trafficLocation(search: string): {
   peer: string | null;
   scope: TrafficScope;
-  protocol?: ProxyProtocol;
+  protocol?: TrafficProtocol;
   resolution: Resolution;
 } {
   if (search.length > 1024) throw new ApiError("format");

@@ -1,4 +1,5 @@
 export default {
+  "users.moreActions": "More",
   "users.readPassword": "Reload password",
   "users.passwordNotSaved":
     "No recoverable password was saved for this credential. Use your original password, or close this window and explicitly rotate it once.",
@@ -122,6 +123,8 @@ export default {
   "users.nameRule":
     "Use 1–128 UTF-8 bytes without control characters or surrounding whitespace",
   "users.protocols": "Allowed protocols",
+  "users.httpShared":
+    "This permission allows both HTTP and HTTPS proxies; traffic is counted separately.",
   "users.noProtocols": "No protocols allowed",
   "users.limit": "Concurrent operations per user",
   "users.limitRule": "Use an integer from 1 to 1,000,000",

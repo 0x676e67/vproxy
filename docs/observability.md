@@ -18,6 +18,12 @@ Traffic views separate node, user, credential, protocol and pool scopes. Retain
 meter epochs and history-gap or loss indicators when comparing samples. Restarts,
 retention and unavailable observations can make an interval incomplete.
 
+HTTP and HTTPS are counted separately by the client-to-proxy transport: an HTTP
+proxy remains HTTP when CONNECT tunnels to an HTTPS destination. Both use the
+same existing HTTP-family access permission. Pre-upgrade combined counters stay
+under **Legacy HTTP/HTTPS**; they cannot be split retrospectively. An older node
+that does not distinguish them reports only the combined data, not two zeroes.
+
 Managed traffic counts accepted proxy payload. It is not a billable wire-byte
 measurement, and a successful local write does not prove every byte reached the
 remote application. A normal shutdown and an interrupted accounting history have

@@ -99,7 +99,7 @@ const DATABASE_NAME: &str = "management.sqlite3";
 // SQLite reserves application_id for distinguishing unrelated file formats.
 // The big-endian ASCII namespace "VPXY" is independent of the schema version.
 const APPLICATION_ID: i32 = i32::from_be_bytes(*b"VPXY");
-pub(super) const SCHEMA_VERSION: u32 = 28;
+pub(super) const SCHEMA_VERSION: u32 = 29;
 const BUSY_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Reconstructs a pre-operation fixture without discarding issued identities.
@@ -378,6 +378,8 @@ fn initialize_with(
     source::create_schema(&transaction)?;
     proxy_service::create_schema(&transaction)?;
     secrets::create_schema(&transaction)?;
+    traffic::upgrade_protocols(&transaction)?;
+    remote_traffic::upgrade_protocols(&transaction)?;
     transaction
         .execute(
             "INSERT INTO node_identity (singleton, node_id, name) VALUES (1, ?1, ?2)",

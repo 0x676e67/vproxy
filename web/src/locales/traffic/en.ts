@@ -21,6 +21,9 @@ export default {
     "Enter a canonical entity ID; a display name is not an ID.",
   "traffic.protocol": "Protocol",
   "traffic.allProtocols": "All protocols",
+  "traffic.httpLegacy": "Legacy HTTP/HTTPS",
+  "traffic.httpUnsplit":
+    "This source does not separate HTTP and HTTPS. Only their historical combined total is available.",
   "traffic.resolution": "History window",
   "traffic.minute": "Minute",
   "traffic.hour": "Hour",

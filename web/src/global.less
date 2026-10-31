@@ -11,18 +11,18 @@ html {
 body {
   margin: 0;
   color-scheme: inherit;
-  background: var(--console-canvas, #f5f5f5);
-  color: var(--console-text, #353535);
+  background: var(--console-canvas, #e1e1db);
+  color: var(--console-text, #262625);
 }
 
 html {
-  scrollbar-color: var(--console-border, #858585) var(--console-canvas, #f5f5f5);
+  scrollbar-color: var(--console-border, #7c7c71) var(--console-canvas, #e1e1db);
   scroll-padding-top: 72px;
 }
 
 ::selection {
-  background: var(--console-selection, #ffdfb5);
-  color: var(--console-onSelection, #353535);
+  background: var(--console-selection, #e6c19c);
+  color: var(--console-onSelection, #262625);
 }
 
 a,
@@ -66,7 +66,7 @@ textarea {
   min-height: 100vh;
   min-height: 100dvh;
   padding: 24px;
-  background: var(--console-canvas, #f5f5f5);
+  background: var(--console-canvas, #e1e1db);
 
   &-actions {
     display: flex;
@@ -124,7 +124,7 @@ textarea {
   }
 
   &:focus-visible {
-    outline: 2px solid var(--ant-color-primary, #1677ff);
+    outline: 2px solid var(--ant-color-primary, #9b4500);
     outline-offset: 2px;
   }
 }
@@ -137,21 +137,44 @@ textarea {
   line-height: 1;
 }
 
-.management-sidebar-toggle.ant-btn {
-  justify-content: flex-start;
-  width: 100%;
-  padding-inline: 12px;
-  color: var(--console-secondary, #646464);
-  font-size: 14px;
+.management-brand {
+  color: var(--console-sidebarText, #c8c9db);
+  font-size: 20px;
+  font-weight: 600;
+  line-height: 32px;
 }
 
-.ant-pro-sider-collapsed .management-sidebar-toggle.ant-btn {
-  justify-content: center;
-  padding-inline: 0;
+.management-header-tools {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-inline-end: 8px;
+  padding-inline-end: 8px;
+  border-inline-end: 1px solid var(--ant-color-border-secondary);
 }
 
-.ant-pro-sider-collapsed .ant-pro-sider-extra:has(.management-sidebar-toggle) {
-  margin-inline: 8px;
+// ProLayout 3.1.14-7's `side` mode removes the desktop header and moves all
+// actions into the rail. Keep its `mix` header, but give brand and navigation
+// one full-height column. Widths match the layout config, including icon mode.
+.management-layout:not(:has(.management-mobile-navigation)) {
+  --management-sidebar-width: 256px;
+
+  &:has(.ant-layout-sider-collapsed) {
+    --management-sidebar-width: 64px;
+  }
+
+  .ant-pro-layout-header {
+    width: calc(100% - var(--management-sidebar-width));
+  }
+
+  .ant-pro-sider-fixed-mix {
+    inset-block-start: 0;
+    height: 100%;
+  }
+
+  .ant-pro-global-header-logo {
+    display: none;
+  }
 }
 
 .ant-pro-global-header:has(.management-mobile-navigation)
@@ -439,7 +462,7 @@ textarea {
     display: flex;
     flex-wrap: wrap;
     gap: 12px 20px;
-    border-block-end: 1px solid var(--ant-color-border-secondary, #e0e0e0);
+    border-block-end: 1px solid var(--ant-color-border-secondary, #c8c8bf);
     padding-block-end: 16px;
   }
 
@@ -1179,4 +1202,11 @@ textarea {
   flex: 1 1 280px;
   min-width: 0;
   max-width: 440px;
+
+  // Search's addon must retain its intrinsic label width on touch layouts.
+  &.ant-input-search .ant-input-search-btn {
+    flex-shrink: 0;
+    white-space: nowrap;
+    overflow-wrap: normal;
+  }
 }

@@ -178,6 +178,8 @@ pub(in crate::manage) fn migrate(directory: &Path, backup_path: &Path) -> io::Re
         super::recovery::migrate_twenty_six(&transaction)?;
     } else if before.schema_version == 27 {
         super::recovery::migrate_twenty_seven(&transaction)?;
+    } else if before.schema_version == 28 {
+        super::recovery::migrate_twenty_eight(&transaction)?;
     }
     if before.schema_version < 15 {
         super::endpoints::create_schema(&transaction)?;
@@ -219,6 +221,10 @@ pub(in crate::manage) fn migrate(directory: &Path, backup_path: &Path) -> io::Re
     }
     if before.schema_version < 28 {
         super::secrets::create_schema(&transaction)?;
+    }
+    if before.schema_version < 29 {
+        super::traffic::upgrade_protocols(&transaction)?;
+        super::remote_traffic::upgrade_protocols(&transaction)?;
     }
     transaction
         .pragma_update(None, "user_version", SCHEMA_VERSION)

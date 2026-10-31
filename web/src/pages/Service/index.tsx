@@ -33,6 +33,7 @@ import { drainNonce } from "../../api/runtime";
 import { useManagement } from "../../auth/context";
 import type { Token } from "../../auth/node-changes";
 import ManagementGate from "../../components/ManagementGate";
+import EndpointButton from "../../components/Connections/Endpoints";
 import { useMessages } from "../../hooks/useMessages";
 
 interface ListenerFields {
@@ -422,9 +423,18 @@ export function LiveService() {
             <Typography.Text type="secondary">
               {t("service.notTested")}
             </Typography.Text>
-            {runtime?.state === "running" && (
-              <Link to="/users">{t("service.users")}</Link>
-            )}
+            <Space wrap>
+              {view && (
+                <EndpointButton
+                  peer={null}
+                  nodeId={view.node.node_id}
+                  disabled={reading || busy || !!confirmation || !!change}
+                />
+              )}
+              {runtime?.state === "running" && (
+                <Link to="/users">{t("service.users")}</Link>
+              )}
+            </Space>
           </Space>
         </ProCard>
         {error && (

@@ -12,7 +12,7 @@ export default {
   "setup.firstUse.manageUsers": "打开本机用户",
   "setup.firstUse.endpoints": "3. 复制代理链接",
   "setup.firstUse.endpointHint":
-    "在用户的“凭证”中打开“连接配置”，读取或输入密码后复制链接。新节点默认使用主机出口，无需先添加 IP 资源。",
+    "打开用户的“连接配置”，选择凭证，再读取或输入密码并复制链接。新节点默认使用主机出口，无需先添加 IP 资源。",
   "setup.firstUse.endpointUnavailable":
     "先刷新节点状态，再核对用户与连接配置。",
   "setup.title": "接入节点",

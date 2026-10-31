@@ -3,6 +3,7 @@ import { Link, useLocation } from "@umijs/max";
 import {
   Alert,
   Button,
+  Collapse,
   Descriptions,
   Empty,
   Result,
@@ -35,7 +36,7 @@ import {
   alertLocation,
   alertHistoryHref,
 } from "../../routing/scope";
-import ScopePicker from "../Users/ScopePicker";
+import ScopePicker from "../../components/ScopePicker";
 import { useAlerts } from "./useAlerts";
 import EventHistory from "./EventHistory";
 import FleetAlerts from "./FleetAlerts";
@@ -304,22 +305,9 @@ function AlertList({
                   : "—",
             },
             {
-              key: "received",
-              label: t("resources.retrieved"),
-              children: time(view.received),
-            },
-            {
               key: "observed",
               label: t("alerts.collectionObserved"),
               children: time(page?.observed_at_unix_ms ?? null),
-            },
-            {
-              key: "age",
-              label: t("alerts.collectionAge"),
-              children:
-                page?.age_millis === null || page?.age_millis === undefined
-                  ? "—"
-                  : decimal(page.age_millis),
             },
           ]}
         />
@@ -369,11 +357,6 @@ function AlertList({
             page.coverage.remote_observation
               ? "alerts.backgroundEnabled"
               : "alerts.backgroundDisabled",
-          )}
-          description={t(
-            page.coverage.remote_observation
-              ? "alerts.backgroundHint"
-              : "alerts.backgroundDisabledHint",
           )}
         />
       )}
@@ -467,17 +450,48 @@ function AlertList({
         />
       </Space>
       {page && "coverage" in page && (
-        <ProCard title={t("alerts.coverage")} variant="outlined">
-          <Space orientation="vertical" size={12} className="full-width">
-            <ObservationCoverage value={page.coverage} />
-            <Typography.Text type="secondary">
-              {t(remote ? "fleet.ownHint" : "alerts.remoteHint")}
-            </Typography.Text>
-            <Typography.Text type="secondary">
-              {t("alerts.managementHttpsHint")}
-            </Typography.Text>
-          </Space>
-        </ProCard>
+        <Collapse
+          size="small"
+          items={[
+            {
+              key: "coverage",
+              label: t("alerts.coverage"),
+              children: (
+                <Space orientation="vertical" size={12} className="full-width">
+                  <Descriptions
+                    column={1}
+                    items={[
+                      {
+                        key: "age",
+                        label: t("alerts.collectionAge"),
+                        children:
+                          page.age_millis === null
+                            ? "—"
+                            : decimal(page.age_millis),
+                      },
+                    ]}
+                  />
+                  <ObservationCoverage value={page.coverage} />
+                  {"remote_observation" in page.coverage && (
+                    <Typography.Text type="secondary">
+                      {t(
+                        page.coverage.remote_observation
+                          ? "alerts.backgroundHint"
+                          : "alerts.backgroundDisabledHint",
+                      )}
+                    </Typography.Text>
+                  )}
+                  <Typography.Text type="secondary">
+                    {t(remote ? "fleet.ownHint" : "alerts.remoteHint")}
+                  </Typography.Text>
+                  <Typography.Text type="secondary">
+                    {t("alerts.managementHttpsHint")}
+                  </Typography.Text>
+                </Space>
+              ),
+            },
+          ]}
+        />
       )}
     </Space>
   );
@@ -508,11 +522,45 @@ function Workspace({
   return (
     <PageContainer
       className="management-page"
-      title={t("alerts.title")}
-      content={t("alerts.description")}
+      title={t(
+        notification
+          ? "notifications.title"
+          : fleet
+            ? "fleet.title"
+            : "alerts.title",
+      )}
+      extra={
+        notification || fleet
+          ? [
+              <Button
+                key="back"
+                onClick={() => {
+                  setNotification(false);
+                  setFleet(false);
+                }}
+              >
+                {t("alerts.back")}
+              </Button>,
+            ]
+          : [
+              <Button key="fleet" onClick={() => setFleet(true)}>
+                {t("fleet.title")}
+              </Button>,
+              ...(peer === null
+                ? [
+                    <Button
+                      key="notifications"
+                      onClick={() => setNotification(true)}
+                    >
+                      {t("notifications.title")}
+                    </Button>,
+                  ]
+                : []),
+            ]
+      }
     >
       <Space orientation="vertical" size={16} className="full-width">
-        {!fleet && (
+        {!fleet && !notification && (
           <ScopePicker
             value={peer}
             onChange={select}
@@ -528,40 +576,23 @@ function Workspace({
             description={t("alerts.lifecycleHint")}
           />
         )}
-        <Tabs
-          activeKey={
-            notification && peer === null
-              ? "notifications"
-              : fleet
-                ? "fleet"
-                : history
-                  ? "history"
-                  : listState
-          }
-          onChange={(value) => {
-            setNotification(value === "notifications");
-            if (value === "notifications") {
-              setFleet(false);
-              return;
-            }
-            setFleet(value === "fleet");
-            if (value === "fleet") return;
-            if (value === "history") selectHistory(true);
-            else {
-              setListState(value as AlertState);
-              selectHistory(false);
-            }
-          }}
-          items={[
-            { key: "active", label: t("alerts.active") },
-            { key: "recent", label: t("alerts.recent") },
-            { key: "history", label: t("alertEvents.title") },
-            { key: "fleet", label: t("fleet.title") },
-            ...(peer === null
-              ? [{ key: "notifications", label: t("notifications.title") }]
-              : []),
-          ]}
-        />
+        {!fleet && !notification && (
+          <Tabs
+            activeKey={history ? "history" : listState}
+            onChange={(value) => {
+              if (value === "history") selectHistory(true);
+              else {
+                setListState(value as AlertState);
+                selectHistory(false);
+              }
+            }}
+            items={[
+              { key: "active", label: t("alerts.active") },
+              { key: "recent", label: t("alerts.recent") },
+              { key: "history", label: t("alertEvents.title") },
+            ]}
+          />
+        )}
         {notification && peer === null ? (
           <WebhookSettings />
         ) : fleet ? (

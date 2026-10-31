@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
-import { useState } from "react";
+import { isValidElement, useState } from "react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { antd, layout } from "./app";
 import { ConsoleThemeProvider } from "./theme";
@@ -46,6 +46,13 @@ it.each([false, true])(
   (mobile) => {
     function Harness() {
       const config = layout({});
+      expect(config.layout).toBe("mix");
+      expect(config.headerTitleRender).toBe(false);
+      expect(
+        typeof config.menuHeaderRender === "function"
+          ? config.menuHeaderRender(null, null)
+          : undefined,
+      ).toBeNull();
       const [collapsed, setCollapsed] = useState(mobile);
       const props = {
         collapsed,
@@ -53,10 +60,7 @@ it.each([false, true])(
         onCollapse: setCollapsed,
       };
       expect(config.collapsedButtonRender).toBe(false);
-      const sidebar =
-        typeof config.menuExtraRender === "function"
-          ? config.menuExtraRender(props)
-          : null;
+      expect(config.menuExtraRender).toBe(false);
       const header =
         typeof config.headerContentRender === "function"
           ? config.headerContentRender(props, null)
@@ -64,8 +68,7 @@ it.each([false, true])(
       return (
         <>
           <input aria-label="Draft" defaultValue="unsaved settings" />
-          {sidebar}
-          {header}
+          <header>{header}</header>
         </>
       );
     }
@@ -81,6 +84,8 @@ it.each([false, true])(
     const draft = screen.getByRole("textbox", { name: "Draft" });
     expect(screen.getAllByRole("button")).toHaveLength(1);
     const button = screen.getByRole("button", { name: before });
+    expect(button.closest("header")).not.toBeNull();
+    expect(button.textContent).toBe("");
     expect(button.getAttribute("aria-expanded")).toBe(String(!mobile));
     fireEvent.click(button);
     const changed = screen.getByRole("button", { name: after });
@@ -91,3 +96,24 @@ it.each([false, true])(
     expect(screen.getByRole("button", { name: before })).toBe(button);
   },
 );
+
+it("keeps preferences before notifications and the account at the end", () => {
+  function Harness() {
+    const config = layout({});
+    const actions =
+      typeof config.actionsRender === "function"
+        ? config.actionsRender({ isMobile: false })
+        : null;
+    expect(
+      Array.isArray(actions)
+        ? actions.map((action) => (isValidElement(action) ? action.key : null))
+        : actions,
+    ).toEqual(["tools", "alerts", "account"]);
+    return null;
+  }
+  render(
+    <ConsoleThemeProvider>
+      <Harness />
+    </ConsoleThemeProvider>,
+  );
+});

@@ -1,8 +1,40 @@
 import { describe, expect, it } from "vitest";
-import { filterNodes, needsAttention } from "./nodes";
+import { filterNodes, needsAttention, observedConnections } from "./nodes";
 import { createPendingNode, createSampleNodes } from "./samples";
 
 describe("local node presentation model", () => {
+  it("keeps missing observations distinct from a measured zero", () => {
+    const unknown = createPendingNode({
+      name: "pending",
+      region: "",
+      parentId: null,
+    });
+    const measured = createSampleNodes()[0]!;
+    expect(observedConnections([])).toBeNull();
+    expect(observedConnections([unknown])).toBeNull();
+    expect(
+      observedConnections([
+        unknown,
+        { ...measured, metrics: { ...measured.metrics!, connections: 0 } },
+      ]),
+    ).toBe(0);
+  });
+
+  it("searches a renamed parent without changing the child's identity reference", () => {
+    const parent = createSampleNodes()[0]!;
+    const child = createPendingNode({
+      name: "child",
+      region: "",
+      parentId: parent.id,
+    });
+    const renamed = { ...parent, name: "New display name" };
+    expect(filterNodes([renamed, child], "new display", "all")).toEqual([
+      renamed,
+      child,
+    ]);
+    expect(child.parentId).toBe(parent.id);
+  });
+
   it("matches both region languages independently of the active UI locale", () => {
     const nodes = createSampleNodes();
     const idsFor = (query: string) =>

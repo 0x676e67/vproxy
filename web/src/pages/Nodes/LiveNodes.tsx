@@ -47,6 +47,7 @@ import CapabilityButton from "../../components/Presets/Capability";
 import EndpointButton from "../../components/Connections/Endpoints";
 import NodeSetupGuide from "./NodeSetupGuide";
 import FirstUse from "./FirstUse";
+import NodeOperations from "./NodeOperations";
 import CertificateStatus from "./CertificateStatus";
 import MaintenanceStatus from "./MaintenanceStatus";
 import RuntimeStatus from "./RuntimeStatus";
@@ -133,6 +134,11 @@ function CurrentNodes() {
         }
       : null;
   const change = scope ? changes.find(scope) : null;
+  const pendingTarget = change
+    ? "targetId" in change.intent
+      ? change.intent.targetId
+      : null
+    : undefined;
   const storageIssue = changes.issue();
   function closeEditors() {
     editor.current++;
@@ -681,6 +687,7 @@ function CurrentNodes() {
                   ]}
                 />
                 <div className="management-node-actions">
+                  <Link to="/service">{t("service.title")}</Link>
                   <EndpointButton
                     peer={null}
                     nodeId={view.node.node_id}
@@ -697,7 +704,10 @@ function CurrentNodes() {
                   owner={owner}
                   unavailable={disabled || !!error}
                 />
-                <div className="management-node-tools">
+                <NodeOperations
+                  identity={`${epoch}:${view.node.node_id}`}
+                  pending={pendingTarget === null}
+                >
                   <CertificateStatus
                     disabled={disabled}
                     nodeId={view.node.node_id}
@@ -753,102 +763,114 @@ function CurrentNodes() {
                       },
                     ]}
                   />
-                </div>
+
+                  <Collapse
+                    size="small"
+                    items={[
+                      {
+                        key: "registration",
+                        label: t("control.registrationHelp"),
+                        children: (
+                          <>
+                            <Typography.Paragraph>
+                              {t("control.registryNotice")}
+                            </Typography.Paragraph>
+                            {t("control.grantRequired")}
+                          </>
+                        ),
+                      },
+                    ]}
+                  />
+                  <Collapse
+                    className="management-node-control"
+                    items={[
+                      {
+                        key: "owner",
+                        label: t("control.localOwner"),
+                        children: (
+                          <div>
+                            <Descriptions
+                              column={{ xs: 1, sm: 2 }}
+                              items={[
+                                {
+                                  key: "owner",
+                                  label: t("control.controller"),
+                                  children: owner
+                                    ? (owner.controller_node_id ??
+                                      t("control.localScope"))
+                                    : "—",
+                                },
+                                {
+                                  key: "epoch",
+                                  label: t("control.epoch"),
+                                  children: owner?.epoch ?? "—",
+                                },
+                              ]}
+                            />
+                            <Typography.Paragraph type="secondary">
+                              {t("control.ownerHint")}
+                            </Typography.Paragraph>
+                            <Space wrap>
+                              <Button
+                                disabled={disabled || !owner}
+                                onClick={() => {
+                                  const id = beginEditor();
+                                  if (id === null || !owner) return;
+                                  grantForm.resetFields();
+                                  setGrant({
+                                    expected: owner.epoch,
+                                    epoch,
+                                    id,
+                                  });
+                                }}
+                              >
+                                {t("control.grant")}
+                              </Button>
+                              <Button
+                                danger
+                                disabled={
+                                  disabled || !owner?.controller_node_id
+                                }
+                                onClick={() => {
+                                  const id = beginEditor();
+                                  if (id === null || !owner) return;
+                                  setConfirmation({
+                                    title: "control.takeover",
+                                    detail: "control.takeoverHint",
+                                    epoch,
+                                    id,
+                                    intent: {
+                                      kind: "owner",
+                                      action: "takeover",
+                                      controllerId: null,
+                                      expectedEpoch: owner.epoch,
+                                    },
+                                    work: (client, csrf, signal) =>
+                                      client.setOwner(
+                                        null,
+                                        owner.epoch,
+                                        csrf,
+                                        signal,
+                                      ),
+                                  });
+                                }}
+                              >
+                                {t("control.takeover")}
+                              </Button>
+                            </Space>
+                          </div>
+                        ),
+                      },
+                    ]}
+                  />
+                </NodeOperations>
               </Space>
             </ProCard>
           )}
         </div>
-        <Collapse
-          size="small"
-          items={[
-            {
-              key: "registration",
-              label: t("control.registrationHelp"),
-              children: (
-                <>
-                  <Typography.Paragraph>
-                    {t("control.registryNotice")}
-                  </Typography.Paragraph>
-                  {t("control.grantRequired")}
-                </>
-              ),
-            },
-          ]}
-        />
         {view.targets && !view.targets.controller_available && (
           <Alert type="warning" showIcon title={t("control.tlsUnavailable")} />
         )}
-        <Collapse
-          className="management-node-control"
-          items={[
-            {
-              key: "owner",
-              label: t("control.localOwner"),
-              children: (
-                <ProCard loading={view.loading && !owner}>
-                  <Descriptions
-                    column={{ xs: 1, sm: 2 }}
-                    items={[
-                      {
-                        key: "owner",
-                        label: t("control.controller"),
-                        children: owner
-                          ? (owner.controller_node_id ??
-                            t("control.localScope"))
-                          : "—",
-                      },
-                      {
-                        key: "epoch",
-                        label: t("control.epoch"),
-                        children: owner?.epoch ?? "—",
-                      },
-                    ]}
-                  />
-                  <Typography.Paragraph type="secondary">
-                    {t("control.ownerHint")}
-                  </Typography.Paragraph>
-                  <Space wrap>
-                    <Button
-                      disabled={disabled || !owner}
-                      onClick={() => {
-                        const id = beginEditor();
-                        if (id === null || !owner) return;
-                        grantForm.resetFields();
-                        setGrant({ expected: owner.epoch, epoch, id });
-                      }}
-                    >
-                      {t("control.grant")}
-                    </Button>
-                    <Button
-                      danger
-                      disabled={disabled || !owner?.controller_node_id}
-                      onClick={() => {
-                        const id = beginEditor();
-                        if (id === null || !owner) return;
-                        setConfirmation({
-                          title: "control.takeover",
-                          detail: "control.takeoverHint",
-                          epoch,
-                          id,
-                          intent: {
-                            kind: "owner",
-                            action: "takeover",
-                            controllerId: null,
-                            expectedEpoch: owner.epoch,
-                          },
-                          work: (client, csrf, signal) =>
-                            client.setOwner(null, owner.epoch, csrf, signal),
-                        });
-                      }}
-                    >
-                      {t("control.takeover")}
-                    </Button>
-                  </Space>
-                </ProCard>
-              ),
-            },
-          ]}
-        />
         <Typography.Title level={2} className="management-section-title">
           {t("control.registeredNodes")}
         </Typography.Title>
@@ -966,33 +988,9 @@ function CurrentNodes() {
                   ]}
                 />
                 <Typography.Text type="secondary">
-                  {t("control.egressHint")}
-                </Typography.Text>
-                <Typography.Text type="secondary">
                   {t("control.targetUnknown")}
                 </Typography.Text>
-                {view.node && (
-                  <MaintenanceStatus
-                    localNodeId={view.node.node_id}
-                    target={target}
-                    unavailable={busy || state.busy || view.loading || !!error}
-                  />
-                )}
-                {view.node && (
-                  <RuntimeStatus
-                    localNodeId={view.node.node_id}
-                    target={target}
-                    unavailable={busy || state.busy || view.loading || !!error}
-                  />
-                )}
                 <div className="management-node-actions">
-                  {view.node && (
-                    <CommandHistory
-                      localNodeId={view.node.node_id}
-                      targetId={target.node_id}
-                      disabled={busy || state.busy || view.loading}
-                    />
-                  )}
                   <EndpointButton
                     peer={target.node_id}
                     nodeId={target.node_id}
@@ -1010,138 +1008,172 @@ function CurrentNodes() {
                     {t("traffic.open")}
                   </Link>
                 </div>
-                <Collapse
-                  ghost
-                  items={[
-                    {
-                      key: "details",
-                      label: t("control.nodeDetails"),
-                      children: (
-                        <Space orientation="vertical" className="full-width">
-                          <Typography.Text className="managed-identifier">
-                            {target.node_id}
-                          </Typography.Text>
-                          <Typography.Text
-                            className="managed-identifier"
-                            type="secondary"
-                          >
-                            {target.origin}
-                          </Typography.Text>
-                          <Descriptions
-                            column={1}
-                            items={[
-                              {
-                                key: "revision",
-                                label: t("control.configRevision"),
-                                children: target.revision,
-                              },
-                              {
-                                key: "epoch",
-                                label: t("control.observedEpoch"),
-                                children: target.observed_epoch ?? "—",
-                              },
-                              {
-                                key: "policy",
-                                label: t("control.observedPolicy"),
-                                children:
-                                  target.observed_policy_revision ?? "—",
-                              },
-                            ]}
-                          />
-
-                          <Space wrap>
-                            <Button
-                              disabled={disabled || !view.node}
-                              onClick={() => {
-                                const id = beginEditor();
-                                if (id !== null)
-                                  setSetup({ target, epoch, id });
-                              }}
+                <NodeOperations
+                  identity={`${epoch}:${target.node_id}`}
+                  pending={pendingTarget === target.node_id}
+                >
+                  <Typography.Text type="secondary">
+                    {t("control.egressHint")}
+                  </Typography.Text>
+                  {view.node && (
+                    <MaintenanceStatus
+                      localNodeId={view.node.node_id}
+                      target={target}
+                      unavailable={
+                        busy || state.busy || view.loading || !!error
+                      }
+                    />
+                  )}
+                  {view.node && (
+                    <RuntimeStatus
+                      localNodeId={view.node.node_id}
+                      target={target}
+                      unavailable={
+                        busy || state.busy || view.loading || !!error
+                      }
+                    />
+                  )}
+                  {view.node && (
+                    <CommandHistory
+                      localNodeId={view.node.node_id}
+                      targetId={target.node_id}
+                      disabled={busy || state.busy || view.loading}
+                    />
+                  )}
+                  <Collapse
+                    ghost
+                    items={[
+                      {
+                        key: "details",
+                        label: t("control.nodeDetails"),
+                        children: (
+                          <Space orientation="vertical" className="full-width">
+                            <Typography.Text className="managed-identifier">
+                              {target.node_id}
+                            </Typography.Text>
+                            <Typography.Text
+                              className="managed-identifier"
+                              type="secondary"
                             >
-                              {t("setup.continue")}
-                            </Button>
-                            <Button
-                              disabled={disabled}
-                              onClick={() => {
-                                const id = beginEditor();
-                                if (id !== null) setForm({ target, epoch, id });
-                              }}
-                            >
-                              {t("control.editTarget")}
-                            </Button>
-                            <Button
-                              disabled={disabled}
-                              onClick={() => {
-                                const id = beginEditor();
-                                if (id === null) return;
-                                setConfirmation({
-                                  epoch,
-                                  id,
-                                  intent: {
-                                    kind: "target",
-                                    action: deliveryAction(target),
-                                    targetId: target.node_id,
-                                    expectedRevision: target.revision,
-                                  },
-                                  title: `control.${deliveryAction(target)}`,
-                                  detail: target.retired
-                                    ? "control.reactivateHint"
-                                    : "control.pauseHint",
-                                  work: (client, csrf, signal) =>
-                                    client.targetState(
-                                      target.node_id,
-                                      target.revision,
-                                      !target.active,
-                                      false,
-                                      csrf,
-                                      signal,
-                                    ),
-                                });
-                              }}
-                            >
-                              {t(`control.${deliveryAction(target)}`)}
-                            </Button>
-                            <Button
-                              danger
-                              disabled={disabled || target.retired}
-                              onClick={() => {
-                                const id = beginEditor();
-                                if (id === null) return;
-                                setConfirmation({
-                                  epoch,
-                                  id,
-                                  intent: {
-                                    kind: "target",
-                                    action: "retire",
-                                    targetId: target.node_id,
-                                    expectedRevision: target.revision,
-                                  },
-                                  title: "control.retire",
-                                  detail: "control.retireHint",
-                                  work: (client, csrf, signal) =>
-                                    client.targetState(
-                                      target.node_id,
-                                      target.revision,
-                                      false,
-                                      true,
-                                      csrf,
-                                      signal,
-                                    ),
-                                });
-                              }}
-                            >
-                              {t("control.retire")}
-                            </Button>
-                            <CapabilityButton
-                              peer={target.node_id}
-                              disabled={disabled}
+                              {target.origin}
+                            </Typography.Text>
+                            <Descriptions
+                              column={1}
+                              items={[
+                                {
+                                  key: "revision",
+                                  label: t("control.configRevision"),
+                                  children: target.revision,
+                                },
+                                {
+                                  key: "epoch",
+                                  label: t("control.observedEpoch"),
+                                  children: target.observed_epoch ?? "—",
+                                },
+                                {
+                                  key: "policy",
+                                  label: t("control.observedPolicy"),
+                                  children:
+                                    target.observed_policy_revision ?? "—",
+                                },
+                              ]}
                             />
+
+                            <Space wrap>
+                              <Button
+                                disabled={disabled || !view.node}
+                                onClick={() => {
+                                  const id = beginEditor();
+                                  if (id !== null)
+                                    setSetup({ target, epoch, id });
+                                }}
+                              >
+                                {t("setup.continue")}
+                              </Button>
+                              <Button
+                                disabled={disabled}
+                                onClick={() => {
+                                  const id = beginEditor();
+                                  if (id !== null)
+                                    setForm({ target, epoch, id });
+                                }}
+                              >
+                                {t("control.editTarget")}
+                              </Button>
+                              <Button
+                                disabled={disabled}
+                                onClick={() => {
+                                  const id = beginEditor();
+                                  if (id === null) return;
+                                  setConfirmation({
+                                    epoch,
+                                    id,
+                                    intent: {
+                                      kind: "target",
+                                      action: deliveryAction(target),
+                                      targetId: target.node_id,
+                                      expectedRevision: target.revision,
+                                    },
+                                    title: `control.${deliveryAction(target)}`,
+                                    detail: target.retired
+                                      ? "control.reactivateHint"
+                                      : "control.pauseHint",
+                                    work: (client, csrf, signal) =>
+                                      client.targetState(
+                                        target.node_id,
+                                        target.revision,
+                                        !target.active,
+                                        false,
+                                        csrf,
+                                        signal,
+                                      ),
+                                  });
+                                }}
+                              >
+                                {t(`control.${deliveryAction(target)}`)}
+                              </Button>
+                              <Button
+                                danger
+                                disabled={disabled || target.retired}
+                                onClick={() => {
+                                  const id = beginEditor();
+                                  if (id === null) return;
+                                  setConfirmation({
+                                    epoch,
+                                    id,
+                                    intent: {
+                                      kind: "target",
+                                      action: "retire",
+                                      targetId: target.node_id,
+                                      expectedRevision: target.revision,
+                                    },
+                                    title: "control.retire",
+                                    detail: "control.retireHint",
+                                    work: (client, csrf, signal) =>
+                                      client.targetState(
+                                        target.node_id,
+                                        target.revision,
+                                        false,
+                                        true,
+                                        csrf,
+                                        signal,
+                                      ),
+                                  });
+                                }}
+                              >
+                                {t("control.retire")}
+                              </Button>
+                              <CapabilityButton
+                                peer={target.node_id}
+                                disabled={disabled}
+                              />
+                            </Space>
                           </Space>
-                        </Space>
-                      ),
-                    },
-                  ]}
-                />
+                        ),
+                      },
+                    ]}
+                  />
+                </NodeOperations>
               </Space>
             </ProCard>
           ))}

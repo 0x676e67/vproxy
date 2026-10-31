@@ -8,6 +8,7 @@ import type { ProxyUser, UserInput } from "../../api/proxy";
 import { validUserName } from "../../api/proxy";
 import { useMessages } from "../../hooks/useMessages";
 import type { ReactNode } from "react";
+import { Tooltip } from "antd";
 
 export default function UserForm({
   user,
@@ -70,7 +71,14 @@ export default function UserForm({
         label={t("users.protocols")}
         disabled={busy}
         options={[
-          { label: "HTTP / HTTPS", value: "http" },
+          {
+            label: (
+              <Tooltip title={t("users.httpShared")}>
+                <span>HTTP + HTTPS</span>
+              </Tooltip>
+            ),
+            value: "http",
+          },
           { label: "SOCKS5", value: "socks5" },
           { label: "MASQUE", value: "masque" },
         ]}

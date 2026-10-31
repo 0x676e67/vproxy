@@ -25,7 +25,6 @@ import type {
   UserSearchInput,
 } from "../../api/proxy";
 import { canonicalId } from "../../api/proxy";
-import { trafficHref } from "../../api/traffic";
 import { proxyOperations, scopeAccess, type ProxyScope } from "../../api/scope";
 import type {
   Job,
@@ -38,21 +37,21 @@ import { useManagement } from "../../auth/context";
 import ManagementGate from "../../components/ManagementGate";
 import Table from "../../components/DataTable";
 import { useMessages } from "../../hooks/useMessages";
-import type { MessageKey } from "../../hooks/useMessages";
 import Credentials, {
   type Confirmation,
   type CredentialObservation,
   type MutationWork,
 } from "./Credentials";
 import UserForm from "./UserForm";
+import UserActions from "./UserActions";
 import UserSearch from "./UserSearch";
-import ScopePicker from "./ScopePicker";
+import ScopePicker from "../../components/ScopePicker";
 import CommandPanel from "./CommandPanel";
 import RoutingPermission from "./RoutingPermission";
 import type { RoutingScopeChange } from "../../api/remoteRouting";
 import type { PresetScopeChange } from "../../api/remotePresets";
 import PresetEditor from "../../components/Presets/Editor";
-import ConnectionModal from "../../components/Presets/ConnectionModal";
+import ConnectionModal from "../../components/Connections/ConnectionModal";
 import ScopeError from "../../components/ScopeError";
 import { scopeHref, scopeLocation } from "../../routing/scope";
 import { useScopeNavigation } from "../../routing/ScopeNavigation";
@@ -60,10 +59,19 @@ import { createdUserDelivery, type CreatedUserDelivery } from "./delivery";
 import { readLocalUserView } from "./localView";
 import {
   userOperationInput,
-  type UserChange,
   type UserOperation,
 } from "../../api/userOperations";
 import LocalOperations from "./LocalOperations";
+import {
+  useUserOperationResult,
+  operationScope,
+  sameScope,
+  sameTicket,
+  terminal,
+  rejectedBeforeMutation,
+  type OperationContext,
+  type OperationScope,
+} from "./useUserOperationResult";
 import CrossNodeSearch, { type UserLocation } from "./CrossNodeSearch";
 
 type CrossSearchPhase = "closed" | "open" | "locating" | "navigating";
@@ -74,19 +82,6 @@ interface UserHandoff {
   href: string;
 }
 
-interface OperationContext {
-  title: MessageKey;
-  subject: Confirmation["subject"] | null;
-  revision: string;
-  secretExpected?: boolean;
-  userChange?: UserChange;
-}
-interface OperationScope {
-  nodeId: string | null;
-  targetRevision: string | null;
-  controllerNodeId: string | null;
-  controllerEpoch: string | null;
-}
 interface ReviewedConfirmation extends Confirmation {
   trigger: HTMLElement;
   epoch: number;
@@ -104,90 +99,6 @@ interface CancelFocus {
   region: "users" | "credentials";
   trigger: HTMLElement;
 }
-interface OperationAttempt {
-  context: OperationContext;
-  scope: OperationScope;
-  outcome: "unknown" | "rejected" | "pending" | "terminal";
-  error: ApiError | null;
-  ticket: Job | null;
-  local: UserOperation | null;
-  preparationFailed: boolean;
-  fresh: boolean;
-  scopeChanged: boolean;
-  secretMissing: boolean;
-}
-
-function operationScope(
-  target: Target | null,
-  remote: RemotePolicy | null,
-  owner: Owner | null,
-): OperationScope {
-  return {
-    nodeId: target?.node_id ?? null,
-    targetRevision: target?.revision ?? null,
-    controllerNodeId:
-      remote?.controller_node_id ?? owner?.controller_node_id ?? null,
-    controllerEpoch: remote?.controller_epoch ?? owner?.epoch ?? null,
-  };
-}
-function sameScope(left: OperationScope, right: OperationScope): boolean {
-  return (
-    left.nodeId === right.nodeId &&
-    left.targetRevision === right.targetRevision &&
-    left.controllerNodeId === right.controllerNodeId &&
-    left.controllerEpoch === right.controllerEpoch
-  );
-}
-function sameTicket(left: Job, right: Job | null | undefined): boolean {
-  return (
-    right !== null &&
-    right !== undefined &&
-    left.resource === undefined &&
-    right.resource === undefined &&
-    left.maintenance === undefined &&
-    right.maintenance === undefined &&
-    !right.routing &&
-    !right.preset &&
-    left.node_id === right.node_id &&
-    left.job_id === right.job_id &&
-    left.controller_epoch === right.controller_epoch &&
-    left.command_id === right.command_id &&
-    left.expected_policy_revision === right.expected_policy_revision
-  );
-}
-function terminal(ticket: Job): boolean {
-  return ticket.state !== "pending" && ticket.state !== "blocked";
-}
-/** Only route/body guards prove that a handler never admitted this write. */
-function rejectedBeforeMutation(error: ApiError): boolean {
-  if (error.kind !== "server") return false;
-  switch (error.code) {
-    case "invalid_host":
-      return error.status === 400 || error.status === 403;
-    case "invalid_origin":
-    case "invalid_csrf":
-    case "authentication_required":
-      return error.status === 403;
-    case "invalid_headers":
-    case "invalid_body":
-    case "invalid_json":
-    case "invalid_revision":
-    case "invalid_resource_id":
-      return error.status === 400;
-    case "body_timeout":
-      return error.status === 408;
-    case "body_too_large":
-      return error.status === 413;
-    case "json_required":
-      return error.status === 415;
-    case "misdirected_request":
-      return error.status === 421;
-    default:
-      // Storage/publication errors may occur after commit, even with a 4xx.
-      return false;
-  }
-}
-
 function Users({
   targetId,
   changeScope,
@@ -224,7 +135,6 @@ function Users({
   latestView.current = view;
   const [needsRemoteRefresh, setNeedsRemoteRefresh] = useState(false);
   const [error, setError] = useState<ApiError | null>(null);
-  const [attempt, setAttempt] = useState<OperationAttempt | null>(null);
   const [localOperationsOpen, setLocalOperationsOpen] = useState(false);
   const localOperationsTrigger = useRef<{
     element: HTMLButtonElement;
@@ -232,11 +142,14 @@ function Users({
   } | null>(null);
   const [operationReadBusy, setOperationReadBusy] = useState(false);
   const operationRead = useRef<AbortController | null>(null);
-  const attemptRef = useRef<OperationAttempt | null>(null);
-  const rememberAttempt = useCallback((value: OperationAttempt | null) => {
-    attemptRef.current = value;
-    setAttempt(value);
-  }, []);
+  const {
+    attempt,
+    attemptRef,
+    rememberAttempt,
+    observeListing,
+    observeTicket,
+    observeLocalOperation,
+  } = useUserOperationResult();
   const [cursors, setCursors] = useState<(string | undefined)[]>([undefined]);
   const cursor = cursors.at(-1);
   const [includeDeleted, setIncludeDeleted] = useState(
@@ -545,49 +458,7 @@ function Users({
           latestView.current = { ...result, loading: false };
           setView(latestView.current);
           setNeedsRemoteRefresh(false);
-          const current = attemptRef.current;
-          if (current && current.outcome !== "unknown") {
-            const matches = sameScope(
-              current.scope,
-              operationScope(result.target, result.remote, result.owner),
-            );
-            const ticket =
-              matches &&
-              current.ticket &&
-              !terminal(current.ticket) &&
-              sameTicket(current.ticket, result.job)
-                ? result.job
-                : current.ticket;
-            const finished = current.local
-              ? current.local.state !== "reserved"
-              : ticket !== null && terminal(ticket);
-            // Equal read revisions can still trail an already acknowledged write.
-            const reachedKnownProgress =
-              BigInt(result.policy.saved_revision) >=
-                BigInt(
-                  current.local?.saved_revision ??
-                    ticket?.policy_revision ??
-                    current.context.revision,
-                ) &&
-              (!ticket ||
-                (result.remote !== null &&
-                  BigInt(result.remote.last_terminal_command) >=
-                    BigInt(ticket.command_id)));
-            rememberAttempt({
-              ...current,
-              ticket,
-              outcome: finished
-                ? current.local?.state === "rejected"
-                  ? "rejected"
-                  : "terminal"
-                : current.outcome,
-              fresh:
-                matches &&
-                reachedKnownProgress &&
-                (current.outcome === "rejected" || finished),
-              scopeChanged: !matches,
-            });
-          }
+          observeListing(result);
         }
         if (
           !request.signal.aborted &&
@@ -635,7 +506,7 @@ function Users({
     search,
     searchNeedsRestart,
     locateUserId,
-    rememberAttempt,
+    observeListing,
   ]);
   useEffect(() => {
     if (crossEpoch.current !== epoch) {
@@ -1305,61 +1176,14 @@ function Users({
   const observeJob = (job: Job | null) => {
     latestView.current = { ...latestView.current, job };
     setView((current) => ({ ...current, job }));
-    const current = attemptRef.current;
-    if (
-      current?.ticket &&
-      sameTicket(current.ticket, job) &&
-      sameScope(
-        current.scope,
-        operationScope(view.target, view.remote, view.owner),
-      )
-    ) {
-      // A current ticket can confirm only its own ID, never an unacknowledged write.
-      const ticket = terminal(current.ticket) ? current.ticket : job!;
-      rememberAttempt({
-        ...current,
-        ticket,
-        outcome: terminal(ticket) ? "terminal" : "pending",
-        fresh: false,
-      });
-    }
+    observeTicket(job, operationScope(view.target, view.remote, view.owner));
   };
   const inspectLocalOperation = (operation: UserOperation) => {
-    const current = attemptRef.current;
-    const known = current?.local;
-    if (
-      targetId !== null ||
-      !current ||
-      !known ||
-      known.id !== operation.id ||
-      known.node_id !== operation.node_id ||
-      known.sequence !== operation.sequence ||
-      known.expected_revision !== operation.expected_revision ||
-      known.expected_epoch !== operation.expected_epoch ||
-      known.action !== operation.action ||
-      (known.action !== "create_user" && known.user_id !== operation.user_id) ||
-      (known.state === "saved" && known.user_id !== operation.user_id)
-    )
-      return;
-    // A previously confirmed terminal record never regresses to Reserved.
-    const observed = known.state === "reserved" ? operation : known;
-    const finished = observed.state !== "reserved";
-    rememberAttempt({
-      ...current,
-      local: observed,
-      outcome: finished
-        ? observed.state === "saved"
-          ? "terminal"
-          : "rejected"
-        : current.outcome,
-      error: finished ? null : current.error,
-      preparationFailed: current.preparationFailed && !finished,
-      fresh: false,
-      scopeChanged: !sameScope(
-        current.scope,
-        operationScope(view.target, view.remote, view.owner),
-      ),
-    });
+    observeLocalOperation(
+      operation,
+      targetId,
+      operationScope(view.target, view.remote, view.owner),
+    );
   };
   const checkLocalOperation = async () => {
     const current = attemptRef.current;
@@ -1902,11 +1726,13 @@ function Users({
       title: t("users.protocols"),
       render: (_, user) =>
         user.protocols.length
-          ? user.protocols.map((protocol) => (
-              <Tag key={protocol}>
-                {protocol === "http" ? "HTTP / HTTPS" : protocol.toUpperCase()}
-              </Tag>
-            ))
+          ? user.protocols
+              .flatMap((protocol) =>
+                protocol === "http" ? ["http", "https"] : [protocol],
+              )
+              .map((protocol) => (
+                <Tag key={protocol}>{protocol.toUpperCase()}</Tag>
+              ))
           : t("users.noProtocols"),
     },
     { title: t("users.limit"), dataIndex: "concurrent_limit" },
@@ -1914,93 +1740,42 @@ function Users({
     {
       title: t("users.actions"),
       render: (_, user) => (
-        <Space wrap>
-          <Link to={trafficHref({ kind: "user", id: user.id }, targetId)}>
-            {t("traffic.open")}
-          </Link>
-          <Button
-            size="small"
-            disabled={access.readDisabled}
-            onClick={(event) => {
-              if (
-                crossPhaseRef.current !== "closed" ||
-                operationRead.current ||
-                latestView.current.loading
-              )
-                return;
+        <UserActions
+          user={user}
+          targetId={targetId}
+          readDisabled={access.readDisabled}
+          writeDisabled={disabled}
+          onAction={(action, trigger) => {
+            if (
+              crossPhaseRef.current !== "closed" ||
+              operationRead.current ||
+              latestView.current.loading
+            )
+              return;
+            if (
+              action === "credentials" ||
+              action === "routing" ||
+              action === "preset"
+            ) {
               overlayOpening.current = true;
-              rememberEditorFocus(event.currentTarget, user.id);
-              setRoutingUser(null);
-              setPresetUser(null);
-              setDelivery(null);
-              setSelected(user);
-            }}
-          >
-            {t("users.credentials")}
-          </Button>
-          <Button
-            size="small"
-            disabled={access.readDisabled}
-            onClick={(event) => {
-              if (
-                crossPhaseRef.current !== "closed" ||
-                operationRead.current ||
-                latestView.current.loading
-              )
-                return;
+              rememberEditorFocus(trigger, user.id);
+              setSelected(action === "credentials" ? user : null);
+              setRoutingUser(action === "routing" ? user : null);
+              setPresetUser(action === "preset" ? user : null);
+              if (action === "credentials") setDelivery(null);
+              return;
+            }
+            if (disabled || user.deleted) return;
+            if (action === "edit") {
               overlayOpening.current = true;
-              rememberEditorFocus(event.currentTarget, user.id);
-              setSelected(null);
-              setPresetUser(null);
-              setRoutingUser(user);
-            }}
-          >
-            {t("resources.permission")}
-          </Button>
-          <Button
-            size="small"
-            disabled={access.readDisabled}
-            onClick={(event) => {
-              if (
-                crossPhaseRef.current !== "closed" ||
-                operationRead.current ||
-                latestView.current.loading
-              )
-                return;
-              overlayOpening.current = true;
-              rememberEditorFocus(event.currentTarget, user.id);
-              setSelected(null);
-              setRoutingUser(null);
-              setPresetUser(user);
-            }}
-          >
-            {t("presets.title")}
-          </Button>
-          <Button
-            size="small"
-            disabled={disabled || user.deleted}
-            onClick={(event) => {
-              if (
-                crossPhaseRef.current !== "closed" ||
-                latestView.current.loading
-              )
-                return;
-              overlayOpening.current = true;
-              rememberEditorFocus(event.currentTarget, user.id);
+              rememberEditorFocus(trigger, user.id);
               setForm({
                 user,
                 revision: revision!,
                 epoch,
                 readSerial: serial.current,
               });
-            }}
-          >
-            {t("users.edit")}
-          </Button>
-          <Button
-            size="small"
-            disabled={disabled || user.deleted}
-            onClick={(event) =>
+            } else if (action === "state") {
               confirm(
                 {
                   title: user.active ? "users.disable" : "users.enable",
@@ -2022,17 +1797,9 @@ function Users({
                       signal,
                     ),
                 },
-                event.currentTarget,
-              )
-            }
-          >
-            {t(user.active ? "users.disable" : "users.enable")}
-          </Button>
-          <Button
-            size="small"
-            danger
-            disabled={disabled || user.deleted}
-            onClick={(event) =>
+                trigger,
+              );
+            } else if (action === "delete") {
               confirm(
                 {
                   title: "users.delete",
@@ -2045,13 +1812,11 @@ function Users({
                   work: (client, csrf, signal) =>
                     client.deleteUser(user.id, revision!, csrf, signal),
                 },
-                event.currentTarget,
-              )
+                trigger,
+              );
             }
-          >
-            {t("users.delete")}
-          </Button>
-        </Space>
+          }}
+        />
       ),
     },
   ];
@@ -2260,21 +2025,6 @@ function Users({
           <ProCard variant="outlined">
             <div className="management-list-toolbar">
               <Space wrap>
-                <Checkbox
-                  checked={includeDeleted}
-                  disabled={
-                    busy ||
-                    routingBusy ||
-                    commandBusy ||
-                    state.busy ||
-                    operationReadBusy
-                  }
-                  onChange={(event) => {
-                    changeListing(search, event.target.checked);
-                  }}
-                >
-                  {t("users.includeDeleted")}
-                </Checkbox>
                 <Button
                   aria-label={t("users.refresh")}
                   aria-busy={view.loading}
@@ -2320,8 +2070,26 @@ function Users({
                 >
                   {t("users.create")}
                 </Button>
+              </Space>
+              <Space wrap>
+                <Checkbox
+                  checked={includeDeleted}
+                  disabled={
+                    busy ||
+                    routingBusy ||
+                    commandBusy ||
+                    state.busy ||
+                    operationReadBusy
+                  }
+                  onChange={(event) => {
+                    changeListing(search, event.target.checked);
+                  }}
+                >
+                  {t("users.includeDeleted")}
+                </Checkbox>
                 {targetId === null && (
                   <Button
+                    type="text"
                     disabled={
                       busy ||
                       state.busy ||
@@ -2346,6 +2114,7 @@ function Users({
                   </Button>
                 )}
                 <Button
+                  type="text"
                   disabled={
                     crossPhase !== "closed" ||
                     view.loading ||

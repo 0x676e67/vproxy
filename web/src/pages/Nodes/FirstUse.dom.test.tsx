@@ -375,8 +375,8 @@ describe("first-use guidance without provisioning side effects", () => {
     const card = region.closest<HTMLElement>(".live-node-card")!;
     expect(card.parentElement?.className).toBe("node-local");
     for (const advanced of [
-      screen.getByRole("button", {
-        name: messages["control.registrationHelp"],
+      within(card).getByRole("button", {
+        name: messages["control.operations"],
       }),
       screen.getByRole("searchbox", { name: messages["control.searchNodes"] }),
     ]) {
@@ -390,6 +390,14 @@ describe("first-use guidance without provisioning side effects", () => {
         .getByText(messages["control.serverIp"])
         .compareDocumentPosition(region) & Node.DOCUMENT_POSITION_FOLLOWING,
     ).not.toBe(0);
+    const operations = within(card).getByRole("button", {
+      name: messages["control.operations"],
+    });
+    enter(operations);
+    expect(operations.getAttribute("aria-expanded")).toBe("true");
+    expect(requests).toEqual(originalRequests);
+    enter(operations);
+    expect(operations.getAttribute("aria-expanded")).toBe("false");
     const button = collapseButton(region, messages["setup.firstUse.title"]);
     expect(button.getAttribute("aria-expanded")).toBe("false");
     expect(button.tabIndex).toBe(0);
@@ -457,6 +465,12 @@ describe("first-use guidance without provisioning side effects", () => {
     expect(
       requests.filter(({ path }) => path === "/api/v1/tls/status"),
     ).toHaveLength(0);
+    fireEvent.click(
+      within(firstUse().closest<HTMLElement>(".live-node-card")!).getByRole(
+        "button",
+        { name: messages["control.operations"] },
+      ),
+    );
     fireEvent.click(
       screen.getByRole("button", { name: messages["certificates.title"] }),
     );

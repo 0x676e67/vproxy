@@ -61,6 +61,23 @@ export function consoleTheme(
         colorError: consoleTagTokens[mode].colorError,
         colorWarning: consoleTagTokens[mode].colorWarning,
       },
+      Collapse: {
+        ...previous.components?.Collapse,
+        // A disclosure's separator is not a form-control boundary. Use the
+        // surrounding surface instead of a black translucent header fill.
+        headerBg: palette.surface,
+        contentBg: palette.surface,
+        colorBorder: palette.separator,
+        colorTextHeading: palette.text,
+      },
+      Dropdown: {
+        ...previous.components?.Dropdown,
+        // Dropdown derives its own selected colors instead of using Menu's
+        // overrides. Keep selected and hovered text legible in both themes.
+        colorPrimary: palette.accent,
+        controlItemBgActive: palette.selected,
+        controlItemBgActiveHover: palette.selected,
+      },
       Menu: {
         ...previous.components?.Menu,
         itemColor: palette.text,

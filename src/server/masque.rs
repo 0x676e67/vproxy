@@ -2311,7 +2311,7 @@ mod traffic_tests {
             };
             let values = self.reader.traffic_registry().snapshot().unwrap();
             for value in &values {
-                if value.protocol != Protocol::Masque {
+                if value.protocol != crate::access::traffic::Protocol::Masque {
                     assert_eq!(
                         value.value,
                         Snapshot {
@@ -2325,7 +2325,8 @@ mod traffic_tests {
             let value = values
                 .iter()
                 .find(|value| {
-                    value.credential_id.as_ref() == expected && value.protocol == Protocol::Masque
+                    value.credential_id.as_ref() == expected
+                        && value.protocol == crate::access::traffic::Protocol::Masque
                 })
                 .unwrap();
             assert_eq!(value.user_id.as_ref(), expected_user);

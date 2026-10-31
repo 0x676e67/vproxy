@@ -1,4 +1,5 @@
 export default {
+  "control.operations": "Operations and configuration",
   "acme.title": "Management HTTPS",
   "acme.refresh": "Refresh status",
   "acme.scope":

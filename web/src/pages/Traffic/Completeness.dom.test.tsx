@@ -37,6 +37,14 @@ const value: TrafficMetadata = {
 };
 
 describe("checkpoint warnings", () => {
+  it("explains older source totals instead of claiming separate zero HTTP and HTTPS usage", () => {
+    const { rerender } = render(
+      <Completeness value={{ ...value, http_split: false }} />,
+    );
+    expect(screen.getByText(messages["traffic.httpUnsplit"])).toBeTruthy();
+    rerender(<Completeness value={{ ...value, http_split: true }} />);
+    expect(screen.queryByRole("alert")).toBeNull();
+  });
   it("shows the local stage, retains older-server warnings and clears on recovery", () => {
     const view = (failed: boolean, stage?: "store") => (
       <ConfigProvider theme={{ token: { motion: false } }}>

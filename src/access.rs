@@ -171,7 +171,7 @@ struct Credential {
     id: Arc<str>,
     // Candidate compilation also serves validation, without allocating meters.
     // Every Reader entry point binds the complete candidate before publication.
-    traffic: Option<[Arc<crate::traffic::Counter>; 3]>,
+    traffic: Option<[Arc<crate::traffic::Counter>; traffic::PROTOCOL_COUNT]>,
 }
 struct Policy {
     revision: u64,
@@ -181,7 +181,7 @@ struct Policy {
     routing: routing::Compiled,
     presets: presets::Compiled,
     pool_ids: Vec<Arc<str>>,
-    pool_traffic: HashMap<String, [Arc<crate::traffic::Counter>; 3]>,
+    pool_traffic: HashMap<String, [Arc<crate::traffic::Counter>; traffic::PROTOCOL_COUNT]>,
 }
 struct State {
     revision: u64,
@@ -347,6 +347,38 @@ impl Reader {
         secret: &[u8],
         protocol: Protocol,
     ) -> Result<Authorization, Error> {
+        self.authenticate_meter(username, secret, protocol, protocol.into())
+    }
+
+    /// Authenticate under the existing HTTP-family permission while selecting
+    /// the actual client-to-proxy transport counter. A CONNECT destination URI
+    /// does not establish that transport: see [RFC 9110 §4.2.2](https://www.rfc-editor.org/rfc/rfc9110.html#section-4.2.2)
+    /// and [§9.3.6](https://www.rfc-editor.org/rfc/rfc9110.html#section-9.3.6).
+    pub(crate) fn authenticate_http(
+        &self,
+        username: &str,
+        secret: &[u8],
+        encrypted: bool,
+    ) -> Result<Authorization, Error> {
+        self.authenticate_meter(
+            username,
+            secret,
+            Protocol::Http,
+            if encrypted {
+                traffic::Protocol::Https
+            } else {
+                traffic::Protocol::Http
+            },
+        )
+    }
+
+    fn authenticate_meter(
+        &self,
+        username: &str,
+        secret: &[u8],
+        protocol: Protocol,
+        meter_protocol: traffic::Protocol,
+    ) -> Result<Authorization, Error> {
         let state = self.state.read().map_err(|_| Error::Unavailable)?;
         let policy = state.policy.as_ref().ok_or(Error::Unavailable)?;
         if username.len() > 255 || !valid_secret(secret) {
@@ -391,7 +423,7 @@ impl Reader {
                 policy
                     .pool_traffic
                     .get(id)
-                    .map(|values| values[traffic::protocol_index(protocol)].clone())
+                    .map(|values| values[traffic::protocol_index(meter_protocol)].clone())
                     .ok_or(Error::Unavailable)
             })
             .transpose()?;
@@ -401,7 +433,7 @@ impl Reader {
             extension(suffix, &user.record.id, &credential.record.id)?
         };
         let traffic = credential.traffic.as_ref().ok_or(Error::Unavailable)?
-            [traffic::protocol_index(protocol)]
+            [traffic::protocol_index(meter_protocol)]
         .clone();
         let counter = &user.counter.active;
         // Only a numeric budget is synchronized here. Policy publication is
@@ -949,7 +981,7 @@ pub(crate) mod tests {
                 .snapshot()
                 .unwrap()
                 .into_iter()
-                .find(|row| row.protocol == Protocol::Http)
+                .find(|row| row.protocol == traffic::Protocol::Http)
                 .unwrap()
                 .value
                 .upload,

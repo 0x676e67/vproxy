@@ -1962,6 +1962,12 @@ pub(super) mod tests {
                 .unwrap();
             admission.lease.meter(Direction::Upload).add(101);
             admission.lease.meter(Direction::Download).add(55);
+            let secure = server
+                .reader()
+                .authenticate_http(&credential.login, secret.as_bytes(), true)
+                .unwrap();
+            secure.lease.meter(Direction::Upload).add(77);
+            secure.lease.meter(Direction::Download).add(33);
             collector.finish(false).await?;
             let durable = durable::status(&fixture.server_state)?;
             let server_leaf =
@@ -2021,8 +2027,9 @@ pub(super) mod tests {
                 assert_eq!(snapshot.value.status.node_id, fixture.server_id);
                 assert_eq!(snapshot.value.status.meter_epoch, durable.meter_epoch);
                 assert_eq!(snapshot.value.status.cursor, durable.cursor);
-                assert_eq!(snapshot.value.totals[0].upload, 101);
-                assert_eq!(snapshot.value.totals[0].download, 55);
+                assert!(!snapshot.value.status.http_split);
+                assert_eq!(snapshot.value.totals[0].upload, 178);
+                assert_eq!(snapshot.value.totals[0].download, 88);
                 assert_eq!(snapshot.value.totals[1].upload, 0);
                 assert!(!snapshot.value.status.clean && !snapshot.value.status.loss_possible);
                 assert_eq!(snapshot.value.minute.len(), 1);
@@ -2075,8 +2082,12 @@ pub(super) mod tests {
                 let imported = imported?;
                 assert_eq!(imported.status.node_id, fixture.server_id);
                 assert_eq!(imported.status.cursor, durable.cursor);
-                assert_eq!(imported.totals[0].upload, 101);
-                assert_eq!(imported.totals[0].download, 55);
+                assert!(imported.status.http_split);
+                assert_eq!(imported.totals[0].upload, 0);
+                assert_eq!(imported.totals[3].upload, 101);
+                assert_eq!(imported.totals[3].download, 55);
+                assert_eq!(imported.totals[4].upload, 77);
+                assert_eq!(imported.totals[4].download, 33);
                 let local = caller
                     .read(|directory| durable::totals(directory, durable::Scope::Node))
                     .await?;
@@ -2089,13 +2100,25 @@ pub(super) mod tests {
                     durable::Scope::Credential(credential.id.clone()),
                 ] {
                     let control::Reply::TrafficTotals(totals) =
-                        call(control::Request::TrafficTotals { scope }).await?
+                        call(control::Request::TrafficTotals {
+                            scope: scope.clone(),
+                        })
+                        .await?
                     else {
                         panic!("totals reply");
                     };
-                    assert_eq!(totals.value.items[0].value.upload, 101);
-                    assert_eq!(totals.value.items[0].value.download, 55);
+                    assert_eq!(totals.value.items[0].value.upload, 178);
+                    assert_eq!(totals.value.items[0].value.download, 88);
                     assert_eq!(&*totals.authorization.leaf, server_leaf);
+                    let control::Reply::TrafficTotals(split) =
+                        call(control::Request::TrafficTotalsV2 { scope }).await?
+                    else {
+                        panic!("split totals reply")
+                    };
+                    assert!(split.value.status.http_split);
+                    assert_eq!(split.value.items[3].value.upload, 101);
+                    assert_eq!(split.value.items[4].value.upload, 77);
+                    assert_eq!(&*split.authorization.leaf, server_leaf);
                 }
                 let control::Reply::TrafficBuckets(buckets) =
                     call(control::Request::TrafficBuckets {
@@ -2110,7 +2133,7 @@ pub(super) mod tests {
                 };
                 assert_eq!(buckets.value.items.len(), 1);
                 assert_eq!(buckets.value.items[0].items.len(), 1);
-                assert_eq!(buckets.value.items[0].items[0].value.upload, 101);
+                assert_eq!(buckets.value.items[0].items[0].value.upload, 178);
 
                 let mut raw = client(&fixture, address, &mut tasks).await?;
                 let (status, body) = request(&mut raw, address, IDENTITY_PATH, Method::GET).await?;
@@ -2120,6 +2143,9 @@ pub(super) mod tests {
                     "/node/v1/traffic?scope=node&scope=node",
                     "/node/v1/traffic/buckets?limit=51",
                     "/node/v1/traffic/snapshot?url=anything",
+                    "/node/v2/traffic?scope=node&scope=node",
+                    "/node/v2/traffic/buckets?limit=51",
+                    "/node/v2/traffic/snapshot?url=anything",
                 ] {
                     assert_eq!(
                         request(&mut raw, address, path, Method::GET).await?.0,
@@ -2132,6 +2158,10 @@ pub(super) mod tests {
                 }
                 let (status, body) =
                     request(&mut raw, address, "/node/v1/traffic/snapshot", Method::GET).await?;
+                assert_eq!(status, StatusCode::FORBIDDEN);
+                assert_eq!(body["error"]["code"], "peer_not_authorized");
+                let (status, body) =
+                    request(&mut raw, address, "/node/v2/traffic/snapshot", Method::GET).await?;
                 assert_eq!(status, StatusCode::FORBIDDEN);
                 assert_eq!(body["error"]["code"], "peer_not_authorized");
                 Ok::<_, io::Error>(())
@@ -2158,6 +2188,99 @@ pub(super) mod tests {
             "last_checkpoint_at":status.last_checkpoint_at,"meter_started_at":status.meter_started_at},
             "totals":[["0","0",false],["0","0",false],["0","0",false]],
             "floors":[null,null,null],"minute":[],"hour":[],"day":[]}}))
+        }
+
+        #[tokio::test]
+        async fn split_negotiation_only_falls_back_for_definitive_unsupported_reads()
+        -> io::Result<()> {
+            let fixture = Fixture::new(true, true)?;
+            let caller = coordinator(&fixture.client_state)?;
+            let administrator = administrator(&fixture.client_state)?;
+            let (controller, _runner) = super::super::super::controller::Service::new(
+                caller,
+                fixture.client_tls.clone(),
+                fixture.client_id.clone(),
+            );
+            for (status, first, fallback) in [
+                (404, serde_json::json!({"error":{"code":"not_found"}}), true),
+                (
+                    503,
+                    serde_json::json!({"error":{"code":"traffic_protocols_unsupported"}}),
+                    true,
+                ),
+                (
+                    403,
+                    serde_json::json!({"error":{"code":"peer_not_authorized"}}),
+                    false,
+                ),
+                (
+                    503,
+                    serde_json::json!({"error":{"code":"traffic_unavailable"}}),
+                    false,
+                ),
+                (
+                    200,
+                    serde_json::json!({"version":2,"definition":"wrong"}),
+                    false,
+                ),
+            ] {
+                let requests = Arc::new(std::sync::Mutex::new(Vec::new()));
+                let endpoint = RawEndpoint::start(
+                    fixture.server_tls.clone(),
+                    RawReply::TrafficNegotiation {
+                        status,
+                        first,
+                        legacy: snapshot_json(&fixture)?,
+                        requests: requests.clone(),
+                    },
+                )?;
+                let existing = store::targets::get(&fixture.client_state, &fixture.server_id).ok();
+                store::targets::configure(
+                    &fixture.client_state,
+                    &administrator,
+                    &fixture.server_id,
+                    existing.map(|target| target.revision),
+                    &format!("https://localhost:{}", endpoint.address.port()),
+                    true,
+                    None,
+                )?;
+                let result = super::super::super::remote_traffic::request(
+                    &controller,
+                    fixture.server_id.clone(),
+                    control::Request::TrafficSnapshotV2,
+                )
+                .await;
+                endpoint.stop()?;
+                if fallback {
+                    let control::Reply::TrafficSnapshot(value) = result? else {
+                        return Err(io::Error::other("expected legacy snapshot"));
+                    };
+                    assert!(!value.value.status.http_split);
+                } else {
+                    let error = result
+                        .err()
+                        .ok_or_else(|| io::Error::other("unexpected fallback success"))?;
+                    assert_eq!(
+                        error.kind(),
+                        if status == 403 {
+                            io::ErrorKind::PermissionDenied
+                        } else if status == 200 {
+                            io::ErrorKind::InvalidData
+                        } else {
+                            io::ErrorKind::Other
+                        }
+                    );
+                }
+                let requests = requests
+                    .lock()
+                    .map_err(|_| io::Error::other("fixture request lock"))?;
+                assert_eq!(requests.len(), if fallback { 2 } else { 1 });
+                assert_eq!(requests[0], "GET /node/v2/traffic/snapshot HTTP/1.1");
+                if fallback {
+                    assert_eq!(requests[1], "GET /node/v1/traffic/snapshot HTTP/1.1");
+                }
+            }
+            Ok(())
         }
 
         #[test]
@@ -2229,23 +2352,29 @@ pub(super) mod tests {
                 .build()?;
             let fixture = Fixture::new(true, true)?;
             let caller = coordinator(&fixture.client_state)?;
-            let endpoint = RawEndpoint::start(fixture.server_tls.clone(), RawReply::Oversized)?;
-            let error = runtime
-                .block_on(control::request(
-                    &caller,
-                    fixture.client_tls.clone(),
-                    &format!("https://localhost:{}", endpoint.address.port()),
-                    &fixture.server_id,
-                    control::Request::TrafficSnapshot,
-                ))
-                .err()
-                .unwrap();
-            assert!(endpoint.stop()? > 0);
-            assert_eq!(error.kind(), io::ErrorKind::InvalidData);
-            assert_eq!(
-                error.to_string(),
-                "node control response exceeds its size limit"
-            );
+            for (operation, limit) in [
+                (control::Request::TrafficSnapshot, 32 * 1024),
+                (control::Request::TrafficSnapshotV2, 64 * 1024),
+            ] {
+                let endpoint =
+                    RawEndpoint::start(fixture.server_tls.clone(), RawReply::Oversized(limit))?;
+                let error = runtime
+                    .block_on(control::request(
+                        &caller,
+                        fixture.client_tls.clone(),
+                        &format!("https://localhost:{}", endpoint.address.port()),
+                        &fixture.server_id,
+                        operation,
+                    ))
+                    .err()
+                    .unwrap();
+                assert!(endpoint.stop()? > 0);
+                assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+                assert_eq!(
+                    error.to_string(),
+                    "node control response exceeds its size limit"
+                );
+            }
 
             let mut value = snapshot_json(&fixture)?;
             value["definition"] = serde_json::json!("wire_bytes_including_headers");
@@ -3887,6 +4016,13 @@ pub(super) mod tests {
     /// application bytes independently proves registration happens before HTTP.
     enum RawReply {
         Json(serde_json::Value),
+        /// Exercise a versioned traffic read followed by at most one legacy GET.
+        TrafficNegotiation {
+            status: u16,
+            first: serde_json::Value,
+            legacy: serde_json::Value,
+            requests: Arc<std::sync::Mutex<Vec<String>>>,
+        },
         /// An older authenticated node has no route for a new read-only resource.
         NotFound,
         /// Change the exact configured target before its missing reply completes.
@@ -3903,7 +4039,7 @@ pub(super) mod tests {
             directory: PathBuf,
             leaf: Vec<u8>,
         },
-        Oversized,
+        Oversized(usize),
         NoResponse,
         ObserveEof,
     }
@@ -3934,7 +4070,8 @@ pub(super) mod tests {
                         _ = stop.cancelled() => return Ok(()),
                         accepted = listener.accept() => accepted?,
                     };
-                    let mut stream = TlsAcceptor::from(tls).accept(stream).await?;
+                    let acceptor = TlsAcceptor::from(tls);
+                    let mut stream = acceptor.accept(stream).await?;
                     let mut request = Vec::new();
                     let mut buffer = [0; 1024];
                     while request.len() < 16 * 1024 {
@@ -3954,6 +4091,25 @@ pub(super) mod tests {
                     }
                     if request.is_empty() { return Ok(()); }
                     match reply {
+                        RawReply::TrafficNegotiation { status, first, legacy, requests } => {
+                            requests.lock().map_err(|_| io::Error::other("fixture request lock"))?.push(String::from_utf8_lossy(&request).lines().next().unwrap_or_default().to_owned());
+                            let bytes = serde_json::to_vec(&first).map_err(io::Error::other)?;
+                            stream.write_all(format!("HTTP/1.1 {status} Fixture\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", bytes.len()).as_bytes()).await?;
+                            stream.write_all(&bytes).await?;
+                            stream.flush().await?;
+                            stream.shutdown().await?;
+                            drop(stream);
+                            let (stream, _) = tokio::select! { _ = stop.cancelled() => return Ok(()), accepted = listener.accept() => accepted? };
+                            let mut stream = acceptor.accept(stream).await?;
+                            let mut next = Vec::new();
+                            while !next.ends_with(b"\r\n\r\n") && next.len() < 16 * 1024 { next.push(stream.read_u8().await?); }
+                            count.fetch_add(next.len(), Ordering::Relaxed);
+                            requests.lock().map_err(|_| io::Error::other("fixture request lock"))?.push(String::from_utf8_lossy(&next).lines().next().unwrap_or_default().to_owned());
+                            let bytes = serde_json::to_vec(&legacy).map_err(io::Error::other)?;
+                            stream.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", bytes.len()).as_bytes()).await?;
+                            stream.write_all(&bytes).await?;
+                            stream.flush().await?;
+                        }
                         RawReply::NotFound => {
                             let bytes = br#"{"error":{"code":"not_found"}}"#;
                             let headers = format!("HTTP/1.1 404 Not Found\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n", bytes.len());
@@ -3995,11 +4151,11 @@ pub(super) mod tests {
                             stream.write_all(&bytes[split..]).await?;
                             stream.flush().await?;
                         }
-                        RawReply::Oversized => {
+                        RawReply::Oversized(limit) => {
                             // Never finish this body: an implementation which
-                            // forgets the 32-KiB cap would hit the deadline instead.
-                            stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 65536\r\n\r\n").await?;
-                            stream.write_all(&vec![b'x'; 32 * 1024 + 1]).await?;
+                            // forgets the selected cap would hit the deadline instead.
+                            stream.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n", limit * 2).as_bytes()).await?;
+                            stream.write_all(&vec![b'x'; limit + 1]).await?;
                             stream.flush().await?;
                             stop.cancelled().await;
                         }
@@ -4145,7 +4301,8 @@ pub(super) mod tests {
             store::load_policy(&fixture.client_state)?,
             Arc::new(store::lock(&fixture.client_state)?),
         )?;
-        let endpoint = RawEndpoint::start(fixture.server_tls.clone(), RawReply::Oversized)?;
+        let endpoint =
+            RawEndpoint::start(fixture.server_tls.clone(), RawReply::Oversized(32 * 1024))?;
         let origin = format!("https://localhost:{}", endpoint.address.port());
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -4300,7 +4457,8 @@ pub(super) mod tests {
             "node identity response does not match the verified protocol and identities"
         );
 
-        let endpoint = RawEndpoint::start(fixture.server_tls.clone(), RawReply::Oversized)?;
+        let endpoint =
+            RawEndpoint::start(fixture.server_tls.clone(), RawReply::Oversized(32 * 1024))?;
         let result = probe(fixture.probe_args(endpoint.address));
         assert!(endpoint.stop()? > 0);
         let error =

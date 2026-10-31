@@ -2,10 +2,8 @@ import type { RunTimeLayoutConfig, RuntimeAntdConfig } from "@umijs/max";
 import type { ReactNode } from "react";
 import { ManagementProvider } from "./auth/context";
 import AccountActions from "./components/AccountActions";
-import LanguageSwitch from "./components/LanguageSwitch";
 import AlertInbox from "./components/AlertInbox";
-import ProjectLink from "./components/ProjectLink";
-import ThemeSwitch from "./components/ThemeSwitch";
+import HeaderTools from "./components/HeaderTools";
 import NavigationToggle from "./components/NavigationToggle";
 import ManagementShell from "./components/ManagementShell";
 import ManagementBoundary from "./components/ManagementBoundary";
@@ -60,27 +58,37 @@ export const layout: RunTimeLayoutConfig = () => {
     navTheme: mode === "dark" ? "realDark" : "light",
     colorPrimary: consolePalette.accent,
     logo: false,
-    // A custom collapsedButtonRender replaces the default action; it is not
-    // wrapped in ProLayout's click handler. Keep one explicit action at the top.
+    className: "management-layout",
+    siderWidth: 256,
+    headerTitleRender: false,
+    logoStyle: {
+      height: 56,
+      paddingBlock: 12,
+      justifyContent: "center",
+      cursor: "default",
+    },
+    menuHeaderRender: (_logo, _title, props) =>
+      // The mobile header also calls this renderer, without rail props.
+      props ? (
+        <span className="management-brand" aria-label="vproxy">
+          {props.collapsed && !props.isMobile ? "v" : "vproxy"}
+        </span>
+      ) : null,
+    // The wordmark is identity, not an unlabelled, mouse-only home action.
+    onMenuHeaderClick: undefined,
+    // Keep navigation controls in the header rather than among destinations.
     collapsedButtonRender: false,
-    menuExtraRender: (props) =>
-      props.isMobile ? null : (
-        <NavigationToggle
-          sidebar
-          collapsed={Boolean(props.collapsed)}
-          onClick={() => props.onCollapse?.(!props.collapsed)}
-        />
-      ),
+    menuExtraRender: false,
     // ProLayout 3.1.14's mobile GlobalHeader ignores collapsedButtonRender.
     // Keep its header/actions but replace its inaccessible span toggle.
-    headerContentRender: (props) =>
-      props.isMobile ? (
-        <NavigationToggle
-          className="management-mobile-navigation"
-          collapsed={Boolean(props.collapsed)}
-          onClick={() => props.onCollapse?.(!props.collapsed)}
-        />
-      ) : null,
+    headerContentRender: (props) => (
+      <NavigationToggle
+        className={props.isMobile ? "management-mobile-navigation" : undefined}
+        isMobile={Boolean(props.isMobile)}
+        collapsed={Boolean(props.collapsed)}
+        onClick={() => props.onCollapse?.(!props.collapsed)}
+      />
+    ),
     token: {
       bgLayout: consolePalette.canvas,
       header: {
@@ -91,28 +99,28 @@ export const layout: RunTimeLayoutConfig = () => {
         colorBgMenuItemSelected: consolePalette.selected,
       },
       sider: {
-        colorMenuBackground: consolePalette.surface,
-        colorTextMenu: consolePalette.text,
-        colorTextMenuItemHover: consolePalette.text,
-        colorTextMenuSelected: consolePalette.accent,
-        colorBgMenuItemSelected: consolePalette.selected,
+        colorMenuBackground: consolePalette.sidebar,
+        colorTextMenu: consolePalette.sidebarText,
+        colorTextMenuSecondary: consolePalette.sidebarText,
+        colorTextMenuItemHover: consolePalette.sidebarText,
+        colorTextMenuSelected: consolePalette.sidebarAccent,
+        colorBgMenuItemHover: consolePalette.sidebarHover,
+        colorBgMenuItemSelected: consolePalette.sidebarSelected,
       },
       pageContainer: {
         paddingInlinePageContainerContent: 24,
         paddingBlockPageContainerContent: 24,
       },
     },
-    actionsRender: () => [
+    actionsRender: (props) => [
+      <HeaderTools key="tools" compact={Boolean(props.isMobile)} />,
       ...(__VPROXY_DEMO__ ? [] : [<AlertInbox key="alerts" />]),
       ...(__VPROXY_DEMO__ ? [] : [<AccountActions key="account" />]),
-      <ThemeSwitch key="theme" />,
-      <ProjectLink key="project" />,
-      <LanguageSwitch key="language" />,
     ],
     footerRender: false,
     childrenRender: (children) => <PageScrollReset>{children}</PageScrollReset>,
     rightContentRender: false,
-    menu: { locale: true },
+    menu: { locale: true, collapsedWidth: 64 },
     menuItemRender: (item, dom) => (
       <ScopeMenuLink
         path={item.path}

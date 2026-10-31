@@ -17,7 +17,7 @@ use super::{
     valid_id,
 };
 
-const MAX_BYTES: usize = 32 * 1024;
+const MAX_BYTES: usize = 64 * 1024;
 const MAX_TIME: u64 = 9_007_199_254_740_991;
 
 /// A validated, already-persisted quarantine rejects before any SQL mutation.
@@ -99,6 +99,29 @@ pub(super) fn create_schema(connection: &Connection) -> io::Result<()> {
       CHECK((snapshot IS NULL AND meter_epoch IS NULL AND cursor IS NULL AND last_success_at IS NULL AND authorization_revision IS NULL)
         OR(snapshot IS NOT NULL AND meter_epoch IS NOT NULL AND cursor IS NOT NULL AND authorization_revision IS NOT NULL))
     ) STRICT;").map_err(|error|sqlite_error("cannot create remote traffic cache",error))
+}
+
+/// Keep old canonical payloads and authorization/quarantine provenance intact;
+/// only widen the representation bound for five protocol positions.
+pub(super) fn upgrade_protocols(connection: &Connection) -> io::Result<()> {
+    connection.execute_batch("CREATE TABLE remote_traffic_sources_v29(
+      peer_id TEXT PRIMARY KEY NOT NULL REFERENCES managed_targets(peer_id) ON DELETE RESTRICT,
+      target_revision INTEGER NOT NULL CHECK(target_revision>=1),
+      meter_epoch TEXT CHECK(meter_epoch IS NULL OR length(meter_epoch)=22),
+      cursor INTEGER CHECK(cursor>=0),
+      snapshot BLOB CHECK(snapshot IS NULL OR length(snapshot) BETWEEN 1 AND 65536),
+      last_success_at INTEGER CHECK(last_success_at>=0),
+      error TEXT CHECK(error IN('unavailable','unsupported','not_authorized','continuity_error')),
+      authorization_revision INTEGER CHECK(authorization_revision>=1),
+      quarantined INTEGER NOT NULL DEFAULT 0 CHECK(quarantined IN(0,1)),
+      CHECK(quarantined=0 OR snapshot IS NOT NULL),
+      CHECK((snapshot IS NULL AND meter_epoch IS NULL AND cursor IS NULL AND last_success_at IS NULL AND authorization_revision IS NULL)
+        OR(snapshot IS NOT NULL AND meter_epoch IS NOT NULL AND cursor IS NOT NULL AND authorization_revision IS NOT NULL))
+    ) STRICT;
+    INSERT INTO remote_traffic_sources_v29 SELECT * FROM remote_traffic_sources;
+    DROP TABLE remote_traffic_sources;
+    ALTER TABLE remote_traffic_sources_v29 RENAME TO remote_traffic_sources;")
+        .map_err(|error| sqlite_error("cannot widen remote traffic representation", error))
 }
 
 /// Shared strict bounds for secure decoders and durable imports.
@@ -518,6 +541,11 @@ mod tests {
             }
         }
         fn snapshot(&self, cursor: u64, bytes: u64) -> NodeSnapshot {
+            let zero = Snapshot {
+                upload: 0,
+                download: 0,
+                saturated: false,
+            };
             let value = Snapshot {
                 upload: bytes,
                 download: bytes / 2,
@@ -526,11 +554,12 @@ mod tests {
             let windows = |id| {
                 vec![Window {
                     window_id: id,
-                    values: [Some(value), None, None],
+                    values: [Some(value), None, None, None, None],
                 }]
             };
             NodeSnapshot {
                 status: Status {
+                    http_split: false,
                     node_id: self.peer.clone(),
                     meter_epoch: self.epoch.clone(),
                     run_id: Some(self.epoch.clone()),
@@ -554,6 +583,8 @@ mod tests {
                         download: 0,
                         saturated: false,
                     },
+                    zero,
+                    zero,
                 ],
                 minute: windows(60_000),
                 hour: windows(0),
@@ -792,16 +823,17 @@ mod tests {
     fn maximum_cache_is_bounded_and_malformed_shapes_fail_closed() -> io::Result<()> {
         let fixture = Fixture::new()?;
         let mut maximum = fixture.snapshot(1, u64::MAX);
+        maximum.status.http_split = true;
         maximum.totals = [Snapshot {
             upload: u64::MAX,
             download: u64::MAX,
             saturated: true,
-        }; 3];
+        }; 5];
         let windows = |count: u64, width: u64| {
             (0..count)
                 .map(|index| Window {
                     window_id: index * width,
-                    values: [Some(maximum.totals[0]); 3],
+                    values: [Some(maximum.totals[0]); 5],
                 })
                 .collect()
         };
@@ -865,6 +897,73 @@ mod tests {
             )
             .map_err(sql_error)?;
         assert!(get(&fixture.directory, &fixture.peer).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn legacy_cache_survives_schema_migration_and_same_cursor_split_upgrade() -> io::Result<()> {
+        let fixture = Fixture::new()?;
+        fixture.import(fixture.snapshot(1, 37))?;
+        let connection = peers::open_existing(&fixture.directory, true)?;
+        store::recovery::restore_schema_twenty_eight_for_test(&connection)?;
+        let old_bytes: Vec<u8> = connection
+            .query_row(
+                "SELECT snapshot FROM remote_traffic_sources WHERE peer_id=?1",
+                [&fixture.peer],
+                |row| row.get(0),
+            )
+            .map_err(sql_error)?;
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&old_bytes).map_err(io::Error::other)?["version"],
+            1
+        );
+        store::migrate(
+            &fixture.directory,
+            &fixture.directory.join("cache-before-schema29.sqlite3"),
+        )?;
+        let copied: Vec<u8> = connection
+            .query_row(
+                "SELECT snapshot FROM remote_traffic_sources WHERE peer_id=?1",
+                [&fixture.peer],
+                |row| row.get(0),
+            )
+            .map_err(sql_error)?;
+        assert_eq!(old_bytes, copied);
+        let old = codec::decode(&copied)?;
+        assert!(!old.status.http_split);
+        let mut upgraded = fixture.snapshot(1, 37);
+        upgraded.status.http_split = true;
+        fixture.import(upgraded)?;
+        let cached = get(&fixture.directory, &fixture.peer)?;
+        assert!(!cached.source.quarantined);
+        assert!(cached.snapshot.unwrap().status.http_split);
+        let mut next = fixture.snapshot(2, 37);
+        next.status.http_split = true;
+        next.totals[3] = crate::traffic::Snapshot {
+            upload: 11,
+            download: 5,
+            saturated: false,
+        };
+        next.totals[4] = crate::traffic::Snapshot {
+            upload: 17,
+            download: 7,
+            saturated: false,
+        };
+        for windows in [&mut next.minute, &mut next.hour, &mut next.day] {
+            windows[0].values[3] = Some(next.totals[3]);
+            windows[0].values[4] = Some(next.totals[4]);
+        }
+        fixture.import(next)?;
+        let retained = get(&fixture.directory, &fixture.peer)?.snapshot.unwrap();
+        assert_eq!(retained.totals[0].upload, 37);
+        assert_eq!(retained.totals[3].upload, 11);
+        assert_eq!(retained.totals[4].upload, 17);
+        // A downgrade cannot discard newly distinguished absolute counters.
+        assert!(codec::check_progress(&retained, &fixture.snapshot(3, 65)).is_err());
+        let mut malformed = fixture.snapshot(3, 65);
+        malformed.totals[4].upload = 1;
+        assert!(validate_snapshot(&malformed).is_err());
+        assert!(!get(&fixture.directory, &fixture.peer)?.source.quarantined);
         Ok(())
     }
 

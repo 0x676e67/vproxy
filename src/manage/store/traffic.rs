@@ -14,10 +14,7 @@ use std::{io, path::Path};
 use rusqlite::{Connection, OptionalExtension, params};
 
 use crate::{
-    access::{
-        Protocol,
-        traffic::{PoolSeed, Seed},
-    },
+    access::traffic::{PROTOCOL_COUNT, PoolSeed, Protocol, Seed},
     traffic::Snapshot,
 };
 
@@ -26,7 +23,7 @@ use super::{invalid_data, peers::open_existing, read_overview, sqlite_error, val
 pub(in crate::manage) use write::{checkpoint, finish, start_run};
 pub(in crate::manage) use writer::Writer;
 
-const MAX_SERIES: u64 = 28_035;
+const MAX_SERIES: u64 = 46_725;
 const MAX_WINDOWS: u64 = 500_000;
 const MAX_BATCH: usize = 256;
 const MAX_PAGE: u32 = 50;
@@ -39,6 +36,9 @@ const ZERO: Snapshot = Snapshot {
 /// Durable provenance, not an assertion that a data-plane process is running.
 #[derive(Clone)]
 pub(in crate::manage) struct Status {
+    /// False only for an older remote representation; two zero counters do not
+    /// prove absence of HTTP/HTTPS traffic when the source did not distinguish it.
+    pub(in crate::manage) http_split: bool,
     pub(in crate::manage) node_id: String,
     /// Stable accounting incarnation, independent of controller ownership epochs.
     pub(in crate::manage) meter_epoch: String,
@@ -141,16 +141,17 @@ pub(in crate::manage) struct BucketPage {
 }
 
 /// One complete, bounded durable node history. The protocol positions are
-/// HTTP, SOCKS5, MASQUE; absence is unknown/no stored window, never a zero row.
+/// historical HTTP family, SOCKS5, MASQUE, plain HTTP, TLS HTTPS. Absence is
+/// unknown/no stored window, never a zero row.
 pub(in crate::manage) struct Window {
     pub(in crate::manage) window_id: u64,
-    pub(in crate::manage) values: [Option<Snapshot>; 3],
+    pub(in crate::manage) values: [Option<Snapshot>; PROTOCOL_COUNT],
 }
 
 /// Only this node's own accepted payload; imported child totals are excluded.
 pub(in crate::manage) struct NodeSnapshot {
     pub(in crate::manage) status: Status,
-    pub(in crate::manage) totals: [Snapshot; 3],
+    pub(in crate::manage) totals: [Snapshot; PROTOCOL_COUNT],
     pub(in crate::manage) minute: Vec<Window>,
     pub(in crate::manage) hour: Vec<Window>,
     pub(in crate::manage) day: Vec<Window>,
@@ -228,6 +229,79 @@ pub(super) fn create_schema(connection: &Connection) -> io::Result<()> {
          CREATE INDEX traffic_windows_retention ON traffic_windows(resolution,window_id);"
     ).map_err(|error|sqlite_error("cannot create traffic accounting schema",error))?;
     connection.execute("INSERT INTO traffic_state(singleton,meter_epoch,cursor,clean,loss_possible,history_gap,time_uncertain,series_count,window_count) VALUES(1,?1,0,1,0,0,0,0,0)", [super::random_id()?]).map_err(|error|sqlite_error("cannot initialize traffic accounting epoch",error))?;
+    Ok(())
+}
+
+/// Expand accounting slots atomically inside initialization/migration's owned
+/// transaction. Original bytes, identities, cursors, flags and UTC history remain
+/// in their existing slots; legacy HTTP-family traffic is not reclassified.
+pub(super) fn upgrade_protocols(connection: &Connection) -> io::Result<()> {
+    connection.execute_batch(
+        "CREATE TABLE traffic_state_v29 (
+           singleton INTEGER PRIMARY KEY CHECK(singleton=1),
+           meter_epoch TEXT NOT NULL CHECK(length(meter_epoch)=22),
+           run_id TEXT CHECK(run_id IS NULL OR length(run_id)=22),
+           cursor INTEGER NOT NULL CHECK(cursor>=0),
+           clean INTEGER NOT NULL CHECK(clean IN(0,1)),
+           loss_possible INTEGER NOT NULL CHECK(loss_possible IN(0,1)),
+           history_gap INTEGER NOT NULL CHECK(history_gap IN(0,1)),
+           time_uncertain INTEGER NOT NULL CHECK(time_uncertain IN(0,1)),
+           last_checkpoint_at INTEGER CHECK(last_checkpoint_at>=0),
+           meter_started_at INTEGER CHECK(meter_started_at>=0),
+           last_observed_at INTEGER CHECK(last_observed_at>=0)
+           ,series_count INTEGER NOT NULL CHECK(series_count BETWEEN 0 AND 46725)
+           ,window_count INTEGER NOT NULL CHECK(window_count BETWEEN 0 AND 500000)
+           ,excluded_observed_at INTEGER CHECK(excluded_observed_at>=0)
+           ,retention_at INTEGER CHECK(retention_at>=0)
+         ) STRICT;
+         CREATE TABLE traffic_series_v29 (
+           scope INTEGER NOT NULL CHECK(scope BETWEEN 0 AND 3),
+           subject_id TEXT NOT NULL CHECK(length(subject_id)=22),
+           protocol INTEGER NOT NULL CHECK(protocol BETWEEN 0 AND 4),
+           user_id TEXT REFERENCES proxy_users(id) ON DELETE RESTRICT,
+           credential_id TEXT REFERENCES proxy_credentials(id) ON DELETE RESTRICT,
+           pool_id TEXT REFERENCES routing_pools(id) ON DELETE RESTRICT,
+           node_id TEXT REFERENCES node_identity(node_id) ON DELETE RESTRICT,
+           upload BLOB NOT NULL CHECK(length(upload)=8),
+           download BLOB NOT NULL CHECK(length(download)=8),
+           saturated INTEGER NOT NULL CHECK(saturated IN(0,1)),
+           updated_cursor INTEGER NOT NULL CHECK(updated_cursor>=1),
+           CHECK((scope=0 AND credential_id IS NOT NULL AND credential_id=subject_id AND user_id IS NOT NULL AND pool_id IS NULL AND node_id IS NULL)
+              OR(scope=1 AND pool_id IS NOT NULL AND pool_id=subject_id AND credential_id IS NULL AND user_id IS NULL AND node_id IS NULL)
+              OR(scope=2 AND node_id IS NOT NULL AND node_id=subject_id AND credential_id IS NULL AND user_id IS NULL AND pool_id IS NULL)
+              OR(scope=3 AND user_id IS NOT NULL AND user_id=subject_id AND credential_id IS NULL AND pool_id IS NULL AND node_id IS NULL)),
+           PRIMARY KEY(scope,subject_id,protocol)
+         ) STRICT;
+         CREATE TABLE traffic_windows_v29 (
+           scope INTEGER NOT NULL CHECK(scope BETWEEN 1 AND 3),
+           subject_id TEXT NOT NULL CHECK(length(subject_id)=22),
+           protocol INTEGER NOT NULL CHECK(protocol BETWEEN 0 AND 4),
+           resolution INTEGER NOT NULL CHECK(resolution BETWEEN 0 AND 2),
+           window_id INTEGER NOT NULL CHECK(window_id>=0),
+           user_id TEXT REFERENCES proxy_users(id) ON DELETE RESTRICT,
+           pool_id TEXT REFERENCES routing_pools(id) ON DELETE RESTRICT,
+           node_id TEXT REFERENCES node_identity(node_id) ON DELETE RESTRICT,
+           upload BLOB NOT NULL CHECK(length(upload)=8),
+           download BLOB NOT NULL CHECK(length(download)=8),
+           saturated INTEGER NOT NULL CHECK(saturated IN(0,1)),
+           updated_cursor INTEGER NOT NULL CHECK(updated_cursor>=1),
+           CHECK((scope=1 AND pool_id IS NOT NULL AND pool_id=subject_id AND user_id IS NULL AND node_id IS NULL)
+              OR(scope=2 AND node_id IS NOT NULL AND node_id=subject_id AND user_id IS NULL AND pool_id IS NULL)
+              OR(scope=3 AND user_id IS NOT NULL AND user_id=subject_id AND pool_id IS NULL AND node_id IS NULL)),
+           PRIMARY KEY(scope,subject_id,protocol,resolution,window_id)
+         ) STRICT;
+
+         INSERT INTO traffic_state_v29 SELECT * FROM traffic_state;
+         INSERT INTO traffic_series_v29 SELECT * FROM traffic_series;
+         INSERT INTO traffic_windows_v29 SELECT * FROM traffic_windows;
+         DROP TABLE traffic_windows;
+         DROP TABLE traffic_series;
+         DROP TABLE traffic_state;
+         ALTER TABLE traffic_state_v29 RENAME TO traffic_state;
+         ALTER TABLE traffic_series_v29 RENAME TO traffic_series;
+         ALTER TABLE traffic_windows_v29 RENAME TO traffic_windows;
+         CREATE INDEX traffic_windows_retention ON traffic_windows(resolution,window_id);"
+    ).map_err(|error| sqlite_error("cannot separate HTTP transport accounting", error))?;
     Ok(())
 }
 
@@ -326,8 +400,8 @@ pub(in crate::manage) fn totals(directory: &Path, scope: Scope) -> io::Result<To
 pub(super) fn totals_in(transaction: &Connection, scope: Scope) -> io::Result<Totals> {
     let status = state_in(transaction)?.status;
     let (code, id) = scope_in(transaction, scope, &status.node_id)?;
-    let mut items = Vec::with_capacity(3);
-    for protocol in 0..3 {
+    let mut items = Vec::with_capacity(PROTOCOL_COUNT);
+    for protocol in 0..PROTOCOL_COUNT as i64 {
         items.push(ProtocolTotal {
             protocol: self::protocol(protocol)?,
             value: series_value(transaction, code, &id, protocol)?.unwrap_or(ZERO),
@@ -433,24 +507,24 @@ pub(super) fn buckets_in(
     })
 }
 
-/// At most 414 protocol rows / 138 windows, all from one SQLite read snapshot.
+/// At most 690 protocol rows / 138 windows, all from one SQLite read snapshot.
 pub(super) fn node_snapshot_in(connection: &Connection) -> io::Result<NodeSnapshot> {
     use std::collections::BTreeMap;
     let retention = state_in(connection)?.retention_at;
     let floors = [Resolution::Minute, Resolution::Hour, Resolution::Day]
         .map(|resolution| retention.map(|time| resolution.floor(time)));
     let totals = totals_in(connection, Scope::Node)?;
-    let [first, second, third]: [ProtocolTotal; 3] = totals
+    let protocol_totals: [ProtocolTotal; PROTOCOL_COUNT] = totals
         .items
         .try_into()
         .map_err(|_| invalid_data("invalid node protocol total count"))?;
-    let values = [first.value, second.value, third.value];
+    let values = protocol_totals.map(|total| total.value);
     let mut statement=connection.prepare("SELECT resolution,window_id,protocol,upload,download,saturated FROM traffic_windows WHERE scope=2 AND subject_id=?1 AND (
         resolution NOT BETWEEN 0 AND 2
         OR (resolution=0 AND (?2 IS NULL OR window_id>=?2))
         OR (resolution=1 AND (?3 IS NULL OR window_id>=?3))
         OR (resolution=2 AND (?4 IS NULL OR window_id>=?4)))
-        ORDER BY resolution,window_id,protocol LIMIT 415").map_err(decode_error)?;
+        ORDER BY resolution,window_id,protocol LIMIT 691").map_err(decode_error)?;
     let mut rows = statement
         .query(params![
             &totals.status.node_id,
@@ -459,11 +533,11 @@ pub(super) fn node_snapshot_in(connection: &Connection) -> io::Result<NodeSnapsh
             floors[2].map(sql_number).transpose()?
         ])
         .map_err(decode_error)?;
-    let mut windows: BTreeMap<(i64, u64), [Option<Snapshot>; 3]> = BTreeMap::new();
+    let mut windows: BTreeMap<(i64, u64), [Option<Snapshot>; PROTOCOL_COUNT]> = BTreeMap::new();
     let mut count = 0usize;
     while let Some(row) = rows.next().map_err(decode_error)? {
         count += 1;
-        if count > 414 {
+        if count > 690 {
             return Err(invalid_data("node traffic history exceeds capacity"));
         }
         let resolution: i64 = row.get(0).map_err(decode_error)?;
@@ -478,7 +552,9 @@ pub(super) fn node_snapshot_in(connection: &Connection) -> io::Result<NodeSnapsh
             return Err(invalid_data("invalid node traffic window"));
         }
         let protocol = protocol_code(protocol(row.get(2).map_err(decode_error)?)?) as usize;
-        if windows.entry((resolution, window)).or_insert([None; 3])[protocol]
+        if windows
+            .entry((resolution, window))
+            .or_insert([None; PROTOCOL_COUNT])[protocol]
             .replace(value_in(row, 3)?)
             .is_some()
         {
@@ -569,6 +645,7 @@ fn state_in(connection: &Connection) -> io::Result<State> {
                 }
                 Ok(State {
                     status: Status {
+                        http_split: overview.schema_version >= 29,
                         node_id: overview.node_id,
                         meter_epoch: epoch,
                         run_id: run,
@@ -668,17 +745,21 @@ fn decode_value(up: Vec<u8>, down: Vec<u8>, saturated: i64) -> io::Result<Snapsh
 }
 fn protocol(value: i64) -> io::Result<Protocol> {
     match value {
-        0 => Ok(Protocol::Http),
+        0 => Ok(Protocol::HttpLegacy),
         1 => Ok(Protocol::Socks5),
         2 => Ok(Protocol::Masque),
+        3 => Ok(Protocol::Http),
+        4 => Ok(Protocol::Https),
         _ => Err(invalid_data("traffic protocol is malformed")),
     }
 }
 fn protocol_code(value: Protocol) -> i64 {
     match value {
-        Protocol::Http => 0,
+        Protocol::HttpLegacy => 0,
         Protocol::Socks5 => 1,
         Protocol::Masque => 2,
+        Protocol::Http => 3,
+        Protocol::Https => 4,
     }
 }
 fn flag(value: i64) -> io::Result<bool> {
@@ -727,6 +808,34 @@ pub(super) fn remove_schema_for_test(connection: &Connection) -> io::Result<()> 
     connection
         .execute_batch(
             "DROP TABLE remote_traffic_sources; DROP TABLE traffic_windows; DROP TABLE traffic_series; DROP TABLE traffic_state;",
+        )
+        .map_err(decode_error)
+}
+
+/// Reconstruct the actual pre-split constraints, not just its version number.
+/// The caller owns a transaction and may only supply legacy-compatible rows.
+#[cfg(test)]
+pub(super) fn legacy_protocols_for_test(connection: &Connection) -> io::Result<()> {
+    connection
+        .execute_batch(
+            "DROP INDEX traffic_windows_retention;
+        ALTER TABLE traffic_state RENAME TO traffic_state_fixture29;
+        ALTER TABLE traffic_series RENAME TO traffic_series_fixture29;
+        ALTER TABLE traffic_windows RENAME TO traffic_windows_fixture29;
+        ALTER TABLE remote_traffic_sources RENAME TO remote_traffic_sources_fixture29;",
+        )
+        .map_err(decode_error)?;
+    create_schema(connection)?;
+    super::remote_traffic::create_schema(connection)?;
+    connection
+        .execute_batch(
+            "DELETE FROM traffic_state;
+        INSERT INTO traffic_state SELECT * FROM traffic_state_fixture29;
+        INSERT INTO traffic_series SELECT * FROM traffic_series_fixture29;
+        INSERT INTO traffic_windows SELECT * FROM traffic_windows_fixture29;
+        INSERT INTO remote_traffic_sources SELECT * FROM remote_traffic_sources_fixture29;
+        DROP TABLE traffic_windows_fixture29; DROP TABLE traffic_series_fixture29;
+        DROP TABLE traffic_state_fixture29; DROP TABLE remote_traffic_sources_fixture29;",
         )
         .map_err(decode_error)
 }
@@ -1099,7 +1208,11 @@ mod tests {
                 1,
                 PolicyChange::CreateUser {
                     name: "counter owner".into(),
-                    protocols: vec![Protocol::Http, Protocol::Socks5, Protocol::Masque],
+                    protocols: vec![
+                        crate::access::Protocol::Http,
+                        crate::access::Protocol::Socks5,
+                        crate::access::Protocol::Masque,
+                    ],
                     concurrent_limit: 8,
                 },
                 &gate,
@@ -1198,6 +1311,173 @@ mod tests {
     }
 
     #[test]
+    fn schema_twenty_eight_migration_keeps_legacy_identity_and_separates_new_scopes()
+    -> io::Result<()> {
+        let fixture = Fixture::new()?;
+        let gate = fixture.gate()?;
+        let run = fixture.start(&gate, Some(60_000))?.run_id.unwrap();
+        let mut legacy = fixture.sample(37, 19);
+        legacy.protocol = Protocol::HttpLegacy;
+        checkpoint(
+            &fixture.directory,
+            &gate,
+            &run,
+            Some(61_000),
+            &[legacy],
+            &[],
+        )?;
+        finish(&fixture.directory, &gate, &run, Some(62_000))?;
+        drop(gate);
+        let connection = open_existing(&fixture.directory, true)?;
+        store::recovery::restore_schema_twenty_eight_for_test(&connection)?;
+        let before = status(&fixture.directory)?;
+        assert!(!before.http_split);
+        let permissions = store::load_policy(&fixture.directory)?.users[0]
+            .protocols
+            .clone();
+        let gate = fixture.gate()?;
+        assert_eq!(
+            start_run(
+                &fixture.directory,
+                &gate,
+                &before.meter_epoch,
+                before.cursor,
+                Some(63_000)
+            )
+            .err()
+            .unwrap()
+            .kind(),
+            io::ErrorKind::Unsupported
+        );
+        assert_eq!(status(&fixture.directory)?.cursor, before.cursor);
+        drop(gate);
+        let backup = fixture.directory.join("schema28-before-split.sqlite3");
+        assert_eq!(
+            store::migrate(&fixture.directory, &backup)?.schema_version,
+            29
+        );
+        let original = Connection::open(&backup).map_err(decode_error)?;
+        assert_eq!(store::read_overview(&original)?.schema_version, 28);
+        assert!(!state_in(&original)?.status.http_split);
+        assert_eq!(state_in(&original)?.status.cursor, before.cursor);
+        let old_sql: String = original
+            .query_row(
+                "SELECT sql FROM sqlite_schema WHERE name='traffic_series'",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(decode_error)?;
+        assert!(old_sql.contains("protocol BETWEEN 0 AND 2"));
+        assert!(store::load_policy(&fixture.directory)?.users[0].protocols == permissions);
+        let after = status(&fixture.directory)?;
+        assert!(after.http_split);
+        assert_eq!(
+            (
+                &after.node_id,
+                &after.meter_epoch,
+                after.cursor,
+                after.run_id.as_ref(),
+                after.clean
+            ),
+            (
+                &before.node_id,
+                &before.meter_epoch,
+                before.cursor,
+                before.run_id.as_ref(),
+                before.clean
+            )
+        );
+        let gate = fixture.gate()?;
+        let run = fixture.start(&gate, Some(63_000))?.run_id.unwrap();
+        let plain = fixture.sample(11, 5);
+        let mut secure = fixture.sample(17, 7);
+        secure.protocol = Protocol::Https;
+        checkpoint(
+            &fixture.directory,
+            &gate,
+            &run,
+            Some(64_000),
+            &[plain, secure],
+            &[],
+        )?;
+        finish(&fixture.directory, &gate, &run, Some(65_000))?;
+        for scope in [
+            Scope::Node,
+            Scope::User(fixture.user.clone()),
+            Scope::Credential(fixture.credential.clone()),
+        ] {
+            let rows = totals(&fixture.directory, scope)?.items;
+            assert_eq!(rows[0].value.upload, 37);
+            assert_eq!(
+                rows[3].value,
+                Snapshot {
+                    upload: 11,
+                    download: 5,
+                    saturated: false
+                }
+            );
+            assert_eq!(
+                rows[4].value,
+                Snapshot {
+                    upload: 17,
+                    download: 7,
+                    saturated: false
+                }
+            );
+            assert_eq!(
+                rows.into_iter()
+                    .fold(ZERO, |sum, item| sum.sum(item.value))
+                    .upload,
+                65
+            );
+        }
+        let restored = restore(&fixture.directory)?;
+        assert_eq!(restored.credential_seeds.len(), 3);
+        assert!(
+            restored
+                .credential_seeds
+                .iter()
+                .any(|seed| seed.protocol == Protocol::HttpLegacy && seed.value.upload == 37)
+        );
+        assert!(
+            restored
+                .credential_seeds
+                .iter()
+                .any(|seed| seed.protocol == Protocol::Https && seed.value.upload == 17)
+        );
+        let windows = buckets(
+            &fixture.directory,
+            Scope::Node,
+            Resolution::Minute,
+            None,
+            50,
+        )?;
+        assert_eq!(windows.items[0].items.len(), 3);
+        Ok(())
+    }
+
+    #[test]
+    fn failed_protocol_migration_preserves_old_rows_and_private_backup() -> io::Result<()> {
+        let fixture = Fixture::new()?;
+        let connection = open_existing(&fixture.directory, true)?;
+        store::recovery::restore_schema_twenty_eight_for_test(&connection)?;
+        let before = status(&fixture.directory)?;
+        connection
+            .execute_batch("CREATE TABLE traffic_windows_v29(operator_fixture TEXT);")
+            .map_err(decode_error)?;
+        let backup = fixture.directory.join("failed-schema29.sqlite3");
+        assert!(store::migrate(&fixture.directory, &backup).is_err());
+        assert_eq!(store::inspect(&fixture.directory)?.schema_version, 28);
+        assert_eq!(status(&fixture.directory)?.meter_epoch, before.meter_epoch);
+        assert_eq!(status(&fixture.directory)?.cursor, before.cursor);
+        assert_eq!(
+            store::read_overview(&Connection::open(backup).map_err(decode_error)?)?.schema_version,
+            28
+        );
+        Ok(())
+    }
+
+    #[test]
     fn logical_retention_filters_before_paging_and_export_while_native_cleanup_remains_complete()
     -> io::Result<()> {
         let fixture = Fixture::new()?;
@@ -1219,7 +1499,7 @@ mod tests {
             .map_err(decode_error)?;
         {
             let mut row = tx
-                .prepare("INSERT INTO traffic_windows VALUES(2,?1,0,0,?2,NULL,NULL,?1,?3,?4,0,1)")
+                .prepare("INSERT INTO traffic_windows VALUES(2,?1,3,0,?2,NULL,NULL,?1,?3,?4,0,1)")
                 .map_err(decode_error)?;
             for index in 0..130i64 {
                 row.execute(params![

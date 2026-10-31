@@ -1,10 +1,10 @@
 import { Alert, Button, Select, Space, Typography } from "antd";
 import { useEffect, useRef, useState } from "react";
-import { apiError, type ApiError } from "../../api/client";
-import { errorMessage } from "../../api/messages";
-import type { Target, TargetPage } from "../../api/targets";
-import { useManagement } from "../../auth/context";
-import { useMessages } from "../../hooks/useMessages";
+import { apiError, type ApiError } from "../api/client";
+import { errorMessage } from "../api/messages";
+import type { Target, TargetPage } from "../api/targets";
+import { useManagement } from "../auth/context";
+import { useMessages } from "../hooks/useMessages";
 
 /** Fetch one local registry page, never every remote node or a per-card poll. */
 export default function ScopePicker({

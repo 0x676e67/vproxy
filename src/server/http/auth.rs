@@ -8,7 +8,11 @@ use crate::server::auth::{self, Authenticated, Service, Source, basic_credential
 pub(super) struct Authenticator(pub(super) Source);
 
 impl Authenticator {
-    pub(super) async fn authenticate(&self, headers: &HeaderMap) -> Result<Authenticated, Error> {
+    pub(super) async fn authenticate(
+        &self,
+        headers: &HeaderMap,
+        service: Service,
+    ) -> Result<Authenticated, Error> {
         let credentials = self
             .0
             .requires_password()
@@ -20,7 +24,7 @@ impl Authenticator {
                 credentials
                     .as_ref()
                     .map(|value| value.password().as_bytes()),
-                Service::Http,
+                service,
             )
             .await
             .and_then(|mut authenticated| {
@@ -61,7 +65,7 @@ mod tests {
             password: Some("pass:word".to_owned()),
         }));
         assert!(matches!(
-            authenticator.authenticate(&headers).await,
+            authenticator.authenticate(&headers, Service::Http).await,
             Ok(Authenticated {
                 extension: crate::ext::Extension::Session(_),
                 ..
@@ -73,7 +77,7 @@ mod tests {
             HeaderValue::from_static("Basic dXNlcjpwYXNzOndvcmQ="),
         );
         assert!(matches!(
-            authenticator.authenticate(&headers).await,
+            authenticator.authenticate(&headers, Service::Http).await,
             Err(Error::ProxyAuthenticationRequired)
         ));
     }
@@ -90,7 +94,7 @@ mod tests {
             password: Some("password".to_owned()),
         }));
         assert!(matches!(
-            authenticator.authenticate(&headers).await,
+            authenticator.authenticate(&headers, Service::Http).await,
             Err(Error::ProxyAuthenticationRequired)
         ));
     }

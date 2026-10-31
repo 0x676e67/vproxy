@@ -12,7 +12,6 @@ mod assets;
 mod automation;
 mod certificates;
 mod client;
-mod connection_test;
 mod contract;
 mod controller;
 mod diagnostics;
@@ -87,7 +86,7 @@ pub enum Command {
     /// Print a redacted offline diagnostic report without starting services
     Diagnose(diagnostics::Args),
     /// Test one exported proxy connection locally; sends real, metered traffic
-    TestConnection(connection_test::Args),
+    TestConnection(diagnostics::ConnectionArgs),
     /// Explicitly migrate existing state after stopping management instances
     Migrate {
         /// Persistent directory; never initialized by migration
@@ -197,7 +196,7 @@ pub(crate) fn run(command: Command) -> io::Result<()> {
         }
         Command::Status { data_dir } => store::inspect(&directory(data_dir)?)?,
         Command::Diagnose(args) => return diagnostics::run(args),
-        Command::TestConnection(args) => return connection_test::run(args),
+        Command::TestConnection(args) => return diagnostics::test_connection(args),
         Command::Migrate { data_dir, backup } => store::migrate(&directory(data_dir)?, &backup)?,
         Command::Backup { data_dir, output } => {
             return print_backup(store::create_backup(&directory(data_dir)?, &output)?);

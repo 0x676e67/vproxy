@@ -649,6 +649,12 @@ export class ManagementClient {
     const inboxResponse = /^\/alert-episodes(?:\?[^?]*|\/acknowledge)?$/.test(
       endpoint,
     );
+    const splitTrafficResponse =
+      /^\/(?:proxy|targets\/[A-Za-z0-9_-]{22})\/traffic(?:\/buckets)?\?/.test(
+        endpoint,
+      ) &&
+      new URLSearchParams(endpoint.split("?")[1]).get("protocol_format") ===
+        "split";
     const value = await jsonBody(
       response,
       signal,
@@ -656,7 +662,9 @@ export class ManagementClient {
         ? 262_144
         : historyResponse || eventResponse || inboxResponse
           ? 131_072
-          : MAX_RESPONSE_BYTES,
+          : splitTrafficResponse
+            ? 65_536
+            : MAX_RESPONSE_BYTES,
     );
     if (
       !(typeof status === "number"
@@ -1779,11 +1787,12 @@ export class ManagementClient {
   ): Promise<TrafficTotals> {
     return trafficTotals(
       await this.request(
-        `/proxy/traffic${trafficQuery(scope, options)}`,
+        `/proxy/traffic${trafficQuery(scope, options, false, true)}`,
         signal,
       ),
       scope,
       options.protocol,
+      true,
     );
   }
   async trafficBuckets(
@@ -1793,11 +1802,12 @@ export class ManagementClient {
   ): Promise<TrafficHistory> {
     return trafficHistory(
       await this.request(
-        `/proxy/traffic/buckets${trafficQuery(scope, options, true)}`,
+        `/proxy/traffic/buckets${trafficQuery(scope, options, true, true)}`,
         signal,
       ),
       scope,
       options,
+      true,
     );
   }
   async targetTraffic(
@@ -1808,12 +1818,12 @@ export class ManagementClient {
   ): Promise<RemoteTraffic<TrafficTotals>> {
     return remoteTraffic(
       await this.request(
-        `/targets/${idPath(peer)}/traffic${trafficQuery(scope, options)}`,
+        `/targets/${idPath(peer)}/traffic${trafficQuery(scope, options, false, true)}`,
         signal,
       ),
       peer,
       scope,
-      (value) => trafficTotals(value, scope, options.protocol),
+      (value) => trafficTotals(value, scope, options.protocol, true),
     );
   }
   async targetTrafficBuckets(
@@ -1824,12 +1834,12 @@ export class ManagementClient {
   ): Promise<RemoteTraffic<TrafficHistory>> {
     return remoteTraffic(
       await this.request(
-        `/targets/${idPath(peer)}/traffic/buckets${trafficQuery(scope, options, true)}`,
+        `/targets/${idPath(peer)}/traffic/buckets${trafficQuery(scope, options, true, true)}`,
         signal,
       ),
       peer,
       scope,
-      (value) => trafficHistory(value, scope, options),
+      (value) => trafficHistory(value, scope, options, true),
     );
   }
   async poolMembers(

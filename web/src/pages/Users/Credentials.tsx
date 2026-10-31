@@ -18,7 +18,7 @@ import { errorMessage } from "../../api/messages";
 import { useManagement } from "../../auth/context";
 import type { MessageKey } from "../../hooks/useMessages";
 import { useMessages } from "../../hooks/useMessages";
-import ConnectionModal from "../../components/Presets/ConnectionModal";
+import ConnectionModal from "../../components/Connections/ConnectionModal";
 import type { UserChange } from "../../api/userOperations";
 
 export type MutationWork = (

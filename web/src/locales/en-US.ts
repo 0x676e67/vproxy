@@ -43,6 +43,7 @@ export default {
   ...notifications,
   "menu.nodes": "Nodes",
   "app.language": "Interface language",
+  "app.tools": "Tools",
   "app.projectRepository": "GitHub repository",
   "app.pageUnavailable": "This page could not be displayed",
   "app.pageReloadNotice":

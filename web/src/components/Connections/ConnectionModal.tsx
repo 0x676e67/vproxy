@@ -56,11 +56,9 @@ import type {
 import type { PermissionView } from "../../api/routing";
 import { useManagement } from "../../auth/context";
 import { useMessages } from "../../hooks/useMessages";
-import { CapabilityView } from "./Capability";
-import ClientExamples from "../Connections/ClientExamples";
-import DiagnosticProfile, {
-  DIAGNOSTIC_FILENAME,
-} from "../Connections/DiagnosticProfile";
+import { CapabilityView } from "../Presets/Capability";
+import ClientExamples from "./ClientExamples";
+import DiagnosticProfile, { DIAGNOSTIC_FILENAME } from "./DiagnosticProfile";
 import ConnectionRouting from "./ConnectionRouting";
 import {
   readConnectionLabels,

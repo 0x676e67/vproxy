@@ -6,21 +6,21 @@ import {
 import { Button } from "antd";
 import { useMessages } from "../../hooks/useMessages";
 
-/** Both placements must bind ProLayout's collapse action explicitly. */
+/** One header control binds ProLayout's desktop rail or mobile drawer action. */
 export default function NavigationToggle({
   collapsed,
   className,
   onClick,
-  sidebar = false,
+  isMobile = false,
 }: {
   collapsed: boolean;
   className?: string;
   onClick: () => void;
-  sidebar?: boolean;
+  isMobile?: boolean;
 }) {
   const { t } = useMessages();
   const label = t(
-    sidebar
+    !isMobile
       ? collapsed
         ? "layout.expandNavigation"
         : "layout.collapseNavigation"
@@ -31,11 +31,7 @@ export default function NavigationToggle({
   return (
     <Button
       type="text"
-      className={[
-        "management-header-action",
-        sidebar && "management-sidebar-toggle",
-        className,
-      ]
+      className={["management-header-action", className]
         .filter(Boolean)
         .join(" ")}
       onClick={onClick}
@@ -43,7 +39,7 @@ export default function NavigationToggle({
       aria-expanded={!collapsed}
       title={label}
       icon={
-        sidebar ? (
+        !isMobile ? (
           collapsed ? (
             <MenuUnfoldOutlined aria-hidden />
           ) : (
@@ -53,8 +49,6 @@ export default function NavigationToggle({
           <MenuOutlined aria-hidden />
         )
       }
-    >
-      {sidebar && !collapsed ? label : null}
-    </Button>
+    />
   );
 }

@@ -608,8 +608,16 @@ export function endpointStatus(
       if (
         !(
           history
-            ? ["scope", "id", "protocol", "resolution", "after", "limit"]
-            : ["scope", "id", "protocol"]
+            ? [
+                "scope",
+                "id",
+                "protocol",
+                "protocol_format",
+                "resolution",
+                "after",
+                "limit",
+              ]
+            : ["scope", "id", "protocol", "protocol_format"]
         ).includes(key) ||
         seen.has(key)
       )
@@ -617,6 +625,11 @@ export function endpointStatus(
       seen.add(key);
     }
     const scope = values.get("scope") ?? "node";
+    if (
+      values.has("protocol_format") &&
+      values.get("protocol_format") !== "split"
+    )
+      throw new ApiError("format");
     const id = values.get("id");
     if (
       !(scope === "node"
@@ -628,7 +641,14 @@ export function endpointStatus(
       throw new ApiError("format");
     if (
       values.has("protocol") &&
-      !["http", "socks5", "masque"].includes(values.get("protocol")!)
+      ![
+        "http",
+        "socks5",
+        "masque",
+        ...(values.get("protocol_format") === "split"
+          ? ["https", "http_legacy"]
+          : []),
+      ].includes(values.get("protocol")!)
     )
       throw new ApiError("format");
     if (

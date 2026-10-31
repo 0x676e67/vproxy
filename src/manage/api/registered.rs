@@ -699,7 +699,7 @@ mod tests {
             assert!(traffic.cursor>previous_cursor);
             assert!(traffic.run_id.is_some() && traffic.clean && !traffic.loss_possible);
             let totals=store::traffic::totals(&export.fixture.client_state, store::traffic::Scope::Node)?;
-            let http=totals.items.iter().find(|v|v.protocol==crate::access::Protocol::Http)
+            let http=totals.items.iter().find(|v|v.protocol==crate::access::traffic::Protocol::Http)
                 .ok_or_else(||io::Error::other("HTTP total missing"))?;
             assert_eq!((http.value.upload,http.value.download),(4*(round as u64+1),5*(round as u64+1)));
             previous_cursor=traffic.cursor;

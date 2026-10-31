@@ -155,3 +155,151 @@ impl Server for AutoDetectServer {
         result.and(connections).and(http).and(https).and(permits)
     }
 }
+
+#[cfg(all(test, feature = "management"))]
+mod traffic_tests {
+    use super::*;
+    use crate::{
+        access::{
+            Reader,
+            tests::{LOGIN, policy, secret},
+            traffic::Protocol,
+        },
+        server::{Connector, auth::Source},
+    };
+    use base64::{Engine as _, engine::general_purpose::STANDARD};
+    use tokio::{
+        io::{AsyncRead, AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _},
+        net::TcpStream,
+    };
+
+    async fn tunnel<S: AsyncRead + AsyncWrite + Unpin>(
+        mut stream: S,
+        destination: std::net::SocketAddr,
+        payload: &[u8],
+        reply: &[u8],
+    ) {
+        let token = STANDARD.encode([LOGIN.as_bytes(), b":", &secret()].concat());
+        stream.write_all(format!("CONNECT {destination} HTTP/1.1\r\nHost: {destination}\r\nProxy-Authorization: Basic {token}\r\n\r\n").as_bytes()).await.unwrap();
+        let mut head = Vec::new();
+        while !head.ends_with(b"\r\n\r\n") {
+            assert!(head.len() < 8192);
+            head.push(stream.read_u8().await.unwrap());
+        }
+        assert!(head.starts_with(b"HTTP/1.1 200"));
+        stream.write_all(payload).await.unwrap();
+        let mut received = vec![0; reply.len()];
+        stream.read_exact(&mut received).await.unwrap();
+        assert_eq!(received, reply);
+        stream.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn auto_detected_connect_counts_proxy_transport_not_destination_or_http_framing() {
+        tokio::time::timeout(std::time::Duration::from_secs(15), async {
+            let reader = Reader::new(policy(1, 8)).unwrap();
+            let certificate = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
+            let leaf = certificate.cert.der().clone();
+            let key = rustls_pki_types::PrivateKeyDer::Pkcs8(
+                rustls_pki_types::PrivatePkcs8KeyDer::from(certificate.signing_key.serialize_der()),
+            );
+            let signer = rustls::crypto::aws_lc_rs::sign::any_supported_type(&key).unwrap();
+            let identity = super::super::tls::Identity::new(rustls::sign::CertifiedKey::new(
+                vec![leaf.clone()],
+                signer,
+            ))
+            .unwrap();
+            let origin = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let destination = origin.local_addr().unwrap();
+            let server = AutoDetectServer::from_identity(
+                Context {
+                    auth: Source::Managed(reader.clone()),
+                    bind: "127.0.0.1:0".parse().unwrap(),
+                    concurrent: 8,
+                    connect_timeout: 3,
+                    connector: Connector::new(
+                        None,
+                        None,
+                        None,
+                        3,
+                        #[cfg(any(
+                            target_os = "android",
+                            target_os = "fuchsia",
+                            target_os = "linux"
+                        ))]
+                        None,
+                        None,
+                    ),
+                },
+                identity,
+            )
+            .unwrap();
+            let proxy = server.local_addr().unwrap();
+            let handle = Handle::new();
+            let mut tasks = tokio::task::JoinSet::new();
+            tasks.spawn(server.start(handle.clone()));
+            tasks.spawn(async move {
+                for (payload, reply) in [
+                    (b"http".as_slice(), b"one".as_slice()),
+                    (b"secure".as_slice(), b"three".as_slice()),
+                ] {
+                    let (mut stream, _) = origin.accept().await?;
+                    let mut received = vec![0; payload.len()];
+                    stream.read_exact(&mut received).await?;
+                    assert_eq!(received, payload);
+                    stream.write_all(reply).await?;
+                    stream.shutdown().await?;
+                }
+                Ok(())
+            });
+            tunnel(
+                TcpStream::connect(proxy).await.unwrap(),
+                destination,
+                b"http",
+                b"one",
+            )
+            .await;
+            let mut roots = rustls::RootCertStore::empty();
+            roots.add(leaf).unwrap();
+            let mut client = rustls::ClientConfig::builder_with_provider(Arc::new(
+                rustls::crypto::aws_lc_rs::default_provider(),
+            ))
+            .with_safe_default_protocol_versions()
+            .unwrap()
+            .with_root_certificates(roots)
+            .with_no_client_auth();
+            client.alpn_protocols = vec![b"http/1.1".to_vec()];
+            let connector = tokio_rustls::TlsConnector::from(Arc::new(client));
+            let encrypted = connector
+                .connect(
+                    "localhost".try_into().unwrap(),
+                    TcpStream::connect(proxy).await.unwrap(),
+                )
+                .await
+                .unwrap();
+            tunnel(encrypted, destination, b"secure", b"three").await;
+            handle.request_graceful_shutdown();
+            while let Some(result) = tasks.join_next().await {
+                result.unwrap().unwrap();
+            }
+            let rows = reader.traffic_registry().snapshot().unwrap();
+            for (protocol, upload, download) in [
+                (Protocol::Http, 4, 3),
+                (Protocol::Https, 6, 5),
+                (Protocol::HttpLegacy, 0, 0),
+            ] {
+                let value = rows
+                    .iter()
+                    .find(|row| row.protocol == protocol)
+                    .unwrap()
+                    .value;
+                assert_eq!(
+                    (value.upload, value.download, value.saturated),
+                    (upload, download, false)
+                );
+            }
+        })
+        .await
+        .expect("auto transport accounting must finish");
+    }
+}

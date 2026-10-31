@@ -8,7 +8,7 @@ import { resourcesHref } from "../../api/targets";
 import { useMessages } from "../../hooks/useMessages";
 import type { ConnectionLabels } from "./connectionLabels";
 import { connectionRoutes } from "./connectionState";
-import RouteChoice from "./RouteChoice";
+import RouteChoice from "../Presets/RouteChoice";
 
 /** Form-only route choices. Optional resource labels never add grants or replace
  * the modal's fresh authorization check before generation. */

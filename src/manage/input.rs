@@ -90,6 +90,51 @@ pub(super) fn existing_password() -> io::Result<Zeroizing<Vec<u8>>> {
     result
 }
 
+/// Existing proxy passwords have no administrator creation minimum. Preserve
+/// spaces and UTF-8 bytes; RFC 1929 bounds the length to one nonzero octet.
+pub(super) fn validate_existing_password(password: &[u8]) -> io::Result<()> {
+    let valid =
+        std::str::from_utf8(password).is_ok_and(|value| !value.chars().any(char::is_control));
+    if password.is_empty() || password.len() > 255 || !valid {
+        return Err(invalid_password_input(
+            "proxy password must contain 1 to 255 UTF-8 bytes without control characters",
+        ));
+    }
+    Ok(())
+}
+
+/// Read a bounded redirected password, removing only its final LF or CRLF.
+/// Input errors are redacted and caller-owned buffers are zeroized.
+pub(super) fn existing_password_from_reader(
+    mut reader: impl io::Read,
+) -> io::Result<Zeroizing<Vec<u8>>> {
+    // A fixed buffer cannot reallocate and leave older secret copies behind.
+    let mut bytes = Zeroizing::new([0_u8; 258]);
+    let mut length = 0;
+    loop {
+        if length == bytes.len() {
+            return Err(invalid_password_input("proxy password input is too long"));
+        }
+        let count = reader
+            .read(&mut bytes[length..])
+            .map_err(|_| invalid_password_input("cannot read proxy password"))?;
+        if count == 0 {
+            break;
+        }
+        length += count;
+    }
+    let mut password = &bytes[..length];
+    if let Some(value) = password.strip_suffix(b"\n") {
+        password = value.strip_suffix(b"\r").unwrap_or(value);
+    }
+    validate_existing_password(password)?;
+    Ok(Zeroizing::new(password.to_vec()))
+}
+
+fn invalid_password_input(message: &'static str) -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidInput, message)
+}
+
 /// Keep one terminal reader for an entire visible-only guide, including any
 /// buffered Windows input. No terminal mode is changed and redirected stdin
 /// never silently supplies defaults or confirms an output.
@@ -237,7 +282,7 @@ fn read_existing_password(
         reader,
         &mut false,
         255,
-        super::connection_test::validate_password,
+        validate_existing_password,
         "proxy password input is invalid or exceeds 255 UTF-8 bytes",
     )
 }
@@ -548,5 +593,38 @@ mod tests {
         assert!(visible_line(&mut lines, &mut Vec::new(), "", 4, "").is_err());
         assert_eq!(lines, b"next\n");
         assert!(visible_line(&mut &b"node"[..], &mut Vec::new(), "", 4, "").is_err());
+    }
+
+    #[test]
+    fn existing_password_accepts_short_and_preserves_spaces_and_colons() {
+        for value in [b"a".as_slice(), b" : x: ", "短密码".as_bytes()] {
+            let mut input = value.to_vec();
+            input.extend_from_slice(b"\r\n");
+            assert_eq!(
+                existing_password_from_reader(input.as_slice())
+                    .unwrap()
+                    .as_slice(),
+                value
+            );
+        }
+        assert_eq!(
+            existing_password_from_reader([b'x'; 255].as_slice())
+                .unwrap()
+                .len(),
+            255
+        );
+        for value in [
+            b"".as_slice(),
+            b"\n",
+            b"x\ny",
+            b"x\n\n",
+            b"x\0",
+            b"x\x7f",
+            b"\xff",
+            [b'x'; 256].as_slice(),
+            [b'x'; 258].as_slice(),
+        ] {
+            assert!(existing_password_from_reader(value).is_err());
+        }
     }
 }

@@ -3,10 +3,7 @@
 
 use super::*;
 use crate::{
-    access::{
-        Protocol,
-        traffic::{PoolSnapshot, SeriesSnapshot},
-    },
+    access::traffic::{PROTOCOL_COUNT, PoolSnapshot, Protocol, SeriesSnapshot, protocol_index},
     manage::{
         store::traffic::{self as durable, Resolution, Scope},
         traffic as collector,
@@ -24,6 +21,8 @@ pub(super) fn routes(state: Arc<AppState>) -> Router<Arc<AppState>> {
 }
 
 pub(super) struct Query {
+    /// Explicit opt-in; existing v1 callers retain the HTTP-family projection.
+    pub(super) split: bool,
     pub(super) scope: Scope,
     pub(super) protocol: Option<Protocol>,
     pub(super) resolution: Resolution,
@@ -39,6 +38,7 @@ pub(super) fn query(uri: &Uri, history: bool) -> Result<Query, ApiError> {
     let mut seen = std::collections::HashSet::new();
     let (mut scope, mut id, mut protocol, mut resolution, mut after, mut limit) =
         (None, None, None, None, None, None);
+    let mut split = false;
     for (key, value) in url::form_urlencoded::parse(raw.as_bytes()) {
         if !seen.insert(key.clone()) {
             return Err(invalid());
@@ -61,11 +61,14 @@ pub(super) fn query(uri: &Uri, history: bool) -> Result<Query, ApiError> {
             "protocol" => {
                 protocol = Some(match value.as_ref() {
                     "http" => Protocol::Http,
+                    "https" => Protocol::Https,
+                    "http_legacy" => Protocol::HttpLegacy,
                     "socks5" => Protocol::Socks5,
                     "masque" => Protocol::Masque,
                     _ => return Err(invalid()),
                 })
             }
+            "protocol_format" if value == "split" => split = true,
             "resolution" if history => {
                 resolution = Some(match value.as_ref() {
                     "minute" => Resolution::Minute,
@@ -92,7 +95,11 @@ pub(super) fn query(uri: &Uri, history: bool) -> Result<Query, ApiError> {
         ("pool", Some(id)) => Scope::Pool(id),
         _ => return Err(invalid()),
     };
+    if !split && matches!(protocol, Some(Protocol::Https | Protocol::HttpLegacy)) {
+        return Err(invalid());
+    }
     Ok(Query {
+        split,
         scope,
         protocol,
         resolution: resolution.unwrap_or(Resolution::Hour),
@@ -166,6 +173,8 @@ fn scope_view(scope: &Scope) -> ScopeView<'_> {
 
 #[derive(Serialize)]
 struct Metadata<'a> {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    http_split: Option<bool>,
     definition: &'static str,
     origin_node_id: &'a str,
     meter_epoch: &'a str,
@@ -179,8 +188,9 @@ struct Metadata<'a> {
     observed_at_unix_ms: Option<u64>,
 }
 
-fn metadata(status: &durable::Status) -> Metadata<'_> {
+fn metadata(status: &durable::Status, split: bool) -> Metadata<'_> {
     Metadata {
+        http_split: split.then_some(status.http_split),
         definition: DEFINITION,
         origin_node_id: &status.node_id,
         meter_epoch: &status.meter_epoch,
@@ -207,34 +217,57 @@ struct TotalView {
 }
 
 fn index(protocol: Protocol) -> usize {
-    match protocol {
-        Protocol::Http => 0,
-        Protocol::Socks5 => 1,
-        Protocol::Masque => 2,
-    }
+    protocol_index(protocol)
 }
 
 fn sum(total: &mut Snapshot, value: Snapshot) {
-    total.saturated |= value.saturated;
-    total.upload = total.upload.checked_add(value.upload).unwrap_or_else(|| {
-        total.saturated = true;
-        u64::MAX
-    });
-    total.download = total
-        .download
-        .checked_add(value.download)
-        .unwrap_or_else(|| {
-            total.saturated = true;
-            u64::MAX
-        });
+    *total = total.sum(value);
 }
 
-fn live(scope: &Scope, series: Vec<SeriesSnapshot>, pools: Vec<PoolSnapshot>) -> [Snapshot; 3] {
+/// Preserve old API shapes without treating a family total as plain HTTP in the
+/// new format. Older remote sources omit unknown split rows instead of zeros.
+fn project(
+    items: Vec<durable::ProtocolTotal>,
+    split: bool,
+    supported: bool,
+) -> Vec<durable::ProtocolTotal> {
+    if split {
+        return items
+            .into_iter()
+            .filter(|row| supported || !matches!(row.protocol, Protocol::Http | Protocol::Https))
+            .collect();
+    }
+    let mut values = [None; PROTOCOL_COUNT];
+    for row in items {
+        let protocol = if matches!(
+            row.protocol,
+            Protocol::HttpLegacy | Protocol::Http | Protocol::Https
+        ) {
+            Protocol::Http
+        } else {
+            row.protocol
+        };
+        let value = &mut values[index(protocol)];
+        *value = Some(value.map_or(row.value, |old: Snapshot| old.sum(row.value)));
+    }
+    [Protocol::Http, Protocol::Socks5, Protocol::Masque]
+        .into_iter()
+        .filter_map(|protocol| {
+            values[index(protocol)].map(|value| durable::ProtocolTotal { protocol, value })
+        })
+        .collect()
+}
+
+fn live(
+    scope: &Scope,
+    series: Vec<SeriesSnapshot>,
+    pools: Vec<PoolSnapshot>,
+) -> [Snapshot; PROTOCOL_COUNT] {
     let mut totals = [Snapshot {
         upload: 0,
         download: 0,
         saturated: false,
-    }; 3];
+    }; PROTOCOL_COUNT];
     if let Scope::Pool(id) = scope {
         for row in pools.into_iter().filter(|row| row.pool_id.as_ref() == id) {
             sum(&mut totals[index(row.protocol)], row.value);
@@ -274,9 +307,11 @@ async fn totals(State(state): State<Arc<AppState>>, uri: Uri) -> Result<Response
         return Err(storage(io::ErrorKind::InvalidData.into()));
     }
     let active = observation.active_run.is_some();
-    let live = live(&query.scope, series, pools);
-    let items: Vec<_> = durable
-        .items
+    let mut live = live(&query.scope, series, pools);
+    if !query.split {
+        live[3] = live[0].sum(live[3]).sum(live[4]);
+    }
+    let items: Vec<_> = project(durable.items, query.split, durable.status.http_split)
         .into_iter()
         .filter(|row| {
             query
@@ -297,7 +332,7 @@ async fn totals(State(state): State<Arc<AppState>>, uri: Uri) -> Result<Response
         })
         .collect();
     Ok(Json(TotalsView {
-        metadata: metadata(&durable.status),
+        metadata: metadata(&durable.status, query.split),
         scope: scope_view(&query.scope),
         active_run_id: observation.active_run,
         checkpoint_error: observation.checkpoint_error,
@@ -327,8 +362,7 @@ struct TotalsView<'a> {
 /// marker is not proof of a live process, and no live/checkpoint health is
 /// inferred from it. Current remote contact/cache health is a separate source.
 pub(super) fn durable_totals_response(query: &Query, totals: durable::Totals) -> Response {
-    let items = totals
-        .items
+    let items = project(totals.items, query.split, totals.status.http_split)
         .into_iter()
         .filter(|row| {
             query
@@ -346,7 +380,7 @@ pub(super) fn durable_totals_response(query: &Query, totals: durable::Totals) ->
         })
         .collect();
     Json(TotalsView {
-        metadata: metadata(&totals.status),
+        metadata: metadata(&totals.status, query.split),
         scope: scope_view(&query.scope),
         active_run_id: None,
         checkpoint_error: false,
@@ -397,8 +431,7 @@ pub(super) fn bucket_response(query: &Query, page: durable::BucketPage) -> Respo
         .into_iter()
         .map(|bucket| Bucket {
             window_id: bucket.window_id.to_string(),
-            items: bucket
-                .items
+            items: project(bucket.items, query.split, page.status.http_split)
                 .into_iter()
                 .filter(|row| {
                     query
@@ -426,7 +459,7 @@ pub(super) fn bucket_response(query: &Query, page: durable::BucketPage) -> Respo
         items: Vec<Bucket>,
     }
     Json(View {
-        metadata: metadata(&page.status), scope: scope_view(&query.scope),
+        metadata: metadata(&page.status, query.split), scope: scope_view(&query.scope),
         resolution: match query.resolution { Resolution::Minute => "minute", Resolution::Hour => "hour", Resolution::Day => "day" },
         retention_gap: matches!((query.after, page.floor), (Some(after), Some(floor)) if after < floor),
         next_cursor: page.next_cursor.map(|cursor| cursor.to_string()),
@@ -488,7 +521,7 @@ mod tests {
                 assert_eq!(
                     index(parsed.protocol.unwrap()),
                     match protocol {
-                        "http" => 0,
+                        "http" => 3,
                         "socks5" => 1,
                         _ => 2,
                     }
@@ -646,21 +679,48 @@ mod tests {
     fn live_scopes_use_primary_series_and_never_add_pool_aliases_to_node() {
         let (series, pools) = samples();
         let node = live(&Scope::Node, series, pools);
-        assert_eq!(node, [value(16, 20), value(3, 4), value(0, 0)]);
+        assert_eq!(
+            node,
+            [
+                value(0, 0),
+                value(3, 4),
+                value(0, 0),
+                value(16, 20),
+                value(0, 0)
+            ]
+        );
         let (series, pools) = samples();
         assert_eq!(
             live(&Scope::User(id(1)), series, pools),
-            [value(16, 20), value(0, 0), value(0, 0)]
+            [
+                value(0, 0),
+                value(0, 0),
+                value(0, 0),
+                value(16, 20),
+                value(0, 0)
+            ]
         );
         let (series, pools) = samples();
         assert_eq!(
             live(&Scope::Credential(id(3)), series, pools),
-            [value(11, 13), value(0, 0), value(0, 0)]
+            [
+                value(0, 0),
+                value(0, 0),
+                value(0, 0),
+                value(11, 13),
+                value(0, 0)
+            ]
         );
         let (series, pools) = samples();
         assert_eq!(
             live(&Scope::Pool(id(6)), series, pools),
-            [value(16, 20), value(0, 0), value(0, 0)]
+            [
+                value(0, 0),
+                value(0, 0),
+                value(0, 0),
+                value(16, 20),
+                value(0, 0)
+            ]
         );
     }
 
@@ -706,8 +766,84 @@ mod tests {
         assert!(totals.saturated);
     }
 
+    #[tokio::test]
+    async fn split_reads_distinguish_both_transports_and_leave_v1_family_totals_compatible() {
+        let rows = || {
+            vec![
+                durable::ProtocolTotal {
+                    protocol: Protocol::HttpLegacy,
+                    value: value(37, 19),
+                },
+                durable::ProtocolTotal {
+                    protocol: Protocol::Socks5,
+                    value: value(2, 3),
+                },
+                durable::ProtocolTotal {
+                    protocol: Protocol::Masque,
+                    value: value(0, 0),
+                },
+                durable::ProtocolTotal {
+                    protocol: Protocol::Http,
+                    value: value(11, 5),
+                },
+                durable::ProtocolTotal {
+                    protocol: Protocol::Https,
+                    value: value(17, 7),
+                },
+            ]
+        };
+        let (_, old) = json(durable_totals_response(
+            &parse("protocol=http", false).unwrap(),
+            durable::Totals {
+                status: status(),
+                items: rows(),
+            },
+        ))
+        .await;
+        assert_eq!(old["items"][0]["durable_upload_bytes"], "65");
+        assert_eq!(old["items"][0]["protocol"], "http");
+        assert!(old.get("http_split").is_none());
+        for (protocol, bytes) in [("http", "11"), ("https", "17"), ("http_legacy", "37")] {
+            let query =
+                parse(&format!("protocol_format=split&protocol={protocol}"), false).unwrap();
+            let (_, data) = json(durable_totals_response(
+                &query,
+                durable::Totals {
+                    status: status(),
+                    items: rows(),
+                },
+            ))
+            .await;
+            assert_eq!(data["http_split"], true);
+            assert_eq!(data["items"].as_array().unwrap().len(), 1);
+            assert_eq!(data["items"][0]["protocol"], protocol);
+            assert_eq!(data["items"][0]["durable_upload_bytes"], bytes);
+        }
+        for invalid in [
+            "protocol=https",
+            "protocol=http_legacy",
+            "protocol_format=v2",
+            "protocol_format=split&protocol_format=split",
+        ] {
+            assert_invalid(invalid, false);
+        }
+        let mut legacy = status();
+        legacy.http_split = false;
+        let (_, data) = json(durable_totals_response(
+            &parse("protocol_format=split&protocol=https", false).unwrap(),
+            durable::Totals {
+                status: legacy,
+                items: rows().into_iter().take(3).collect(),
+            },
+        ))
+        .await;
+        assert_eq!(data["http_split"], false);
+        assert!(data["items"].as_array().unwrap().is_empty());
+    }
+
     fn status() -> durable::Status {
         durable::Status {
+            http_split: true,
             node_id: id(1),
             meter_epoch: id(2),
             run_id: Some(id(3)),
@@ -731,7 +867,7 @@ mod tests {
     async fn failed_local_totals_expose_only_the_stage_and_remote_totals_omit_it() {
         let status = status();
         let local = TotalsView {
-            metadata: metadata(&status),
+            metadata: metadata(&status, false),
             scope: scope_view(&Scope::Node),
             active_run_id: status.run_id.clone(),
             checkpoint_error: true,

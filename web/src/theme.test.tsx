@@ -100,6 +100,9 @@ it("switches in place, retains a draft and restores the preference after a fresh
   expect(config.theme?.components?.Button?.primaryColor).toBe(
     consolePalettes.dark.onAccent,
   );
+  expect(config.theme?.components?.Collapse?.headerBg).toBe(
+    consolePalettes.dark.surface,
+  );
   view.unmount();
   render(
     <ConsoleThemeProvider>
@@ -158,6 +161,9 @@ it("changes theme even when preference writes are denied and syncs only local th
   expect(config.theme?.algorithm).toBe(theme.defaultAlgorithm);
   expect(config.theme?.components?.Button?.primaryColor).toBe(
     consolePalettes.light.onAccent,
+  );
+  expect(config.theme?.components?.Collapse?.headerBg).toBe(
+    consolePalettes.light.surface,
   );
   expect(
     document.documentElement.style.getPropertyValue("--console-selection"),
@@ -227,8 +233,38 @@ it.each(["light", "dark"] as const)(
     expect(
       contrast(palette.onSelection, palette.selection),
     ).toBeGreaterThanOrEqual(4.5);
+    for (const background of [
+      palette.sidebar,
+      palette.sidebarHover,
+      palette.sidebarSelected,
+    ]) {
+      expect(contrast(palette.sidebarText, background)).toBeGreaterThanOrEqual(
+        4.5,
+      );
+    }
+    expect(
+      contrast(palette.sidebarAccent, palette.sidebarSelected),
+    ).toBeGreaterThanOrEqual(4.5);
+    expect(consoleTheme(mode).components?.Collapse).toMatchObject({
+      headerBg: palette.surface,
+      contentBg: palette.surface,
+      colorBorder: palette.separator,
+      colorTextHeading: palette.text,
+    });
+    const dropdown = consoleTheme(mode).components?.Dropdown;
+    expect(dropdown?.colorPrimary).toBe(palette.accent);
+    for (const background of [
+      dropdown?.controlItemBgActive,
+      dropdown?.controlItemBgActiveHover,
+    ]) {
+      expect(
+        contrast(String(dropdown?.colorPrimary), String(background)),
+        `${mode} selected dropdown: ${background}`,
+      ).toBeGreaterThanOrEqual(4.5);
+    }
     const tag = consoleTagTokens[mode];
     for (const [foreground, background] of [
+      [tokens.blue7, tokens.blue1],
       [tag.green7, tokens.green1],
       [tag.gold7, tokens.gold1],
       [tag.orange7, tokens.orange1],

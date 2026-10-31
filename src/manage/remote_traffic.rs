@@ -195,9 +195,8 @@ async fn pull(
     let peer = target.peer_id.clone();
     let revision = target.revision;
     let result = async {
-        let Reply::TrafficSnapshot(value) = controller
-            .remote(peer.clone(), Request::TrafficSnapshot)
-            .await?
+        let Reply::TrafficSnapshot(value) =
+            request(&controller, peer.clone(), Request::TrafficSnapshotV2).await?
         else {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -244,9 +243,10 @@ pub(super) fn classify(error: &io::Error) -> Failure {
         .and_then(|source| source.downcast_ref::<control::RemoteError>())
     {
         return match error.code {
-            "traffic_unsupported" | "node_protocol_unsupported" | "management_upgrade_required" => {
-                Failure::Unsupported
-            }
+            "traffic_unsupported"
+            | "traffic_protocols_unsupported"
+            | "node_protocol_unsupported"
+            | "management_upgrade_required" => Failure::Unsupported,
             "peer_not_authorized" | "peer_authorization_changed" => Failure::NotAuthorized,
             _ => Failure::Unavailable,
         };
@@ -256,5 +256,23 @@ pub(super) fn classify(error: &io::Error) -> Failure {
         io::ErrorKind::PermissionDenied => Failure::NotAuthorized,
         io::ErrorKind::InvalidData => Failure::Continuity,
         _ => Failure::Unavailable,
+    }
+}
+
+/// Negotiate only versioned traffic reads. A definitive unsupported response
+/// permits one legacy projection; authorization, transport, decode and unknown
+/// failures retain their original meaning and never trigger this fallback.
+pub(super) async fn request(
+    controller: &Arc<controller::Service>,
+    peer: String,
+    operation: Request,
+) -> io::Result<Reply> {
+    let fallback = operation.legacy_traffic();
+    let result = controller.remote(peer.clone(), operation).await;
+    match (result, fallback) {
+        (Err(error), Some(legacy)) if classify(&error) == Failure::Unsupported => {
+            controller.remote(peer, legacy).await
+        }
+        (result, _) => result,
     }
 }

@@ -21,7 +21,7 @@ use crate::access::{
     routing::{ResourceState, RoutePermission},
 };
 
-const CURRENT_SOURCE_VERSIONS: &str = "13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28";
+const CURRENT_SOURCE_VERSIONS: &str = "13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29";
 const MAX_SOURCE_IDS: usize = 32_768;
 // The history reader accepts at most 16,384 typed rows, each with at most nine
 // identity references. Keep the old catalog bound intact and add only this
@@ -436,6 +436,18 @@ pub(super) fn migrate_twenty_seven(connection: &Connection) -> io::Result<()> {
     create_table(connection, "recovery_state_v28", CURRENT_SOURCE_VERSIONS)?;
     connection.execute_batch("INSERT INTO recovery_state_v28 SELECT * FROM recovery_state; DROP TABLE recovery_state; ALTER TABLE recovery_state_v28 RENAME TO recovery_state;")
         .map_err(|e| sqlite_error("cannot upgrade schema twenty seven recovery fence", e))?;
+    if record_in(connection)? != before {
+        return Err(corrupt());
+    }
+    Ok(())
+}
+
+/// Preserve recovery identity and quarantine while accepting schema29 sources.
+pub(super) fn migrate_twenty_eight(connection: &Connection) -> io::Result<()> {
+    let before = record_in(connection)?;
+    create_table(connection, "recovery_state_v29", CURRENT_SOURCE_VERSIONS)?;
+    connection.execute_batch("INSERT INTO recovery_state_v29 SELECT * FROM recovery_state; DROP TABLE recovery_state; ALTER TABLE recovery_state_v29 RENAME TO recovery_state;")
+        .map_err(|error| sqlite_error("cannot upgrade schema twenty eight recovery fence", error))?;
     if record_in(connection)? != before {
         return Err(corrupt());
     }
@@ -1744,6 +1756,29 @@ pub(in crate::manage) fn restore_schema_twenty_seven_for_test(
         .map_err(|e| sqlite_error("cannot reconstruct schema twenty seven fixture", e))?;
     tx.commit()
         .map_err(|e| sqlite_error("cannot commit schema twenty seven fixture", e))
+}
+
+/// Schema28 fixtures keep the original three traffic slots and 32-KiB cache.
+#[cfg(test)]
+pub(in crate::manage) fn restore_schema_twenty_eight_for_test(
+    connection: &Connection,
+) -> io::Result<()> {
+    let tx = connection
+        .unchecked_transaction()
+        .map_err(|error| sqlite_error("cannot begin schema twenty eight fixture", error))?;
+    if record_in(&tx)?.is_some_and(|record| record.source_schema_version > 28) {
+        return Err(corrupt());
+    }
+    super::traffic::legacy_protocols_for_test(&tx)?;
+    create_table(
+        &tx,
+        "recovery_state_fixture28",
+        "13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28",
+    )?;
+    tx.execute_batch("INSERT INTO recovery_state_fixture28 SELECT * FROM recovery_state; DROP TABLE recovery_state; ALTER TABLE recovery_state_fixture28 RENAME TO recovery_state; PRAGMA user_version=28;")
+        .map_err(|error| sqlite_error("cannot reconstruct schema twenty eight fixture", error))?;
+    tx.commit()
+        .map_err(|error| sqlite_error("cannot commit schema twenty eight fixture", error))
 }
 
 #[cfg(test)]

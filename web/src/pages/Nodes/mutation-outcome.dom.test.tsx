@@ -266,6 +266,11 @@ async function ready() {
 async function openDetails() {
   await ready();
   const card = remoteCard();
+  const operations = within(card).getByRole("button", {
+    name: "control.operations",
+  });
+  if (operations.getAttribute("aria-expanded") !== "true")
+    await act(async () => fireEvent.click(operations));
   const header = within(card)
     .getByText("control.nodeDetails")
     .closest('[role="button"]');
@@ -439,6 +444,12 @@ describe("node mutations with an unavailable first result", () => {
     await act(async () => fireEvent.click(submit));
     await unknown(submit);
     expect(saved.active).toBe(false);
+    const operations = within(card).getByRole("button", {
+      name: "control.operations",
+    });
+    await act(async () => fireEvent.click(operations));
+    expect(operations.getAttribute("aria-expanded")).toBe("true");
+    expect(mutations()).toHaveLength(1);
     if (submit.isConnected) await act(async () => fireEvent.click(submit));
     expect(mutations()).toHaveLength(1);
   });
@@ -776,6 +787,10 @@ describe("node mutations with an unavailable first result", () => {
     };
     mount();
     await ready();
+    const operations = within(
+      screen.getByText("Local fixture").closest(".node-card")!,
+    ).getByRole("button", { name: "control.operations" });
+    await act(async () => fireEvent.click(operations));
     const heading = screen
       .getByText("control.localOwner")
       .closest('[role="button"]');

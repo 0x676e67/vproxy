@@ -16,6 +16,9 @@ export default {
   "traffic.invalidId": "请输入规范的对象 ID；显示名称不是 ID。",
   "traffic.protocol": "协议",
   "traffic.allProtocols": "全部协议",
+  "traffic.httpLegacy": "HTTP/HTTPS 历史合计",
+  "traffic.httpUnsplit":
+    "来源尚未拆分 HTTP 与 HTTPS 计量，仅提供历史合计，不能分别推算。",
   "traffic.resolution": "历史时间窗",
   "traffic.minute": "分钟",
   "traffic.hour": "小时",

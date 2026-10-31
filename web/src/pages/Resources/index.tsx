@@ -6,6 +6,7 @@ import {
 import {
   Alert,
   Button,
+  Collapse,
   Descriptions,
   Drawer,
   Modal,
@@ -62,7 +63,7 @@ import { useMessages, type MessageKey } from "../../hooks/useMessages";
 import Members, { type RoutingWork } from "./Members";
 import ResourceForm, { type ResourceFields } from "./ResourceForm";
 import Health from "./Health";
-import ScopePicker from "../Users/ScopePicker";
+import ScopePicker from "../../components/ScopePicker";
 import CommandPanel from "../Users/CommandPanel";
 import PresetEditor from "../../components/Presets/Editor";
 import {
@@ -905,10 +906,6 @@ function Catalog({
           },
         ]
       : []),
-    {
-      title: t("resources.health"),
-      render: () => <Tag>{t("resources.healthUnknown")}</Tag>,
-    },
     { title: t("resources.revision"), dataIndex: "revision" },
     {
       title: t("users.actions"),
@@ -1485,6 +1482,10 @@ function Resources({
   const [selected, setSelected] = useState<Target | null>(null);
   const [lookupReading, setLookupReading] = useState(false);
   const [lookupVersion, setLookupVersion] = useState(0);
+  const [lookupOpen, setLookupOpen] = useState(address !== null);
+  useEffect(() => {
+    if (address !== null) setLookupOpen(true);
+  }, [address]);
   return (
     <PageContainer
       className="management-page"
@@ -1498,25 +1499,37 @@ function Resources({
           disabled={busy}
           selected={selected}
         />
-        <AddressFinder
-          address={address}
-          blocked={busy || lookupReading}
-          onFind={(id) => {
-            setKind("addresses");
-            if (id === address) setLookupVersion((version) => version + 1);
-            findAddress(id);
-          }}
+        <Collapse
+          size="small"
+          activeKey={lookupOpen ? ["lookup"] : []}
+          onChange={(keys) => setLookupOpen(keys.length > 0)}
+          items={[
+            {
+              key: "lookup",
+              label: t("resources.lookupTitle"),
+              children: (
+                <AddressFinder
+                  address={address}
+                  blocked={busy || lookupReading}
+                  onFind={(id) => {
+                    setKind("addresses");
+                    if (id === address)
+                      setLookupVersion((version) => version + 1);
+                    findAddress(id);
+                  }}
+                />
+              ),
+            },
+          ]}
         />
-        <Alert
-          type="info"
-          showIcon
-          title={t(
-            peer === null ? "resources.localOnly" : "resources.remoteScope",
-          )}
-          description={t(
-            peer === null ? "resources.localHint" : "resources.remoteScopeHint",
-          )}
-        />
+        {peer !== null && (
+          <Alert
+            type="info"
+            showIcon
+            title={t("resources.remoteScope")}
+            description={t("resources.remoteScopeHint")}
+          />
+        )}
         <Alert type="warning" showIcon title={t("resources.inventoryHint")} />
         {address !== null ? (
           <AddressLookup

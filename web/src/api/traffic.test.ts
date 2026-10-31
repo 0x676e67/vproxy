@@ -69,6 +69,14 @@ const history = () => ({
     ],
   })),
 });
+const splitTotals = (active = false) => ({
+  ...totals(active),
+  http_split: true,
+  items: ["http_legacy", "socks5", "masque", "http", "https"].map(
+    (protocol) => ({ ...totals(active).items[0], protocol }),
+  ),
+});
+const splitHistory = () => ({ ...history(), http_split: true });
 const signal = () => new AbortController().signal;
 const remote = (data: unknown, state = "ready", cached = true) => ({
   source: {
@@ -84,6 +92,98 @@ const remote = (data: unknown, state = "ready", cached = true) => ({
 });
 
 describe("accepted-payload traffic contract", () => {
+  it("requests split counters explicitly and keeps legacy totals separate from HTTP and HTTPS", () => {
+    expect(trafficQuery(node, { protocol: "https" }, false, true)).toBe(
+      "?scope=node&protocol_format=split&protocol=https",
+    );
+    expect(() => trafficQuery(node, { protocol: "https" })).toThrow(ApiError);
+    for (const suffix of [
+      "protocol_format=v2",
+      "protocol_format=split&protocol_format=split",
+      "protocol=http_legacy",
+      "protocol=https",
+    ])
+      expect(() => endpointStatus(`/proxy/traffic?${suffix}`, "GET")).toThrow(
+        ApiError,
+      );
+    const wire = splitTotals();
+    wire.items = wire.items.map((row, index) => ({
+      ...row,
+      durable_upload_bytes: String(index + 1),
+    }));
+    const parsed = trafficTotals(wire, node, undefined, true);
+    expect(
+      parsed.items.map((row) => [row.protocol, row.durable_upload_bytes]),
+    ).toEqual([
+      ["http", "4"],
+      ["https", "5"],
+      ["socks5", "2"],
+      ["masque", "3"],
+      ["http_legacy", "1"],
+    ]);
+    expect(() =>
+      trafficTotals({ ...wire, http_split: undefined }, node, undefined, true),
+    ).toThrow(ApiError);
+    expect(() =>
+      trafficTotals(
+        { ...wire, items: [wire.items[4], ...wire.items.slice(1)] },
+        node,
+        undefined,
+        true,
+      ),
+    ).toThrow(ApiError);
+    const legacy = {
+      ...totals(),
+      http_split: false,
+      items: totals().items.map((row, index) => ({
+        ...row,
+        protocol: index === 0 ? "http_legacy" : row.protocol,
+      })),
+    };
+    const old = trafficTotals(legacy, node, undefined, true);
+    expect(old.http_split).toBe(false);
+    expect(old.items.map((row) => row.protocol)).toEqual([
+      "socks5",
+      "masque",
+      "http_legacy",
+    ]);
+    expect(
+      trafficTotals({ ...legacy, items: [] }, node, "https", true).items,
+    ).toEqual([]);
+    expect(() =>
+      trafficTotals({ ...legacy, items: wire.items }, node, undefined, true),
+    ).toThrow(ApiError);
+  });
+
+  it("validates both history protocols without inventing unsupported legacy samples", () => {
+    const wire = splitHistory();
+    wire.items[0].items.push({
+      ...wire.items[0].items[0],
+      protocol: "https",
+      upload_bytes: "17",
+    });
+    const parsed = trafficHistory(wire, node, { resolution: "minute" }, true);
+    expect(parsed.items[0].items.map((row) => row.protocol)).toEqual([
+      "http",
+      "https",
+    ]);
+    expect(() =>
+      trafficHistory(
+        wire,
+        node,
+        { resolution: "minute", protocol: "http" },
+        true,
+      ),
+    ).toThrow(ApiError);
+    expect(() =>
+      trafficHistory(
+        { ...wire, http_split: false },
+        node,
+        { resolution: "minute" },
+        true,
+      ),
+    ).toThrow(ApiError);
+  });
   it("accepts optional bounded local stages without trusting remote process health", () => {
     expect(
       trafficTotals(totals(), node).checkpoint_failure_stage,
@@ -263,21 +363,23 @@ describe("accepted-payload traffic contract", () => {
 
   it("uses fixed same-origin GETs and bounded maximum-size history responses", async () => {
     const maximum = {
-      ...history(),
+      ...splitHistory(),
       next_cursor: "2940000",
       items: Array.from({ length: 50 }, (_, index) => ({
         window_id: String(index * 60_000),
-        items: ["http", "socks5", "masque"].map((protocol) => ({
-          protocol,
-          upload_bytes: "18446744073709551615",
-          download_bytes: "18446744073709551615",
-          saturated: true,
-        })),
+        items: ["http_legacy", "socks5", "masque", "http", "https"].map(
+          (protocol) => ({
+            protocol,
+            upload_bytes: "18446744073709551615",
+            download_bytes: "18446744073709551615",
+            saturated: true,
+          }),
+        ),
       })),
     };
     expect(
       new TextEncoder().encode(JSON.stringify(maximum)).length,
-    ).toBeLessThan(32 * 1024);
+    ).toBeLessThan(64 * 1024);
     const fetcher = vi
       .fn<typeof fetch>()
       .mockResolvedValue(jsonResponse(maximum));
@@ -290,7 +392,7 @@ describe("accepted-payload traffic contract", () => {
     expect(result.items).toHaveLength(50);
     expect(result.items[49].items[0].upload_bytes).toBe("18446744073709551615");
     expect(fetcher).toHaveBeenCalledWith(
-      "/api/v1/proxy/traffic/buckets?scope=node&resolution=minute&limit=50",
+      "/api/v1/proxy/traffic/buckets?scope=node&protocol_format=split&resolution=minute&limit=50",
       expect.objectContaining({
         method: "GET",
         credentials: "same-origin",
@@ -308,7 +410,7 @@ describe("accepted-payload traffic contract", () => {
     const fetcher = vi.fn<typeof fetch>().mockImplementation(async (input) => {
       calls.push(String(input));
       return jsonResponse(
-        String(input).includes("/buckets") ? history() : totals(),
+        String(input).includes("/buckets") ? splitHistory() : splitTotals(),
       );
     });
     const client = new ManagementClient(fetcher, () => true);
@@ -320,8 +422,8 @@ describe("accepted-payload traffic contract", () => {
       signal(),
     );
     expect(calls).toEqual([
-      "/api/v1/proxy/traffic?scope=node",
-      "/api/v1/proxy/traffic/buckets?scope=node&resolution=minute",
+      "/api/v1/proxy/traffic?scope=node&protocol_format=split",
+      "/api/v1/proxy/traffic/buckets?scope=node&protocol_format=split&resolution=minute",
     ]);
     fetcher.mockClear();
     fetcher.mockResolvedValue(jsonResponse(remote(null, "pending")));
@@ -334,8 +436,8 @@ describe("accepted-payload traffic contract", () => {
       age_millis: null,
     });
     expect(fetcher.mock.calls.map(([input]) => input)).toEqual([
-      `/api/v1/targets/${NODE}/traffic?scope=node`,
-      `/api/v1/targets/${NODE}/traffic/buckets?scope=node`,
+      `/api/v1/targets/${NODE}/traffic?scope=node&protocol_format=split`,
+      `/api/v1/targets/${NODE}/traffic/buckets?scope=node&protocol_format=split`,
     ]);
     fetcher
       .mockClear()
@@ -362,9 +464,9 @@ describe("accepted-payload traffic contract", () => {
   it("rejects mixed meter epochs rather than mixing restart/incarnation snapshots", async () => {
     const fetcher = vi
       .fn<typeof fetch>()
-      .mockResolvedValueOnce(jsonResponse(totals()))
+      .mockResolvedValueOnce(jsonResponse(splitTotals()))
       .mockResolvedValueOnce(
-        jsonResponse({ ...history(), meter_epoch: SUBJECT }),
+        jsonResponse({ ...splitHistory(), meter_epoch: SUBJECT }),
       );
     const result = await readTrafficView(
       new ManagementClient(fetcher, () => true),
@@ -392,7 +494,9 @@ describe("accepted-payload traffic contract", () => {
         .mockImplementation(async (input) =>
           jsonResponse(
             remote(
-              String(input).includes("/buckets") ? history() : totals(),
+              String(input).includes("/buckets")
+                ? splitHistory()
+                : splitTotals(),
               state,
             ),
           ),
@@ -459,7 +563,11 @@ describe("accepted-payload traffic contract", () => {
         ),
       ).toThrow(ApiError);
     const credential: TrafficScope = { kind: "credential", id: SUBJECT };
-    const wire = remote({ ...totals(), scope: credential }, "ready", false);
+    const wire = remote(
+      { ...splitTotals(), scope: credential },
+      "ready",
+      false,
+    );
     const fetcher = vi.fn<typeof fetch>().mockResolvedValue(jsonResponse(wire));
     const result = await readTrafficView(
       new ManagementClient(fetcher, () => true),
@@ -476,7 +584,7 @@ describe("accepted-payload traffic contract", () => {
   it("keeps a verified cumulative snapshot when a separate history read fails", async () => {
     const fetcher = vi
       .fn<typeof fetch>()
-      .mockResolvedValueOnce(jsonResponse(remote(totals())))
+      .mockResolvedValueOnce(jsonResponse(remote(splitTotals())))
       .mockResolvedValueOnce(
         jsonResponse({ error: { code: "remote_traffic_unavailable" } }, 503),
       );
@@ -501,7 +609,7 @@ describe("accepted-payload traffic contract", () => {
     const fetcher = vi
       .fn<typeof fetch>()
       .mockResolvedValueOnce(jsonResponse(sessionFixture()))
-      .mockResolvedValueOnce(jsonResponse(totals()))
+      .mockResolvedValueOnce(jsonResponse(splitTotals()))
       .mockResolvedValueOnce(
         jsonResponse({ error: { code: "authentication_required" } }, 403),
       );

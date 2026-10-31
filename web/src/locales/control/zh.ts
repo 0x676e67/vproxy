@@ -1,4 +1,5 @@
 export default {
+  "control.operations": "运维与配置",
   "acme.title": "管理 HTTPS",
   "acme.refresh": "刷新状态",
   "acme.scope":

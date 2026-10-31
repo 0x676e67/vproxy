@@ -4,6 +4,7 @@ import { createRequire } from "node:module";
 import {
   act,
   cleanup,
+  createEvent,
   fireEvent,
   render,
   screen,
@@ -701,9 +702,9 @@ describe("cross-node search handoff to the managed user page", () => {
     );
     const region = main();
     await within(region).findByText("Fresh located account");
-    const edit = control("users.edit", rowIn(region, OTHER_USER));
-    await waitFor(() =>
-      expect((edit as HTMLButtonElement).disabled).toBe(false),
+    const { item: edit } = await rowAction(
+      rowIn(region, OTHER_USER),
+      "users.edit",
     );
     fireEvent.click(edit);
     const form = await screen.findByRole("dialog", { name: "users.edit" });
@@ -1199,13 +1200,28 @@ async function userRow(id = USER) {
   expect(row).not.toBeNull();
   return row!;
 }
-async function openUserReview(action: string, id = USER) {
-  const row = await userRow(id);
-  const button = within(row).getByRole("button", { name: action });
+async function rowAction(row: HTMLElement, action: string) {
+  const direct = within(row).queryByRole("button", { name: action });
+  if (direct) {
+    await waitFor(() =>
+      expect((direct as HTMLButtonElement).disabled).toBe(false),
+    );
+    return { source: direct, item: direct };
+  }
+  const source = within(row).getByRole("button", { name: "users.moreActions" });
   await waitFor(() =>
-    expect((button as HTMLButtonElement).disabled).toBe(false),
+    expect((source as HTMLButtonElement).disabled).toBe(false),
   );
-  fireEvent.click(button);
+  fireEvent.click(source);
+  const item = await screen.findByRole("menuitem", { name: action });
+  await waitFor(() =>
+    expect(item.getAttribute("aria-disabled")).not.toBe("true"),
+  );
+  return { source, item };
+}
+async function openUserReview(action: string, id = USER) {
+  const { item } = await rowAction(await userRow(id), action);
+  fireEvent.click(item);
   return screen.findByRole("dialog");
 }
 async function openCredentials() {
@@ -1220,6 +1236,27 @@ async function openCredentials() {
   return screen.findByRole("dialog");
 }
 
+it("consumes Enter activation before focus moves from a menu item into the editor", async () => {
+  mount();
+  await listingReady();
+  const { source, item } = await rowAction(await userRow(), "users.edit");
+  const region = source.closest("section")!;
+  item.focus();
+  const enter = createEvent.keyDown(item, {
+    key: "Enter",
+    code: "Enter",
+    keyCode: 13,
+    which: 13,
+  });
+  fireEvent(item, enter);
+  expect(enter.defaultPrevented).toBe(true);
+  const dialog = await screen.findByRole("dialog", { name: "users.edit" });
+  expect(mutations()).toHaveLength(0);
+  fireEvent.click(within(dialog).getByRole("button", { name: "users.cancel" }));
+  await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  await returnedFocus(source, region);
+});
+
 it.each([
   ["users.credentials", "关闭"],
   ["users.edit", "users.cancel"],
@@ -1231,12 +1268,12 @@ it.each([
   async (action, cancel) => {
     mount();
     await listingReady();
-    const source =
+    const { source, item } =
       action === "users.create"
-        ? namedButton(action)
-        : within(await userRow()).getByRole("button", { name: action });
+        ? { source: namedButton(action), item: namedButton(action) }
+        : await rowAction(await userRow(), action);
     const region = source.closest("section")!;
-    fireEvent.click(source);
+    fireEvent.click(item);
     const dialog = await screen.findByRole("dialog");
     await waitFor(() =>
       expect(dialog.querySelector(".ant-btn-loading")).toBeNull(),
@@ -1537,7 +1574,7 @@ describe("safe next steps after user and credential mutations", () => {
         return previousRead(path);
       };
       if (changed === "policy") revision = "11";
-      const refresh = within(drawer).getByRole("button", {
+      const refresh = await within(drawer).findByRole("button", {
         name: changed === "credentials" ? "users.refresh" : "users.readLatest",
       });
       await act(async () => {
@@ -2273,11 +2310,12 @@ describe("recover one remote create result without replaying a mutation", () => 
       name: "users.includeDeleted",
     });
     const form = screen.getByRole("form", { name: "users.searchTitle" });
-    const rowReads = [
-      "users.credentials",
-      "resources.permission",
-      "presets.title",
-    ].map((name) => within(row).getByRole("button", { name }));
+    const rowReads = ["users.credentials", "users.moreActions"].map((name) =>
+      within(row).getByRole("button", { name }),
+    );
+    const { item: permission } = await rowAction(row, "resources.permission");
+    const preset = screen.getByRole("menuitem", { name: "presets.title" });
+    const rowMenuReads = [permission, preset];
     fireEvent.change(within(form).getByLabelText("users.searchQuery"), {
       target: { value: "Existing" },
     });
@@ -2306,6 +2344,7 @@ describe("recover one remote create result without replaying a mutation", () => 
       fireEvent.click(refresh);
       fireEvent.click(next);
       fireEvent.click(deleted);
+      rowMenuReads.forEach((item) => fireEvent.click(item));
       rowReads.forEach((button) => fireEvent.click(button));
       fireEvent.submit(form);
     });
@@ -2716,14 +2755,12 @@ describe("review the exact operation before dispatch", () => {
   it("identifies the local management origin and exact same-name user, and cancels without a write", async () => {
     users = [user(), { ...user(), id: OTHER_USER }];
     mount();
-    const source = within(await userRow(OTHER_USER)).getByRole("button", {
-      name: "users.delete",
-    });
-    await waitFor(() =>
-      expect((source as HTMLButtonElement).disabled).toBe(false),
+    const { source, item } = await rowAction(
+      await userRow(OTHER_USER),
+      "users.delete",
     );
     const before = requests.length;
-    fireEvent.click(source);
+    fireEvent.click(item);
     const dialog = await screen.findByRole("dialog");
     const node = reviewField(dialog, "users.reviewNode");
     expect(node.getByText("users.reviewLocalNode")).toBeTruthy();
@@ -2847,16 +2884,6 @@ describe("review the exact operation before dispatch", () => {
     "disables an old remote confirmation during reads and after the observed %s changes, without replacing its CAS",
     async (change) => {
       mount(true);
-      const row = await userRow();
-      await waitFor(() =>
-        expect(
-          (
-            within(row).getByRole("button", {
-              name: "users.disable",
-            }) as HTMLButtonElement
-          ).disabled,
-        ).toBe(false),
-      );
       const dialog = await openUserReview("users.disable");
       const refresh = namedButton("users.refresh");
       const confirm = within(dialog).getByRole("button", {
@@ -2947,20 +2974,10 @@ describe("review the exact operation before dispatch", () => {
     "discards an unsubmitted confirmation and ignores its late read after the %s changes",
     async (change) => {
       mount(true);
-      const row = await userRow();
-      await waitFor(() =>
-        expect(
-          (
-            within(row).getByRole("button", {
-              name: "users.delete",
-            }) as HTMLButtonElement
-          ).disabled,
-        ).toBe(false),
-      );
       await openUserReview("users.delete");
       const oldRegion = screen.getByRole("region", { name: "users.title" });
       const oldSource = within(oldRegion).getByRole("button", {
-        name: "users.delete",
+        name: "users.moreActions",
       });
       const refresh = namedButton("users.refresh");
       const result = deferred<Response>();

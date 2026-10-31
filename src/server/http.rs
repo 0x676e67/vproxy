@@ -43,7 +43,7 @@ use self::{
     tls::{RustlsAcceptor, RustlsConfig},
 };
 use super::{Acceptor, Connector, Context, Handle, Server, drain_connections, drain_permits};
-use crate::server::auth::Authenticated;
+use crate::server::auth::{Authenticated, Service};
 
 #[cfg(feature = "management")]
 use crate::traffic::{Data, Direction, Io, Meter};
@@ -129,8 +129,9 @@ impl HttpAcceptor {
         Ok(self.with_config(RustlsConfig::from_identity(identity)?))
     }
 
-    fn with_config(self, config: RustlsConfig) -> HttpAcceptor<RustlsAcceptor> {
+    fn with_config(mut self, config: RustlsConfig) -> HttpAcceptor<RustlsAcceptor> {
         let acceptor = RustlsAcceptor::new(config, self.timeout);
+        self.handler.service = Service::Https;
         HttpAcceptor {
             acceptor,
             timeout: self.timeout,
@@ -358,6 +359,7 @@ impl HttpServer<RustlsAcceptor> {
 #[derive(Clone)]
 struct Handler {
     authenticator: Arc<Authenticator>,
+    service: Service,
     connector: Connector,
     tasks: TaskTracker,
 }
@@ -368,6 +370,7 @@ impl From<Context> for Handler {
 
         Handler {
             authenticator: Arc::new(authenticator),
+            service: Service::Http,
             connector: ctx.connector,
             tasks: TaskTracker::new(),
         }
@@ -399,7 +402,11 @@ impl Handler {
             None
         };
         // Check if the client is authorized
-        let authenticated = match self.authenticator.authenticate(req.headers()).await {
+        let authenticated = match self
+            .authenticator
+            .authenticate(req.headers(), self.service)
+            .await
+        {
             Ok(authenticated) => authenticated,
             // If the client is not authorized, return an error response
             Err(err) => {
@@ -1784,7 +1791,7 @@ mod traffic_tests {
     use super::*;
     use crate::{
         access::{
-            Protocol, Reader,
+            Reader,
             tests::{LOGIN, policy, secret},
         },
         server::auth::Source,
@@ -1795,7 +1802,7 @@ mod traffic_tests {
         let series = reader.traffic_registry().snapshot().unwrap();
         series
             .iter()
-            .find(|series| series.protocol == Protocol::Http)
+            .find(|series| series.protocol == crate::access::traffic::Protocol::Http)
             .unwrap()
             .value
     }
@@ -1882,7 +1889,7 @@ mod traffic_tests {
     async fn nonempty_connect_upgrade_preread_is_forwarded_once_before_splice() {
         tokio::time::timeout(Duration::from_secs(10), async {
         let reader = Reader::new(policy(1, 8)).unwrap();
-        let admission = reader.authenticate(LOGIN, &secret(), Protocol::Http).unwrap();
+        let admission = reader.authenticate(LOGIN, &secret(), crate::access::Protocol::Http).unwrap();
         let authenticated = Authenticated { extension: admission.extension, source: admission.source, lease: Some(admission.lease), presets: Some(admission.presets) };
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let mut client = TcpStream::connect(listener.local_addr().unwrap()).await.unwrap();
@@ -2127,7 +2134,7 @@ mod write_tests {
         let series = reader.traffic_registry().snapshot().unwrap();
         let actual = series
             .iter()
-            .find(|series| series.protocol == Protocol::Http)
+            .find(|series| series.protocol == crate::access::traffic::Protocol::Http)
             .unwrap()
             .value;
         assert_eq!(

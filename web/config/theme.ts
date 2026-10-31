@@ -1,24 +1,30 @@
 export type ConsoleMode = "light" | "dark";
 
-// rustdoc Light/Ayu surface roles, with a rust-colored action in the light theme.
+// mdBook Rust's warm ground and brown rail; Ayu remains the dark alternative.
 // Status colors remain Ant Design semantics, not additional brand accents.
 export const consolePalettes = {
   light: {
-    canvas: "#f5f5f5",
-    surface: "#ffffff",
-    elevated: "#ffffff",
-    text: "#353535",
-    secondary: "#646464",
+    canvas: "#e1e1db",
+    surface: "#eeeee8",
+    elevated: "#f6f6f0",
+    text: "#262625",
+    secondary: "#626259",
     accent: "#9b4500",
     onAccent: "#ffffff",
-    link: "#3873ad",
-    linkHover: "#254e78",
-    linkActive: "#254e78",
-    border: "#858585",
-    separator: "#e0e0e0",
-    selected: "#fff0df",
-    selection: "#ffdfb5",
-    onSelection: "#353535",
+    // The guide's #2b79a2 is below 4.5:1 on its warm ground at UI text sizes.
+    link: "#246787",
+    linkHover: "#1b4d66",
+    linkActive: "#1b4d66",
+    border: "#7c7c71",
+    separator: "#c8c8bf",
+    selected: "#e7d8c7",
+    selection: "#e6c19c",
+    onSelection: "#262625",
+    sidebar: "#3b2e2a",
+    sidebarText: "#c8c9db",
+    sidebarAccent: "#e69f67",
+    sidebarSelected: "#4b3a31",
+    sidebarHover: "#493c36",
   },
   dark: {
     canvas: "#0f1419",
@@ -36,6 +42,11 @@ export const consolePalettes = {
     selected: "#191f26",
     selection: "#ffb454",
     onSelection: "#0f1419",
+    sidebar: "#14191f",
+    sidebarText: "#c5c5c5",
+    sidebarAccent: "#ffb454",
+    sidebarSelected: "#191f26",
+    sidebarHover: "#191f26",
   },
 } satisfies Record<ConsoleMode, Record<string, string>>;
 

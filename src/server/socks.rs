@@ -1316,7 +1316,7 @@ mod tests {
         let snapshots = reader.traffic_registry().snapshot().unwrap();
         let matching = snapshots
             .iter()
-            .filter(|series| series.protocol == crate::access::Protocol::Socks5)
+            .filter(|series| series.protocol == crate::access::traffic::Protocol::Socks5)
             .collect::<Vec<_>>();
         assert_eq!(matching.len(), 1);
         matching[0].value

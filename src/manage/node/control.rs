@@ -277,6 +277,16 @@ pub(in crate::manage) enum Request {
     OperationsAlerts(crate::manage::alerts::Query),
     OperationsSnapshot,
     TrafficSnapshot,
+    TrafficSnapshotV2,
+    TrafficTotalsV2 {
+        scope: store::traffic::Scope,
+    },
+    TrafficBucketsV2 {
+        scope: store::traffic::Scope,
+        resolution: store::traffic::Resolution,
+        after: Option<u64>,
+        limit: u32,
+    },
     TrafficTotals {
         scope: store::traffic::Scope,
     },
