@@ -88,29 +88,3 @@ fn namespace(origin: &str, options: &PlanOptions) -> io::Result<String> {
 fn invalid(message: &'static str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, message)
 }
-
-/// Synthetic bodies for file-only tests, not usable credentials or consent to
-/// contact a CA. Return exact bytes so preservation is asserted, not just count.
-#[cfg(test)]
-pub(in crate::manage) fn seed_test_cache(
-    directory: &Path,
-    author: Arc<store::Guard>,
-    origin: &str,
-    options: &PlanOptions,
-) -> io::Result<Vec<(String, Vec<u8>)>> {
-    let cache = Cache::open(directory, author, &namespace(origin, options)?)?;
-    cache.create("account.der", b"opaque test account material")?;
-    cache.create(
-        "order.json",
-        br#"{"phase":"intent","test":"not a replay instruction"}"#,
-    )?;
-    cache.create_snapshot_temporary_for_test(
-        "order.json",
-        br#"{"phase":"ordered","test":"unresolved bytes"}"#,
-    )?;
-    Ok(cache
-        .snapshot_entries()?
-        .into_iter()
-        .map(|(name, bytes)| (name, bytes.to_vec()))
-        .collect())
-}

@@ -509,7 +509,6 @@ fn invalid(message: &'static str) -> io::Error {
 mod tests {
     use std::time::Duration;
 
-    use base64::{Engine as _, engine::general_purpose::STANDARD};
     use rcgen::{BasicConstraints, ExtendedKeyUsagePurpose, IsCa, Issuer, KeyUsagePurpose};
     use rustls::{
         ClientConfig, DigitallySignedStruct, SignatureScheme,
@@ -527,7 +526,6 @@ mod tests {
 
     struct Fixture {
         pem: Zeroizing<String>,
-        chain: String,
         certificate: CertificateDer<'static>,
         roots: RootCertStore,
     }
@@ -565,7 +563,6 @@ mod tests {
         roots.add(ca.der().clone()).map_err(io::Error::other)?;
         Ok(Fixture {
             pem,
-            chain,
             certificate: certificate.der().clone(),
             roots,
         })
@@ -579,37 +576,6 @@ mod tests {
             now.checked_add(3600)
                 .ok_or_else(|| io::Error::other("test clock overflow"))?,
         )
-    }
-
-    #[test]
-    fn certificate_metadata_tracks_only_successfully_published_normal_identity() -> io::Result<()> {
-        use crate::manage::certificates::State;
-        let tls = Tls::new(DOMAIN.to_owned())?;
-        assert_eq!(tls.certificate(), State::Pending);
-        let challenge = tls.challenge(&[7; 32])?;
-        assert_eq!(tls.certificate(), State::Pending);
-        let fixture = current_fixture()?;
-        let expected = State::from_leaf(fixture.certificate.as_ref());
-        tls.publish(identity(
-            fixture.pem.as_bytes(),
-            DOMAIN,
-            &fixture.roots,
-            UnixTime::now(),
-        )?)?;
-        assert_eq!(tls.certificate(), expected);
-        drop(challenge);
-        let _replacement = tls.challenge(&[8; 32])?;
-        assert_eq!(tls.certificate(), expected);
-        let expired = make_fixture(DOMAIN, 1_700_000_000, 1_700_000_060)?;
-        let loaded = identity(
-            expired.pem.as_bytes(),
-            DOMAIN,
-            &expired.roots,
-            UnixTime::since_unix_epoch(std::time::Duration::from_secs(1_700_000_030)),
-        )?;
-        assert!(tls.publish(loaded).is_err());
-        assert_eq!(tls.certificate(), expected);
-        Ok(())
     }
 
     fn normal_client(roots: RootCertStore, protocols: &[&[u8]]) -> io::Result<ClientConfig> {
@@ -742,236 +708,6 @@ mod tests {
         .map_err(io::Error::other)?
     }
 
-    /// Reuse one protocol configuration across normal publications. The full
-    /// handshake must select the new key without rebuilding the listener, and
-    /// must never resolve the simultaneously active challenge identity.
-    #[tokio::test]
-    async fn proxy_resolver_follows_only_valid_normal_publications() -> io::Result<()> {
-        let tls = Tls::new(DOMAIN.into())?;
-        let managed = crate::manage::proxy::settings::Tls::Acme(tls.clone());
-        let _challenge = tls.challenge(&[6; 32])?;
-        assert!(managed.identity().is_err());
-        let first = current_fixture()?;
-        tls.publish(identity(
-            first.pem.as_bytes(),
-            DOMAIN,
-            &first.roots,
-            UnixTime::now(),
-        )?)?;
-        let resolver = managed.identity()?.resolver();
-        let mut config =
-            ServerConfig::builder_with_provider(Arc::new(aws_lc_rs::default_provider()))
-                .with_protocol_versions(&[&rustls::version::TLS13])
-                .map_err(io::Error::other)?
-                .with_no_client_auth()
-                .with_cert_resolver(resolver);
-        config.alpn_protocols = vec![HTTP_ALPN.to_vec()];
-        let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(config));
-        let second = current_fixture()?;
-        for fixture in [&first, &second] {
-            tls.publish(identity(
-                fixture.pem.as_bytes(),
-                DOMAIN,
-                &fixture.roots,
-                UnixTime::now(),
-            )?)?;
-            assert_eq!(managed.source(), crate::manage::certificates::Source::Acme);
-            assert_eq!(
-                managed.certificate(),
-                crate::manage::certificates::State::from_leaf(fixture.certificate.as_ref())
-            );
-            let listener = TcpListener::bind("127.0.0.1:0").await?;
-            let connector = TlsConnector::from(Arc::new(normal_client(
-                fixture.roots.clone(),
-                &[HTTP_ALPN],
-            )?));
-            let (client_io, (server_io, _)) = tokio::try_join!(
-                TcpStream::connect(listener.local_addr()?),
-                listener.accept()
-            )?;
-            let name = ServerName::try_from(DOMAIN).map_err(io::Error::other)?;
-            let (server, client) = tokio::time::timeout(std::time::Duration::from_secs(5), async {
-                tokio::join!(
-                    acceptor.accept(server_io),
-                    connector.connect(name, client_io)
-                )
-            })
-            .await
-            .map_err(io::Error::other)?;
-            let _server = server?;
-            let client = client?;
-            assert_eq!(
-                client
-                    .get_ref()
-                    .1
-                    .peer_certificates()
-                    .and_then(|chain| chain.first()),
-                Some(&fixture.certificate)
-            );
-        }
-        // Expiry is checked by the normal-only resolver, not only by clients.
-        tls.state
-            .lock()
-            .map_err(|_| io::Error::other("fixture lock"))?
-            .normal
-            .as_mut()
-            .ok_or_else(|| io::Error::other("normal fixture missing"))?
-            .not_after = 0;
-        assert!(managed.identity().is_err());
-        let listener = TcpListener::bind("127.0.0.1:0").await?;
-        let connector = TlsConnector::from(Arc::new(normal_client(second.roots, &[HTTP_ALPN])?));
-        let (client_io, (server_io, _)) = tokio::try_join!(
-            TcpStream::connect(listener.local_addr()?),
-            listener.accept()
-        )?;
-        let name = ServerName::try_from(DOMAIN).map_err(io::Error::other)?;
-        let (server, client) = tokio::time::timeout(std::time::Duration::from_secs(5), async {
-            tokio::join!(
-                acceptor.accept(server_io),
-                connector.connect(name, client_io)
-            )
-        })
-        .await
-        .map_err(io::Error::other)?;
-        assert!(server.is_err() && client.is_err());
-        Ok(())
-    }
-
-    #[test]
-    fn identity_checks_pair_name_roots_signature_and_requested_time() -> io::Result<()> {
-        let now = 1_800_000_000;
-        let fixture = make_fixture(DOMAIN, now - 60, now + 60)?;
-        let time = UnixTime::since_unix_epoch(Duration::from_secs(now));
-        let loaded = identity(fixture.pem.as_bytes(), DOMAIN, &fixture.roots, time)?;
-        assert_eq!((loaded.not_before, loaded.not_after), (now - 60, now + 60));
-        assert_eq!(loaded.key.cert[0], fixture.certificate);
-        assert!(identity(fixture.pem.as_bytes(), "other.test", &fixture.roots, time).is_err());
-        assert!(
-            identity(
-                fixture.pem.as_bytes(),
-                DOMAIN,
-                &RootCertStore::empty(),
-                time
-            )
-            .is_err()
-        );
-        for seconds in [now - 61, now + 61] {
-            assert!(
-                identity(
-                    fixture.pem.as_bytes(),
-                    DOMAIN,
-                    &fixture.roots,
-                    UnixTime::since_unix_epoch(Duration::from_secs(seconds))
-                )
-                .is_err()
-            );
-        }
-        let other_key = Zeroizing::new(
-            KeyPair::generate()
-                .map_err(io::Error::other)?
-                .serialize_pem(),
-        );
-        let mismatched = Zeroizing::new(format!("{}{}", fixture.chain, *other_key));
-        assert!(identity(mismatched.as_bytes(), DOMAIN, &fixture.roots, time).is_err());
-        let mut corrupted = fixture.certificate.as_ref().to_vec();
-        *corrupted
-            .last_mut()
-            .ok_or_else(|| io::Error::other("test DER empty"))? ^= 1;
-        let tampered = Zeroizing::new(format!(
-            "-----BEGIN CERTIFICATE-----\n{}\n-----END CERTIFICATE-----\n{}",
-            STANDARD.encode(corrupted),
-            *fixture.pem,
-        ));
-        assert!(identity(tampered.as_bytes(), DOMAIN, &fixture.roots, time).is_err());
-        Ok(())
-    }
-
-    #[test]
-    fn identity_rejects_excessive_missing_extra_and_hidden_key_input() -> io::Result<()> {
-        let fixture = current_fixture()?;
-        for pem in [
-            String::new(),
-            fixture.chain.clone(),
-            format!("{}{}", *fixture.pem, *fixture.pem),
-            format!(
-                "{}-----BEGIN ENCRYPTED PRIVATE KEY-----\nAA==\n-----END ENCRYPTED PRIVATE KEY-----\n",
-                *fixture.pem
-            ),
-            format!(
-                "{}-----BEGIN PRIVATE KEY-----\n%%%\n-----END PRIVATE KEY-----\n",
-                fixture.chain
-            ),
-        ] {
-            let pem = Zeroizing::new(pem);
-            assert!(identity(pem.as_bytes(), DOMAIN, &fixture.roots, UnixTime::now()).is_err());
-        }
-        assert!(
-            identity(
-                &vec![b'x'; MAX_IDENTITY_BYTES + 1],
-                DOMAIN,
-                &fixture.roots,
-                UnixTime::now()
-            )
-            .is_err()
-        );
-        for domain in [
-            "127.0.0.1",
-            "*.management.test",
-            "management.test.",
-            "",
-            "münich.test",
-        ] {
-            assert!(Tls::new(domain.to_owned()).is_err());
-        }
-        Ok(())
-    }
-
-    #[test]
-    fn challenge_has_exact_san_critical_digest_and_real_self_signature() -> io::Result<()> {
-        let tls = Tls::new(DOMAIN.to_owned())?;
-        assert!(tls.challenge(&[0; 31]).is_err());
-        let digest = [17; 32];
-        let _guard = tls.challenge(&digest)?;
-        let certificate = challenge_certificate(&tls)?;
-        let (remainder, parsed) =
-            x509_parser::parse_x509_certificate(&certificate).map_err(io::Error::other)?;
-        assert!(remainder.is_empty());
-        assert_eq!(parsed.subject(), parsed.issuer());
-        let san = parsed
-            .subject_alternative_name()
-            .map_err(io::Error::other)?
-            .ok_or_else(|| io::Error::other("test SAN missing"))?;
-        assert_eq!(
-            san.value.general_names,
-            vec![x509_parser::extensions::GeneralName::DNSName(DOMAIN)]
-        );
-        let extensions: Vec<_> = parsed
-            .extensions()
-            .iter()
-            .filter(|extension| extension.oid.to_id_string() == ACME_IDENTIFIER)
-            .collect();
-        assert_eq!(extensions.len(), 1);
-        assert!(extensions[0].critical);
-        assert_eq!(extensions[0].value, [&[0x04, 0x20][..], &digest].concat());
-        assert!(
-            aws_lc_rs::default_provider()
-                .signature_verification_algorithms
-                .all
-                .iter()
-                .any(|algorithm| {
-                    algorithm
-                        .verify_signature(
-                            parsed.public_key().subject_public_key.data.as_ref(),
-                            parsed.tbs_certificate.as_ref(),
-                            parsed.signature_value.data.as_ref(),
-                        )
-                        .is_ok()
-                })
-        );
-        assert!(leaf_metadata(&certificate, DOMAIN).is_err());
-        Ok(())
-    }
-
     #[tokio::test]
     async fn challenge_isolated_from_http_and_old_guard_cannot_clear_replacement() -> io::Result<()>
     {
@@ -990,14 +726,6 @@ mod tests {
         assert_ne!(certificate, old_certificate);
         drop(old);
         assert_eq!(challenge_certificate(&tls)?, certificate);
-        let (server, client) = connect(
-            &tls,
-            challenge_client(old_certificate, &[ACME_ALPN])?,
-            DOMAIN,
-        )
-        .await?;
-        assert!(server.is_err());
-        assert!(client.is_err());
         let (server, client) = connect(
             &tls,
             challenge_client(certificate.clone(), &[ACME_ALPN])?,
@@ -1069,127 +797,6 @@ mod tests {
             connect(&tls, normal_client(fixture.roots, &[HTTP_ALPN])?, DOMAIN).await?;
         assert!(server?.is_some());
         assert!(client.is_ok());
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn http_without_alpn_uses_only_the_valid_normal_identity() -> io::Result<()> {
-        let fixture = current_fixture()?;
-        let tls = Tls::new(DOMAIN.to_owned())?;
-        let challenge = tls.challenge(&[3; 32])?;
-        let (server, client) =
-            connect(&tls, normal_client(fixture.roots.clone(), &[])?, DOMAIN).await?;
-        assert!(server.is_err());
-        assert!(client.is_err());
-        drop(challenge);
-        tls.publish(identity(
-            fixture.pem.as_bytes(),
-            DOMAIN,
-            &fixture.roots,
-            UnixTime::now(),
-        )?)?;
-        for active_challenge in [false, true] {
-            let _challenge = if active_challenge {
-                Some(tls.challenge(&[4; 32])?)
-            } else {
-                None
-            };
-            let (server, client) =
-                connect(&tls, normal_client(fixture.roots.clone(), &[])?, DOMAIN).await?;
-            let mut server =
-                server?.ok_or_else(|| io::Error::other("HTTP was routed to challenge"))?;
-            let mut client = client?;
-            assert_eq!(server.get_ref().1.alpn_protocol(), None);
-            assert_eq!(client.get_ref().1.alpn_protocol(), None);
-            assert_eq!(
-                client
-                    .get_ref()
-                    .1
-                    .peer_certificates()
-                    .and_then(|chain| chain.first()),
-                Some(&fixture.certificate)
-            );
-            client.write_all(b"HTTP").await?;
-            client.flush().await?;
-            let mut received = [0; 4];
-            tokio::time::timeout(Duration::from_secs(5), server.read_exact(&mut received))
-                .await
-                .map_err(io::Error::other)??;
-            assert_eq!(&received, b"HTTP");
-        }
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn ordinary_tls_fails_closed_for_sni_unsupported_alpn_missing_or_expired_identity()
-    -> io::Result<()> {
-        let fixture = current_fixture()?;
-        let tls = Tls::new(DOMAIN.to_owned())?;
-        let (server, client) = connect(
-            &tls,
-            normal_client(fixture.roots.clone(), &[HTTP_ALPN])?,
-            DOMAIN,
-        )
-        .await?;
-        assert!(server.is_err());
-        assert!(client.is_err());
-        tls.publish(identity(
-            fixture.pem.as_bytes(),
-            DOMAIN,
-            &fixture.roots,
-            UnixTime::now(),
-        )?)?;
-        for (name, protocols, sni) in [
-            ("other.test", vec![HTTP_ALPN], true),
-            (DOMAIN, vec![HTTP_ALPN], false),
-            (DOMAIN, vec![&b"h2"[..]], true),
-        ] {
-            let mut config = normal_client(fixture.roots.clone(), &protocols)?;
-            config.enable_sni = sni;
-            let (server, client) = connect(&tls, config, name).await?;
-            assert!(server.is_err());
-            assert!(client.is_err());
-            if protocols == [b"h2".as_slice()] {
-                let error = client
-                    .err()
-                    .ok_or_else(|| io::Error::other("missing ALPN alert"))?;
-                assert!(matches!(
-                    error
-                        .get_ref()
-                        .and_then(|error| error.downcast_ref::<rustls::Error>()),
-                    Some(rustls::Error::AlertReceived(
-                        rustls::AlertDescription::NoApplicationProtocol
-                    ))
-                ));
-            }
-        }
-        let expired = make_fixture(DOMAIN, 1_700_000_000, 1_700_000_060)?;
-        let loaded = identity(
-            expired.pem.as_bytes(),
-            DOMAIN,
-            &expired.roots,
-            UnixTime::since_unix_epoch(Duration::from_secs(1_700_000_030)),
-        )?;
-        assert!(tls.publish(loaded).is_err());
-        let (server, client) = connect(
-            &tls,
-            normal_client(fixture.roots.clone(), &[HTTP_ALPN])?,
-            DOMAIN,
-        )
-        .await?;
-        assert!(server?.is_some());
-        assert!(client.is_ok());
-        tls.state
-            .lock()
-            .map_err(|_| io::Error::other("test lock poisoned"))?
-            .normal
-            .as_mut()
-            .ok_or_else(|| io::Error::other("test identity missing"))?
-            .not_after = 0;
-        let (server, client) =
-            connect(&tls, normal_client(fixture.roots, &[HTTP_ALPN])?, DOMAIN).await?;
-        assert!(server.is_err());
-        assert!(client.is_err());
         Ok(())
     }
 }

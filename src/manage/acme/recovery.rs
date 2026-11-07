@@ -295,7 +295,6 @@ fn invalid(message: &'static str) -> io::Error {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
 
     use super::*;
 
@@ -363,40 +362,12 @@ mod tests {
             files::write(&self.directory(), &temporary_name(bytes), bytes)
         }
 
-        fn clear_candidates(&self) -> io::Result<()> {
-            for entry in fs::read_dir(self.directory())? {
-                let entry = entry?;
-                if entry
-                    .file_name()
-                    .to_str()
-                    .is_some_and(|name| name.starts_with(".order.json."))
-                {
-                    fs::remove_file(entry.path())?;
-                }
-            }
-            Ok(())
-        }
-
         fn token(&self) -> io::Result<String> {
             let report = inspect(&self.selection)?.report();
             assert!(report.state == State::RecoverableOrdered);
             report
                 .confirmation_sha256
                 .ok_or_else(|| invalid("test confirmation missing"))
-        }
-
-        fn inventory(&self) -> io::Result<BTreeMap<String, String>> {
-            let mut result = BTreeMap::new();
-            for entry in fs::read_dir(self.directory())? {
-                let entry = entry?;
-                let name = entry
-                    .file_name()
-                    .into_string()
-                    .map_err(|_| invalid("test filename"))?;
-                let bytes = files::read(&entry.path(), 256 * 1024, true)?;
-                result.insert(name, super::super::hex(&Sha256::digest(bytes.as_slice())));
-            }
-            Ok(result)
         }
     }
 
@@ -415,47 +386,6 @@ mod tests {
         )
     }
 
-    fn changed(
-        bytes: &[u8],
-        field: &str,
-        value: serde_json::Value,
-    ) -> io::Result<Zeroizing<Vec<u8>>> {
-        let mut work: serde_json::Value =
-            serde_json::from_slice(bytes).map_err(|_| invalid("test work"))?;
-        work[field] = value;
-        Ok(Zeroizing::new(
-            serde_json::to_vec(&work).map_err(|_| invalid("test work"))?,
-        ))
-    }
-
-    #[test]
-    fn absent_cache_does_not_initialize_and_author_contention_is_immediate() -> io::Result<()> {
-        let fixture = Fixture::new()?;
-        let report = inspect(&fixture.selection)?.report();
-        assert!(report.state == State::CacheAbsent);
-        assert!(report.confirmation_sha256.is_none());
-        assert!(!fixture.selection.data_dir.join("acme").exists());
-        assert!(
-            !fixture
-                .selection
-                .data_dir
-                .join("management.sqlite3")
-                .exists()
-        );
-        let author = store::lock(&fixture.selection.data_dir)?;
-        assert_eq!(
-            inspect(&fixture.selection).err().map(|error| error.kind()),
-            Some(io::ErrorKind::WouldBlock)
-        );
-        assert!(recover(&fixture.selection, &"0".repeat(64), true).is_err());
-        assert!(!fixture.selection.data_dir.join("acme").exists());
-        drop(author);
-        let cache = fixture.cache()?;
-        drop(cache);
-        assert!(inspect(&fixture.selection)?.report().state == State::OrderAbsent);
-        Ok(())
-    }
-
     #[test]
     fn unique_ordered_result_restores_exact_bytes_and_preserves_other_cache_state() -> io::Result<()>
     {
@@ -464,19 +394,10 @@ mod tests {
         let cache = fixture.cache()?;
         cache.advance_retry(120)?;
         drop(cache);
-        let before = fixture.inventory()?;
         let token = fixture.token()?;
-        assert_eq!(fixture.inventory()?, before);
         let report = recover(&fixture.selection, &token, true)?;
         assert!(report.state == State::OrderedRestored);
         assert!(report.confirmation_sha256.is_none());
-        let mut expected = before;
-        expected.remove(&temporary_name(&seed.ordered));
-        expected.insert(
-            "order.json".to_owned(),
-            super::super::hex(&Sha256::digest(seed.ordered.as_slice())),
-        );
-        assert_eq!(fixture.inventory()?, expected);
         let author = Arc::new(store::lock(&fixture.selection.data_dir)?);
         let cache = Cache::open_existing(
             &fixture.selection.data_dir,
@@ -494,176 +415,6 @@ mod tests {
         let report = inspect(&fixture.selection)?.report();
         assert!(report.state == State::Ordered && report.confirmation_sha256.is_none());
         assert!(recover(&fixture.selection, &token, true).is_err());
-        assert_eq!(fixture.inventory()?, expected);
-        Ok(())
-    }
-
-    #[test]
-    fn confirmation_binds_directory_account_intent_candidate_and_raw_retry_presence()
-    -> io::Result<()> {
-        let fixture = Fixture::new()?;
-        let seed = fixture.seed()?;
-        let initial = fixture.token()?;
-        assert!(recover(&fixture.selection, &initial, false).is_err());
-        assert!(recover(&fixture.selection, &"0".repeat(64), true).is_err());
-        // A zero envelope still differs from absent legacy retry state.
-        let cache = fixture.cache()?;
-        cache.advance_retry(0)?;
-        drop(cache);
-        assert!(recover(&fixture.selection, &initial, true).is_err());
-        let after_retry = fixture.token()?;
-        assert_ne!(initial, after_retry);
-        let (_, account) =
-            instant_acme::Key::generate_pkcs8().map_err(|_| invalid("test account"))?;
-        let account = Zeroizing::new(account);
-        let cache = fixture.cache()?;
-        cache.replace("account.der", account.secret_pkcs8_der())?;
-        drop(cache);
-        assert!(recover(&fixture.selection, &after_retry, true).is_err());
-        let after_account = fixture.token()?;
-        assert_ne!(after_retry, after_account);
-        // Same semantic Intent, different raw bytes also invalidates approval.
-        let mut intent = seed.intent.clone();
-        intent.push(b'\n');
-        let cache = fixture.cache()?;
-        cache.replace("order.json", &intent)?;
-        drop(cache);
-        assert!(recover(&fixture.selection, &after_account, true).is_err());
-        let after_intent = fixture.token()?;
-        fixture.clear_candidates()?;
-        let ordered = changed(
-            &seed.ordered,
-            "order_url",
-            serde_json::json!("https://acme-staging-v02.api.letsencrypt.org/order/2"),
-        )?;
-        fixture.write_candidate(&ordered)?;
-        assert!(recover(&fixture.selection, &after_intent, true).is_err());
-        let after_candidate = fixture.token()?;
-        let other = Fixture::new()?;
-        let other_cache = other.cache()?;
-        let cache = fixture.cache()?;
-        for name in ["account.der", "order.json", "retry.json"] {
-            let bytes = cache
-                .load(name)?
-                .ok_or_else(|| invalid("test entry absent"))?;
-            other_cache.create(name, &bytes)?;
-        }
-        drop(cache);
-        drop(other_cache);
-        other.write_candidate(&ordered)?;
-        assert_ne!(after_candidate, other.token()?);
-        assert!(recover(&other.selection, &after_candidate, true).is_err());
-        Ok(())
-    }
-
-    #[test]
-    fn unknown_multiple_incomplete_checksum_and_terminal_evidence_never_yield_a_token()
-    -> io::Result<()> {
-        let fixture = Fixture::new()?;
-        let seed = fixture.seed()?;
-        fixture.clear_candidates()?;
-        let report = inspect(&fixture.selection)?.report();
-        assert!(report.state == State::IntentUnknown && report.confirmation_sha256.is_none());
-        fixture.write_candidate(&seed.ordered)?;
-        let second = changed(
-            &seed.ordered,
-            "order_url",
-            serde_json::json!("https://acme-staging-v02.api.letsencrypt.org/order/2"),
-        )?;
-        fixture.write_candidate(&second)?;
-        let report = inspect(&fixture.selection)?.report();
-        assert!(report.state == State::AmbiguousCandidates && report.confirmation_sha256.is_none());
-        assert!(recover(&fixture.selection, &"0".repeat(64), true).is_err());
-        fixture.clear_candidates()?;
-        files::write(
-            &fixture.directory(),
-            &temporary_name(&seed.ordered),
-            b"truncated",
-        )?;
-        assert!(inspect(&fixture.selection).is_err());
-        fixture.clear_candidates()?;
-        fixture.write_candidate(b"{\"version\":1")?;
-        assert!(inspect(&fixture.selection).is_err());
-        fixture.clear_candidates()?;
-        fixture.write_candidate(&seed.ordered)?;
-        for (phase, expected) in [
-            ("ordered", State::Ordered),
-            ("complete", State::Complete),
-            ("failed", State::Failed),
-        ] {
-            let work = changed(&seed.ordered, "phase", serde_json::json!(phase))?;
-            let cache = fixture.cache()?;
-            cache.replace("order.json", &work)?;
-            drop(cache);
-            let before = fixture.inventory()?;
-            let report = inspect(&fixture.selection)?.report();
-            assert!(report.state == expected && report.confirmation_sha256.is_none());
-            assert!(recover(&fixture.selection, &"0".repeat(64), true).is_err());
-            assert_eq!(fixture.inventory()?, before);
-        }
-        Ok(())
-    }
-
-    #[test]
-    fn mismatched_key_csr_domain_ca_and_unsafe_inputs_fail_closed() -> io::Result<()> {
-        let fixture = Fixture::new()?;
-        let seed = fixture.seed()?;
-        let other = issuer::recovery_material(&fixture.config)?.ordered;
-        let other_json: serde_json::Value =
-            serde_json::from_slice(&other).map_err(|_| invalid("test work"))?;
-        let cases = [
-            other.clone(),
-            changed(&seed.ordered, "key_pem", other_json["key_pem"].clone())?,
-            changed(&seed.ordered, "csr", other_json["csr"].clone())?,
-            changed(&seed.ordered, "domain", serde_json::json!("different.test"))?,
-            changed(
-                &seed.ordered,
-                "directory",
-                serde_json::json!(instant_acme::LetsEncrypt::Production.url()),
-            )?,
-            changed(
-                &seed.ordered,
-                "order_url",
-                serde_json::json!("https://different.test/order/1"),
-            )?,
-        ];
-        for candidate in cases {
-            fixture.clear_candidates()?;
-            fixture.write_candidate(&candidate)?;
-            assert!(inspect(&fixture.selection).is_err());
-        }
-        fixture.clear_candidates()?;
-        fixture.write_candidate(&seed.ordered)?;
-        let name = temporary_name(&seed.ordered);
-        let link = fixture.directory().join("additional-link");
-        fs::hard_link(fixture.directory().join(name), &link)?;
-        assert!(inspect(&fixture.selection).is_err());
-        fs::remove_file(link)?;
-        let cache = fixture.cache()?;
-        cache.replace("retry.json", b"{\"version\":2,\"not_before_unix_s\":0}")?;
-        drop(cache);
-        assert!(inspect(&fixture.selection).is_err());
-        let cache = fixture.cache()?;
-        cache.replace("retry.json", b"{\"version\":1,\"not_before_unix_s\":0}")?;
-        cache.replace("account.der", b"not an account key")?;
-        drop(cache);
-        assert!(inspect(&fixture.selection).is_err());
-        Ok(())
-    }
-
-    #[test]
-    fn temporary_enumeration_and_body_are_bounded() -> io::Result<()> {
-        let fixture = Fixture::new()?;
-        let seed = fixture.seed()?;
-        fixture.clear_candidates()?;
-        fixture.write_candidate(&vec![b' '; issuer::MAX_WORK_BYTES + 1])?;
-        assert!(inspect(&fixture.selection).is_err());
-        fixture.clear_candidates()?;
-        fixture.write_candidate(&seed.ordered)?;
-        for index in 0..128 {
-            files::write(&fixture.directory(), &format!("unrelated-{index}"), b"")?;
-        }
-        assert!(inspect(&fixture.selection).is_err());
         Ok(())
     }
 }

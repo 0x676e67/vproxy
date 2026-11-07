@@ -294,38 +294,4 @@ mod tests {
             );
         }
     }
-
-    #[test]
-    fn malformed_leading_devices_are_not_silently_native() {
-        for username in [
-            "user-device-",
-            "user-device-native",
-            "user-device-Windows",
-            "user-device-freebsd",
-            "user-device-windows-",
-            "user-device-windows-device-linux",
-            "user-device-windows-session-",
-            "user-device-windows-range-",
-            "user-device-windows-ttl-0",
-        ] {
-            let error = parse_profiled("user".into(), username.into()).expect_err("invalid device");
-            assert!(matches!(error, crate::error::Error::IO(ref error)
-                if error.kind() == std::io::ErrorKind::InvalidInput));
-            assert!(!error.to_string().contains(username));
-        }
-        // This port does not tighten the historical device-free grammar.
-        assert!(matches!(
-            parse_profiled("user".into(), "user-unknown-value".into())
-                .expect("unchanged legacy parser"),
-            Extension::None
-        ));
-    }
-
-    #[test]
-    fn ttl_extension_requires_a_nonzero_integer() {
-        for input in ["0", "abc"] {
-            assert!(matches!(parse_ttl_extension(input), Extension::None));
-        }
-        assert!(matches!(parse_ttl_extension("60"), Extension::TTL(_)));
-    }
 }

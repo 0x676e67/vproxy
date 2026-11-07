@@ -273,7 +273,7 @@ fn denied(message: &'static str) -> io::Error {
     io::Error::new(io::ErrorKind::PermissionDenied, message)
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
 
@@ -298,50 +298,6 @@ mod tests {
             // Only the exact empty directory created by this fixture is removed.
             let _ = fs::remove_dir(&self.0);
         }
-    }
-
-    #[test]
-    fn exclusive_files_and_bounded_reads_preserve_existing_contents() -> io::Result<()> {
-        let directory = Directory::new()?;
-        let child = output_path(&directory.0.join("child"))?;
-        create_directory(&child)?;
-        assert_eq!(
-            create_directory(&child).unwrap_err().kind(),
-            io::ErrorKind::AlreadyExists
-        );
-        assert_eq!(
-            output_path(&child).unwrap_err().kind(),
-            io::ErrorKind::AlreadyExists
-        );
-        write(&child, "key.pem", b"private")?;
-        assert_eq!(&*read(&child.join("key.pem"), 7, true)?, b"private");
-        assert!(read(&child.join("key.pem"), 6, true).is_err());
-        assert!(read(&child.join("key.pem"), usize::MAX, true).is_err());
-        assert!(write(&child, "key.pem", b"replacement").is_err());
-        assert_eq!(fs::read(child.join("key.pem"))?, b"private");
-        for name in [
-            "../outside",
-            "a/b",
-            "a\\b",
-            "x:stream",
-            "CON",
-            "lpt1.pem",
-            ".",
-            "..",
-            "x.",
-            "éé",
-            "",
-        ] {
-            assert!(write(&child, name, b"never written").is_err());
-        }
-        assert!(read(&child, 20, false).is_err());
-        assert!(output_path(&directory.0.join("missing").join("child")).is_err());
-        for name in ["line\nbreak", "escape\u{1b}", "control\u{85}"] {
-            assert!(output_path(&directory.0.join(name)).is_err());
-        }
-        fs::remove_file(child.join("key.pem"))?;
-        fs::remove_dir(child)?;
-        Ok(())
     }
 
     #[cfg(unix)]

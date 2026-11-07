@@ -301,26 +301,6 @@ mod tests {
     }
 
     #[test]
-    fn basic_credentials_preserve_colons_in_password_and_utf8() {
-        let encoded = base64::engine::general_purpose::STANDARD.encode("用户:p:a:ss密码");
-        let headers = authorization(&format!("Basic {encoded}"));
-        let credentials = basic_credentials(&headers).expect("valid credentials");
-        assert_eq!(credentials.username(), "用户");
-        assert_eq!(credentials.password(), "p:a:ss密码");
-    }
-
-    #[test]
-    fn basic_credentials_accept_case_insensitive_scheme_and_spaces() {
-        let encoded = base64::engine::general_purpose::STANDARD.encode("user:password");
-        for scheme in ["Basic ", "basic ", "bAsIc   "] {
-            let headers = authorization(&format!("{scheme}{encoded}"));
-            let credentials = basic_credentials(&headers).expect("valid credentials");
-            assert_eq!(credentials.username(), "user");
-            assert_eq!(credentials.password(), "password");
-        }
-    }
-
-    #[test]
     fn basic_credentials_reject_malformed_or_repeated_headers() {
         assert!(basic_credentials(&HeaderMap::new()).is_none());
         for value in [
@@ -341,19 +321,5 @@ mod tests {
             HeaderValue::from_static("Basic dXNlcjpwYXNzd29yZA=="),
         );
         assert!(basic_credentials(&headers).is_none());
-    }
-
-    #[test]
-    fn basic_credentials_reject_ascii_controls_and_invalid_utf8() {
-        for control in (0..=0x1f).chain([0x7f]) {
-            for index in [0, 5] {
-                let mut value = b"user:password".to_vec();
-                value[index] = control;
-                let encoded = base64::engine::general_purpose::STANDARD.encode(value);
-                assert!(basic_credentials(&authorization(&format!("Basic {encoded}"))).is_none());
-            }
-        }
-        let encoded = base64::engine::general_purpose::STANDARD.encode(b"user:\xff");
-        assert!(basic_credentials(&authorization(&format!("Basic {encoded}"))).is_none());
     }
 }

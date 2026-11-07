@@ -67,14 +67,6 @@ struct CertificateEvidence {
 }
 
 impl CertificateClock {
-    #[cfg(test)]
-    pub(super) fn exhausted() -> Self {
-        Self {
-            generation: u64::MAX,
-            ..Self::default()
-        }
-    }
-
     /// Advance only an actual fingerprint change or metadata transition. A
     /// certificate's time phases advance from not-yet-valid through valid and
     /// expiring to expired. State::apply rejects rollback to an earlier phase.
@@ -498,15 +490,6 @@ impl Runner {
                 Outcome::Success
             },
         });
-    }
-
-    #[cfg(test)]
-    pub(in crate::manage) async fn collect_once(&mut self) -> io::Result<()> {
-        if self.history_before_collect().await {
-            return Ok(());
-        }
-        let frame = self.collect().await;
-        self.accept_frame(frame).await
     }
 
     fn health_facts(&self, frame: &mut Frame) {

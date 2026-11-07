@@ -1,6 +1,6 @@
 //! Lightweight witness vocabulary. A record is an independently retained
 //! high-water mark, not a recoverable log, lease or proof of infrastructure
-//! fencing. Source transaction integration is deliberately not enabled yet.
+//! fencing. The experimental source transaction runtime has been retired.
 
 use super::store;
 use serde::{Deserialize, Serialize};

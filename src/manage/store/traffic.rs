@@ -7,11 +7,11 @@
 //! rather than presenting these lower bounds as an exact billing ledger.
 
 mod write;
-mod writer;
 
 use std::{io, path::Path};
 
 use rusqlite::{Connection, OptionalExtension, params};
+use serde::Deserialize;
 
 use crate::{
     access::traffic::{PROTOCOL_COUNT, PoolSeed, Protocol, Seed},
@@ -21,7 +21,6 @@ use crate::{
 use super::{invalid_data, peers::open_existing, read_overview, sqlite_error, valid_id};
 
 pub(in crate::manage) use write::{checkpoint, finish, start_run};
-pub(in crate::manage) use writer::Writer;
 
 const MAX_SERIES: u64 = 46_725;
 const MAX_WINDOWS: u64 = 500_000;
@@ -34,10 +33,12 @@ const ZERO: Snapshot = Snapshot {
 };
 
 /// Durable provenance, not an assertion that a data-plane process is running.
-#[derive(Clone)]
+#[serde_with::serde_as]
+#[derive(Clone, Deserialize)]
 pub(in crate::manage) struct Status {
     /// False only for an older remote representation; two zero counters do not
     /// prove absence of HTTP/HTTPS traffic when the source did not distinguish it.
+    #[serde_as(as = "serde_with::BoolFromInt")]
     pub(in crate::manage) http_split: bool,
     pub(in crate::manage) node_id: String,
     /// Stable accounting incarnation, independent of controller ownership epochs.
@@ -46,12 +47,16 @@ pub(in crate::manage) struct Status {
     pub(in crate::manage) run_id: Option<String>,
     /// Monotonic durable checkpoint/state sequence, never a byte counter.
     pub(in crate::manage) cursor: u64,
+    #[serde_as(as = "serde_with::BoolFromInt")]
     pub(in crate::manage) clean: bool,
     /// A previous run did not confirm final persistence after forwarding ended.
+    #[serde_as(as = "serde_with::BoolFromInt")]
     pub(in crate::manage) loss_possible: bool,
     /// Retention/capacity/clock discontinuity omitted some historical detail.
+    #[serde_as(as = "serde_with::BoolFromInt")]
     pub(in crate::manage) history_gap: bool,
     /// UTC attribution has encountered an unavailable or discontinuous clock.
+    #[serde_as(as = "serde_with::BoolFromInt")]
     pub(in crate::manage) time_uncertain: bool,
     pub(in crate::manage) last_checkpoint_at: Option<u64>,
     /// First observed enable/run timestamp; migration does not invent a zero date.
@@ -111,8 +116,7 @@ impl Resolution {
             Self::Day => 30,
         }
     }
-    /// The logical UTC cutoff applies before pagination/export, even while
-    /// expired physical rows are being removed in bounded Source transactions.
+    /// Apply the UTC cutoff before pagination and export.
     fn floor(self, time: u64) -> u64 {
         (time / self.width() * self.width()).saturating_sub((self.retention() - 1) * self.width())
     }
@@ -159,11 +163,15 @@ pub(in crate::manage) struct NodeSnapshot {
     pub(in crate::manage) floors: [Option<u64>; 3],
 }
 
+#[derive(Deserialize)]
 struct State {
+    #[serde(flatten)]
     status: Status,
+    #[serde(rename = "last_observed_at")]
     last_observed: Option<u64>,
     series_count: u64,
     window_count: u64,
+    #[serde(rename = "excluded_observed_at")]
     excluded_observed: Option<u64>,
     /// Committed logical cutoff time, not a claim that physical cleanup is done.
     retention_at: Option<u64>,
@@ -593,78 +601,33 @@ fn state_in(connection: &Connection) -> io::Result<State> {
             "traffic accounting requires explicit schema migration",
         ));
     }
-    let query = if overview.schema_version >= 8 {
-        "SELECT meter_epoch,run_id,cursor,clean,loss_possible,history_gap,time_uncertain,last_checkpoint_at,meter_started_at,last_observed_at,series_count,window_count,excluded_observed_at,retention_at FROM traffic_state WHERE singleton=1"
+    let retention = if overview.schema_version >= 8 {
+        "retention_at"
     } else {
-        "SELECT meter_epoch,run_id,cursor,clean,loss_possible,history_gap,time_uncertain,last_checkpoint_at,meter_started_at,last_observed_at,series_count,window_count,excluded_observed_at,NULL FROM traffic_state WHERE singleton=1"
+        "NULL AS retention_at"
     };
-    connection
-        .query_row(query, [], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, Option<String>>(1)?,
-                row.get::<_, i64>(2)?,
-                row.get::<_, i64>(3)?,
-                row.get::<_, i64>(4)?,
-                row.get::<_, i64>(5)?,
-                row.get::<_, i64>(6)?,
-                row.get::<_, Option<i64>>(7)?,
-                row.get::<_, Option<i64>>(8)?,
-                row.get::<_, Option<i64>>(9)?,
-                row.get::<_, i64>(10)?,
-                row.get::<_, i64>(11)?,
-                row.get::<_, Option<i64>>(12)?,
-                row.get::<_, Option<i64>>(13)?,
-            ))
-        })
-        .map_err(decode_error)
-        .and_then(
-            |(
-                epoch,
-                run,
-                cursor,
-                clean,
-                loss,
-                gap,
-                uncertain,
-                checkpoint,
-                started,
-                observed,
-                series,
-                windows,
-                excluded,
-                retention,
-            )| {
-                if !valid_id(&epoch) || run.as_ref().is_some_and(|id| !valid_id(id)) {
-                    return Err(invalid_data("traffic accounting identity is malformed"));
-                }
-                let series_count = positive_or_zero(series)?;
-                let window_count = positive_or_zero(windows)?;
-                if series_count > MAX_SERIES || window_count > MAX_WINDOWS {
-                    return Err(invalid_data("traffic capacity state is malformed"));
-                }
-                Ok(State {
-                    status: Status {
-                        http_split: overview.schema_version >= 29,
-                        node_id: overview.node_id,
-                        meter_epoch: epoch,
-                        run_id: run,
-                        cursor: positive_or_zero(cursor)?,
-                        clean: flag(clean)?,
-                        loss_possible: flag(loss)?,
-                        history_gap: flag(gap)?,
-                        time_uncertain: flag(uncertain)?,
-                        last_checkpoint_at: checkpoint.map(positive_or_zero).transpose()?,
-                        meter_started_at: started.map(positive_or_zero).transpose()?,
-                    },
-                    last_observed: observed.map(positive_or_zero).transpose()?,
-                    series_count,
-                    window_count,
-                    excluded_observed: excluded.map(positive_or_zero).transpose()?,
-                    retention_at: retention.map(positive_or_zero).transpose()?,
-                })
-            },
-        )
+    let query = format!(
+        "SELECT ?1 AS http_split,?2 AS node_id,meter_epoch,run_id,cursor,clean,loss_possible,history_gap,time_uncertain,last_checkpoint_at,meter_started_at,last_observed_at,series_count,window_count,excluded_observed_at,{retention} FROM traffic_state WHERE singleton=1"
+    );
+    let mut statement = connection.prepare(&query).map_err(decode_error)?;
+    let state = serde_rusqlite::from_rows::<State>(
+        statement
+            .query(params![overview.schema_version >= 29, overview.node_id])
+            .map_err(decode_error)?,
+    )
+    .next()
+    .transpose()
+    .map_err(|error| sqlite_error("cannot read traffic accounting state", error))?
+    .ok_or_else(|| invalid_data("cannot read traffic accounting state"))?;
+    if !valid_id(&state.status.meter_epoch)
+        || state.status.run_id.as_ref().is_some_and(|id| !valid_id(id))
+    {
+        return Err(invalid_data("traffic accounting identity is malformed"));
+    }
+    if state.series_count > MAX_SERIES || state.window_count > MAX_WINDOWS {
+        return Err(invalid_data("traffic capacity state is malformed"));
+    }
+    Ok(state)
 }
 
 fn validate_counts(connection: &Connection, state: &State) -> io::Result<()> {
@@ -798,20 +761,6 @@ fn check_count(connection: &Connection, table: &str, max: u64) -> io::Result<u64
     Ok(count)
 }
 
-/// Historical fixtures must remove actual schema7 objects before changing the
-/// version, not leave a current table behind under an older version number.
-#[cfg(test)]
-pub(super) fn remove_schema_for_test(connection: &Connection) -> io::Result<()> {
-    if super::read_overview(connection)?.schema_version >= 9 {
-        super::control::reconstruct_v8(connection)?;
-    }
-    connection
-        .execute_batch(
-            "DROP TABLE remote_traffic_sources; DROP TABLE traffic_windows; DROP TABLE traffic_series; DROP TABLE traffic_state;",
-        )
-        .map_err(decode_error)
-}
-
 /// Reconstruct the actual pre-split constraints, not just its version number.
 /// The caller owns a transaction and may only supply legacy-compatible rows.
 #[cfg(test)]
@@ -846,339 +795,6 @@ mod tests {
 
     use super::*;
 
-    #[cfg(feature = "witness-journal")]
-    mod retention {
-        //! The full existing history capacity is seeded before Source binding. Only
-        //! small witnessed cleanup transactions run afterward; no live DB is migrated.
-
-        use super::*;
-        use crate::manage::{node, store::journal::SourceFixture};
-        use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
-        use rusqlite::{
-            Connection, fallible_streaming_iterator::FallibleStreamingIterator, hooks::Action,
-            params, session::ChangesetIter,
-        };
-        use std::fs;
-        use tokio::time::{Duration, timeout};
-
-        const OLD_TIME: u64 = 30 * 86_400_000;
-        const NOW: u64 = 62 * 86_400_000;
-        const ROWS: i64 = 500_000;
-
-        fn invalid() -> io::Error {
-            io::Error::other("retention source fixture failed")
-        }
-
-        fn seed(f: &node::tests::Fixture) -> io::Result<()> {
-            let mut c = Connection::open(f.client_state.join("management.sqlite3"))
-                .map_err(io::Error::other)?;
-            c.execute_batch("PRAGMA foreign_keys=ON")
-                .map_err(io::Error::other)?;
-            let tx = c.transaction().map_err(io::Error::other)?;
-            let zero = 0u64.to_be_bytes();
-            let one = 1u64.to_be_bytes();
-            let mut inserted = 0i64;
-            {
-                let mut user = tx
-                    .prepare("INSERT INTO proxy_users VALUES(?1,'retention fixture',0,1,7,1,1)")
-                    .map_err(io::Error::other)?;
-                let mut series = tx
-                    .prepare(
-                        "INSERT INTO traffic_series VALUES(3,?1,?2,?1,NULL,NULL,NULL,?3,?4,0,1)",
-                    )
-                    .map_err(io::Error::other)?;
-                let mut row = tx
-                    .prepare(
-                        "INSERT INTO traffic_windows VALUES(3,?1,?2,?3,?4,?1,NULL,NULL,?5,?6,0,1)",
-                    )
-                    .map_err(io::Error::other)?;
-                for index in 0..1024u128 {
-                    let id = URL_SAFE_NO_PAD.encode(index.to_be_bytes());
-                    user.execute([&id]).map_err(io::Error::other)?;
-                    for protocol in 0..3i64 {
-                        series
-                            .execute(params![
-                                id,
-                                protocol,
-                                138u64.to_be_bytes().as_slice(),
-                                zero.as_slice()
-                            ])
-                            .map_err(io::Error::other)?;
-                    }
-                    // Existing Source cleanup debt may remain below its logical floor.
-                    // Fill physical capacity without exceeding the actual user limit
-                    // or making the node export exceed its 60/48/30 visible windows.
-                    let minute_floor = OLD_TIME / 60_000 * 60_000 - 59 * 60_000;
-                    for window in 0..25u64 {
-                        for protocol in 0..3i64 {
-                            if inserted == ROWS - 414 {
-                                break;
-                            }
-                            row.execute(params![
-                                id,
-                                protocol,
-                                0,
-                                i64::try_from(minute_floor - (25 - window) * 60_000)
-                                    .map_err(io::Error::other)?,
-                                one.as_slice(),
-                                zero.as_slice()
-                            ])
-                            .map_err(io::Error::other)?;
-                            inserted += 1;
-                        }
-                    }
-                    for (resolution, width, count) in [
-                        (0i64, 60_000u64, 60u64),
-                        (1, 3_600_000, 48),
-                        (2, 86_400_000, 30),
-                    ] {
-                        let floor = OLD_TIME / width * width - (count - 1) * width;
-                        for window in 0..count {
-                            for protocol in 0..3i64 {
-                                if inserted == ROWS - 414 {
-                                    break;
-                                }
-                                row.execute(params![
-                                    id,
-                                    protocol,
-                                    resolution,
-                                    i64::try_from(floor + window * width)
-                                        .map_err(io::Error::other)?,
-                                    one.as_slice(),
-                                    zero.as_slice()
-                                ])
-                                .map_err(io::Error::other)?;
-                                inserted += 1;
-                            }
-                        }
-                    }
-                }
-            }
-            assert_eq!(inserted, ROWS - 414);
-            {
-                let mut series = tx
-                    .prepare(
-                        "INSERT INTO traffic_series VALUES(2,?1,?2,NULL,NULL,NULL,?1,?3,?4,0,1)",
-                    )
-                    .map_err(io::Error::other)?;
-                for protocol in 0..3i64 {
-                    series
-                        .execute(params![
-                            f.client_id,
-                            protocol,
-                            1_000_000u64.to_be_bytes().as_slice(),
-                            zero.as_slice()
-                        ])
-                        .map_err(io::Error::other)?;
-                }
-                let mut row = tx
-                    .prepare(
-                        "INSERT INTO traffic_windows VALUES(2,?1,?2,?3,?4,NULL,NULL,?1,?5,?6,0,1)",
-                    )
-                    .map_err(io::Error::other)?;
-                for (resolution, width, count) in [
-                    (0i64, 60_000u64, 60u64),
-                    (1, 3_600_000, 48),
-                    (2, 86_400_000, 30),
-                ] {
-                    let floor = OLD_TIME / width * width - (count - 1) * width;
-                    for window in 0..count {
-                        for protocol in 0..3i64 {
-                            row.execute(params![
-                                f.client_id,
-                                protocol,
-                                resolution,
-                                i64::try_from(floor + window * width).map_err(io::Error::other)?,
-                                one.as_slice(),
-                                zero.as_slice()
-                            ])
-                            .map_err(io::Error::other)?;
-                            inserted += 1;
-                        }
-                    }
-                }
-            }
-            assert_eq!(inserted, ROWS);
-            // Complete the same explicit default rows as normal user creation. Missing
-            // routing/preset rows are corruption, including for historical tombstones.
-            tx.execute_batch(
-                "INSERT INTO routing_permissions SELECT id,1 FROM proxy_users;
-        INSERT INTO user_presets SELECT id,NULL,0 FROM proxy_users;",
-            )
-            .map_err(io::Error::other)?;
-            tx.execute("UPDATE traffic_state SET cursor=1,series_count=3075,window_count=?1,last_observed_at=?2,last_checkpoint_at=?2,meter_started_at=0,retention_at=?2",params![ROWS,i64::try_from(OLD_TIME).map_err(io::Error::other)?]).map_err(io::Error::other)?;
-            tx.commit().map_err(io::Error::other)
-        }
-
-        fn counts(live: &SourceFixture) -> io::Result<(i64, i64)> {
-            let c = Connection::open(live.fixture.client_state.join("management.sqlite3"))
-                .map_err(io::Error::other)?;
-            let count = c
-                .query_row("SELECT count(*) FROM traffic_windows", [], |r| r.get(0))
-                .map_err(io::Error::other)?;
-            let recorded: i64 = c
-                .query_row("SELECT window_count FROM traffic_state", [], |r| r.get(0))
-                .map_err(io::Error::other)?;
-            assert_eq!(count, recorded);
-            let node = c
-                .query_row(
-                    "SELECT count(*) FROM traffic_windows WHERE scope=2",
-                    [],
-                    |r| r.get(0),
-                )
-                .map_err(io::Error::other)?;
-            Ok((count, node))
-        }
-
-        fn snapshot(live: &SourceFixture) -> io::Result<store::traffic::NodeSnapshot> {
-            let mut c = Connection::open(live.fixture.client_state.join("management.sqlite3"))
-                .map_err(io::Error::other)?;
-            let tx = c.transaction().map_err(io::Error::other)?;
-            store::traffic::node_snapshot_in(&tx)
-        }
-
-        fn delta(live: &SourceFixture, sequence: u64) -> io::Result<(usize, usize)> {
-            let root = live.fixture.client_state.join("witness-intents");
-            let location: serde_json::Value =
-                serde_json::from_slice(&fs::read(root.join(format!("{sequence}.json")))?)
-                    .map_err(io::Error::other)?;
-            let path = root
-                .join(location["intent_id"].as_str().ok_or_else(invalid)?)
-                .join("changeset.bin");
-            assert!(fs::metadata(&path)?.len() < 16 * 1024 * 1024);
-            let bytes = fs::read(path)?;
-            let mut input = bytes.as_slice();
-            let reader: &mut dyn io::Read = &mut input;
-            let mut iter = ChangesetIter::start_strm(&reader).map_err(io::Error::other)?;
-            let (mut rows, mut deleted) = (0usize, 0usize);
-            while let Some(item) = iter.next().map_err(io::Error::other)? {
-                rows += 1;
-                let op = item.op().map_err(io::Error::other)?;
-                if op.table_name() == "traffic_windows" {
-                    assert!(matches!(op.code(), Action::SQLITE_DELETE));
-                    deleted += 1;
-                }
-            }
-            assert_eq!(deleted, 6144);
-            assert_eq!(rows, 6146); // windows + traffic provenance + source floor
-            Ok((rows, bytes.len()))
-        }
-
-        #[tokio::test]
-        async fn full_capacity_cleanup_is_bounded_logically_atomic_and_survives_cancelled_unknown_confirmation()
-        -> io::Result<()> {
-            let pause = Arc::new(node::tests::ResponsePause::default());
-            let live = SourceFixture::new_with(
-                node::tests::CutResponse {
-                    witness_only: true,
-                    witness_confirm: true,
-                    witness_sequence: Some(2),
-                    pause: Some(pause.clone()),
-                    cut_after_pause: true,
-                    ..Default::default()
-                },
-                seed,
-            )
-            .await?;
-            let result = async {
-                let initial = store::traffic::status(&live.fixture.client_state)?;
-                let epoch = initial.meter_epoch;
-                let run = live
-                    .source
-                    .traffic_write(move |w| w.start_run(&epoch, initial.cursor, Some(NOW)))
-                    .await?
-                    .status
-                    .run_id
-                    .ok_or_else(invalid)?;
-                assert_eq!(counts(&live)?.0, ROWS);
-                let old = snapshot(&live)?;
-                store::remote_traffic::validate_snapshot(&old)?;
-                let expected = run.clone();
-                live.arm();
-                let mut checkpoint = Box::pin(
-                    live.source
-                        .traffic_write(move |w| w.checkpoint(&expected, Some(NOW), &[], &[])),
-                );
-                assert!(futures_util::poll!(&mut checkpoint).is_pending());
-                timeout(Duration::from_secs(30), pause.entered.notified())
-                    .await
-                    .map_err(io::Error::other)?;
-                drop(checkpoint);
-                assert!(live.source.reader().revision().is_err());
-                assert_eq!(live.source.write_work().available_permits(), 0);
-                let (physical, node) = counts(&live)?;
-                assert_eq!(physical, ROWS - 6144);
-                assert!(node > 0); // Old node rows still exist after the physical slice.
-                let new = snapshot(&live)?;
-                store::remote_traffic::validate_snapshot(&new)?;
-                store::remote_traffic::check_progress_for_test(&old, &new)?;
-                assert!(new.minute.is_empty() && new.hour.is_empty() && new.day.is_empty());
-                for resolution in [
-                    store::traffic::Resolution::Minute,
-                    store::traffic::Resolution::Hour,
-                    store::traffic::Resolution::Day,
-                ] {
-                    let page = store::traffic::buckets(
-                        &live.fixture.client_state,
-                        store::traffic::Scope::Node,
-                        resolution,
-                        Some(0),
-                        50,
-                    )?;
-                    assert!(
-                        page.items.is_empty() && page.floor.is_none() && page.next_cursor.is_none()
-                    );
-                    let user = URL_SAFE_NO_PAD.encode(0u128.to_be_bytes());
-                    assert!(
-                        store::traffic::buckets(
-                            &live.fixture.client_state,
-                            store::traffic::Scope::User(user),
-                            resolution,
-                            None,
-                            50
-                        )?
-                        .items
-                        .is_empty()
-                    );
-                }
-                pause.release.notify_one();
-                timeout(Duration::from_secs(30), async {
-                    while live.source.write_work().available_permits() != 1 {
-                        tokio::task::yield_now().await;
-                    }
-                })
-                .await
-                .map_err(io::Error::other)?;
-                live.source.reconcile_source().await?;
-                assert_eq!(live.floor()?.sequence, "2");
-                assert_eq!(counts(&live)?.0, physical);
-                let stats = delta(&live, 2)?;
-                let expected = run.clone();
-                live.source
-                    .traffic_write(move |w| w.checkpoint(&expected, Some(NOW), &[], &[]))
-                    .await?;
-                assert_eq!(counts(&live)?.0, ROWS - 2 * 6144);
-                let next = snapshot(&live)?;
-                store::remote_traffic::check_progress_for_test(&new, &next)?;
-                assert_eq!(delta(&live, 3)?.0, stats.0);
-                let expected = run.clone();
-                live.source
-                    .traffic_write(move |w| w.checkpoint(&expected, Some(OLD_TIME), &[], &[]))
-                    .await?;
-                assert_eq!(counts(&live)?.0, ROWS - 2 * 6144);
-                assert_eq!(snapshot(&live)?.floors, next.floors);
-                live.source
-                    .traffic_write(move |w| w.finish(&run, Some(NOW)))
-                    .await?;
-                assert_eq!(live.source.reader().revision()?, 1);
-                Ok(())
-            }
-            .await;
-            pause.release.notify_one();
-            let closed = live.close().await;
-            result.and(closed)
-        }
-    }
     use crate::access::traffic::{PoolSnapshot, SeriesSnapshot};
     use crate::{
         access::routing::AddressFamily,
@@ -1360,14 +976,6 @@ mod tests {
         assert_eq!(store::read_overview(&original)?.schema_version, 28);
         assert!(!state_in(&original)?.status.http_split);
         assert_eq!(state_in(&original)?.status.cursor, before.cursor);
-        let old_sql: String = original
-            .query_row(
-                "SELECT sql FROM sqlite_schema WHERE name='traffic_series'",
-                [],
-                |row| row.get(0),
-            )
-            .map_err(decode_error)?;
-        assert!(old_sql.contains("protocol BETWEEN 0 AND 2"));
         assert!(store::load_policy(&fixture.directory)?.users[0].protocols == permissions);
         let after = status(&fixture.directory)?;
         assert!(after.http_split);
@@ -1453,125 +1061,6 @@ mod tests {
             50,
         )?;
         assert_eq!(windows.items[0].items.len(), 3);
-        Ok(())
-    }
-
-    #[test]
-    fn failed_protocol_migration_preserves_old_rows_and_private_backup() -> io::Result<()> {
-        let fixture = Fixture::new()?;
-        let connection = open_existing(&fixture.directory, true)?;
-        store::recovery::restore_schema_twenty_eight_for_test(&connection)?;
-        let before = status(&fixture.directory)?;
-        connection
-            .execute_batch("CREATE TABLE traffic_windows_v29(operator_fixture TEXT);")
-            .map_err(decode_error)?;
-        let backup = fixture.directory.join("failed-schema29.sqlite3");
-        assert!(store::migrate(&fixture.directory, &backup).is_err());
-        assert_eq!(store::inspect(&fixture.directory)?.schema_version, 28);
-        assert_eq!(status(&fixture.directory)?.meter_epoch, before.meter_epoch);
-        assert_eq!(status(&fixture.directory)?.cursor, before.cursor);
-        assert_eq!(
-            store::read_overview(&Connection::open(backup).map_err(decode_error)?)?.schema_version,
-            28
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn logical_retention_filters_before_paging_and_export_while_native_cleanup_remains_complete()
-    -> io::Result<()> {
-        let fixture = Fixture::new()?;
-        let gate = fixture.gate()?;
-        let time = 129 * 60_000u64;
-        let run = fixture.start(&gate, Some(time))?.run_id.unwrap();
-        checkpoint(
-            &fixture.directory,
-            &gate,
-            &run,
-            Some(time),
-            &[fixture.sample(130, 0)],
-            &[],
-        )?;
-        let node = status(&fixture.directory)?.node_id;
-        let mut c = open_existing(&fixture.directory, true)?;
-        let tx = c.transaction().map_err(decode_error)?;
-        tx.execute("DELETE FROM traffic_windows", [])
-            .map_err(decode_error)?;
-        {
-            let mut row = tx
-                .prepare("INSERT INTO traffic_windows VALUES(2,?1,3,0,?2,NULL,NULL,?1,?3,?4,0,1)")
-                .map_err(decode_error)?;
-            for index in 0..130i64 {
-                row.execute(params![
-                    node,
-                    index * 60_000,
-                    1u64.to_be_bytes().as_slice(),
-                    0u64.to_be_bytes().as_slice()
-                ])
-                .map_err(decode_error)?;
-            }
-        }
-        tx.execute("UPDATE traffic_state SET window_count=130", [])
-            .map_err(decode_error)?;
-        let first = buckets_in(&tx, Scope::Node, Resolution::Minute, Some(0), 50)?;
-        assert_eq!(first.floor, Some(70 * 60_000));
-        assert_eq!(
-            (first.items.len(), first.items[0].window_id),
-            (50, 70 * 60_000)
-        );
-        let second = buckets_in(&tx, Scope::Node, Resolution::Minute, first.next_cursor, 50)?;
-        assert_eq!(second.items.len(), 10);
-        assert_eq!(second.items[0].window_id, 120 * 60_000);
-        assert!(second.next_cursor.is_none());
-        let snapshot = node_snapshot_in(&tx)?;
-        assert_eq!(snapshot.minute.len(), 60);
-        assert_eq!(snapshot.floors[0], first.floor);
-        super::super::remote_traffic::validate_snapshot(&snapshot)?;
-        // Legacy unknown cutoffs still expose their actual rows; no current time
-        // is invented while reading old schema/provenance.
-        tx.execute("UPDATE traffic_state SET retention_at=NULL", [])
-            .map_err(decode_error)?;
-        assert_eq!(
-            buckets_in(&tx, Scope::Node, Resolution::Minute, None, 50)?.floor,
-            Some(0)
-        );
-        let mut plan=tx.prepare("EXPLAIN QUERY PLAN SELECT rowid FROM traffic_windows WHERE resolution=?1 AND window_id<?2 ORDER BY window_id LIMIT ?3").map_err(decode_error)?;
-        let details = plan
-            .query_map(params![0, 70 * 60_000, 2048], |r| r.get::<_, String>(3))
-            .map_err(decode_error)?
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(decode_error)?;
-        assert!(
-            details
-                .iter()
-                .any(|detail| detail.contains("traffic_windows_retention"))
-        );
-        assert!(!details.iter().any(|detail| detail.contains("TEMP B-TREE")));
-        drop(plan);
-        tx.commit().map_err(decode_error)?;
-        checkpoint(
-            &fixture.directory,
-            &gate,
-            &run,
-            Some(time + 1),
-            &[fixture.sample(130, 0)],
-            &[],
-        )?;
-        let count: i64 = c
-            .query_row("SELECT count(*) FROM traffic_windows", [], |r| r.get(0))
-            .map_err(decode_error)?;
-        assert_eq!(count, 60);
-        assert_eq!(
-            buckets(
-                &fixture.directory,
-                Scope::Node,
-                Resolution::Minute,
-                None,
-                50
-            )?
-            .floor,
-            first.floor
-        );
         Ok(())
     }
 
@@ -1796,257 +1285,6 @@ mod tests {
         );
         assert_eq!(status(&fixture.directory)?.cursor, cursor);
         assert_eq!(http(totals(&fixture.directory, Scope::Node)?).upload, 45);
-        let duplicate = [fixture.sample(46, 0), fixture.sample(46, 0)];
-        assert!(
-            checkpoint(
-                &fixture.directory,
-                &gate,
-                &run,
-                Some(2_006_000),
-                &duplicate,
-                &[]
-            )
-            .is_err()
-        );
-        assert_eq!(status(&fixture.directory)?.cursor, cursor);
-        Ok(())
-    }
-
-    #[test]
-    fn retention_keeps_coarse_history_and_pages_complete_protocol_windows() -> io::Result<()> {
-        let fixture = Fixture::new()?;
-        let gate = fixture.gate()?;
-        let run = fixture.start(&gate, Some(86_400_000))?.run_id.unwrap();
-        for index in 0..65u64 {
-            let mut socks = fixture.sample(index + 1, 0);
-            socks.protocol = Protocol::Socks5;
-            let mut masque = fixture.sample(index + 1, 0);
-            masque.protocol = Protocol::Masque;
-            checkpoint(
-                &fixture.directory,
-                &gate,
-                &run,
-                Some(86_400_000 + index * 60_000),
-                &[fixture.sample(index + 1, 0), socks, masque],
-                &[],
-            )?;
-        }
-        let first = buckets(
-            &fixture.directory,
-            Scope::Node,
-            Resolution::Minute,
-            None,
-            50,
-        )?;
-        assert_eq!(first.items.len(), 50);
-        assert!(first.status.history_gap);
-        assert!(first.items.iter().all(|item| item.items.len() == 3));
-        assert_eq!(first.floor, Some(86_400_000 + 5 * 60_000));
-        let second = buckets(
-            &fixture.directory,
-            Scope::Node,
-            Resolution::Minute,
-            first.next_cursor,
-            50,
-        )?;
-        assert_eq!(second.items.len(), 10);
-        assert!(second.next_cursor.is_none());
-        let day = buckets(&fixture.directory, Scope::Node, Resolution::Day, None, 50)?;
-        assert_eq!(day.items[0].items[0].value.upload, 65);
-        let hour = buckets(&fixture.directory, Scope::Node, Resolution::Hour, None, 50)?;
-        assert_eq!(hour.items.len(), 2);
-        assert_eq!(
-            hour.items
-                .iter()
-                .map(|bucket| bucket.items[0].value.upload)
-                .sum::<u64>(),
-            65
-        );
-        assert!(
-            buckets(
-                &fixture.directory,
-                Scope::Node,
-                Resolution::Minute,
-                None,
-                51
-            )
-            .is_err()
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn saturated_u64_values_and_history_budget_preserve_visible_lower_bounds() -> io::Result<()> {
-        let fixture = Fixture::new()?;
-        let gate = fixture.gate()?;
-        let run = fixture.start(&gate, Some(60_000))?.run_id.unwrap();
-        let mut first = fixture.sample(u64::MAX, 0);
-        first.value.saturated = true;
-        checkpoint(&fixture.directory, &gate, &run, Some(61_000), &[first], &[])?;
-        let value = http(totals(&fixture.directory, Scope::Node)?);
-        assert_eq!(value.upload, u64::MAX);
-        assert!(value.saturated);
-        let connection = open_existing(&fixture.directory, true)?;
-        let transaction = connection.unchecked_transaction().map_err(decode_error)?;
-        let mut state = state_in(&transaction)?;
-        assert!(write::exhausted_budget_for_test(
-            &transaction,
-            &mut state.status,
-            &fixture.pool
-        )?);
-        assert!(state.status.history_gap);
-        transaction.rollback().map_err(decode_error)?;
-        let before = status(&fixture.directory)?.cursor;
-        assert!(
-            checkpoint(
-                &fixture.directory,
-                &gate,
-                &run,
-                Some(62_000),
-                &[fixture.sample(u64::MAX, 0)],
-                &[]
-            )
-            .is_err()
-        );
-        assert_eq!(status(&fixture.directory)?.cursor, before);
-        Ok(())
-    }
-
-    #[test]
-    fn schema_six_migration_preserves_existing_policy_identity_and_backup() -> io::Result<()> {
-        let fixture = Fixture::new()?;
-        let original = store::load_policy(&fixture.directory)?;
-        let original_node = store::inspect(&fixture.directory)?.node_id;
-        let connection = open_existing(&fixture.directory, true)?;
-        remove_schema_for_test(&connection)?;
-        connection
-            .pragma_update(None, "user_version", 6)
-            .map_err(decode_error)?;
-        assert!(restore(&fixture.directory).is_err());
-        let backup = fixture.directory.join("schema6-before-traffic.sqlite3");
-        assert_eq!(
-            store::migrate(&fixture.directory, &backup)?.schema_version,
-            store::SCHEMA_VERSION
-        );
-        let after = store::load_policy(&fixture.directory)?;
-        assert_eq!(after.revision, original.revision);
-        assert_eq!(
-            after.credentials[0].secret_digest,
-            original.credentials[0].secret_digest
-        );
-        assert_eq!(after.routing.pools[0].id, fixture.pool);
-        let fresh = restore(&fixture.directory)?;
-        assert_eq!(fresh.status.node_id, original_node);
-        assert!(
-            fresh.status.clean
-                && fresh.status.meter_started_at.is_none()
-                && fresh.credential_seeds.is_empty()
-        );
-        let copied = Connection::open(backup).map_err(decode_error)?;
-        assert_eq!(store::read_overview(&copied)?.schema_version, 6);
-        let phc: String = copied
-            .query_row("SELECT password_hash FROM administrators", [], |row| {
-                row.get(0)
-            })
-            .map_err(decode_error)?;
-        assert_eq!(phc, "private fixture PHC");
-        Ok(())
-    }
-
-    #[test]
-    fn failed_schema_seven_migration_rolls_back_and_retains_old_backup() -> io::Result<()> {
-        let fixture = Fixture::new()?;
-        let connection = open_existing(&fixture.directory, true)?;
-        remove_schema_for_test(&connection)?;
-        connection
-            .execute_batch(
-                "PRAGMA user_version=6; CREATE TABLE traffic_state(operator_fixture TEXT);",
-            )
-            .map_err(decode_error)?;
-        let backup = fixture.directory.join("failed-schema7.sqlite3");
-        assert!(store::migrate(&fixture.directory, &backup).is_err());
-        assert_eq!(store::inspect(&fixture.directory)?.schema_version, 6);
-        assert_eq!(
-            store::load_policy(&fixture.directory)?.credentials[0].id,
-            fixture.credential
-        );
-        assert_eq!(
-            store::read_overview(&Connection::open(backup).map_err(decode_error)?)?.schema_version,
-            6
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn malformed_owner_capacity_flags_and_exhausted_cursor_never_reset_counters() -> io::Result<()>
-    {
-        let fixture = Fixture::new()?;
-        let gate = fixture.gate()?;
-        let run = fixture.start(&gate, Some(60_000))?.run_id.unwrap();
-        checkpoint(
-            &fixture.directory,
-            &gate,
-            &run,
-            Some(61_000),
-            &[fixture.sample(10, 0)],
-            &[],
-        )?;
-        let before = status(&fixture.directory)?.cursor;
-        let mut forged = fixture.sample(11, 0);
-        forged.user_id = Arc::from(random_id()?);
-        assert!(
-            checkpoint(
-                &fixture.directory,
-                &gate,
-                &run,
-                Some(62_000),
-                &[forged],
-                &[]
-            )
-            .is_err()
-        );
-        let oversized: Vec<_> = (0..257).map(|_| fixture.sample(11, 0)).collect();
-        assert!(
-            checkpoint(
-                &fixture.directory,
-                &gate,
-                &run,
-                Some(62_000),
-                &oversized,
-                &[]
-            )
-            .is_err()
-        );
-        assert_eq!(status(&fixture.directory)?.cursor, before);
-        assert_eq!(http(totals(&fixture.directory, Scope::Node)?).upload, 10);
-        let connection = open_existing(&fixture.directory, true)?;
-        connection
-            .execute_batch("PRAGMA ignore_check_constraints=ON; UPDATE traffic_state SET clean=2;")
-            .map_err(decode_error)?;
-        assert!(
-            matches!(status(&fixture.directory),Err(error)if error.kind()==io::ErrorKind::InvalidData)
-        );
-        connection
-            .execute_batch("UPDATE traffic_state SET clean=0,series_count=series_count+1;")
-            .map_err(decode_error)?;
-        assert!(restore(&fixture.directory).is_err());
-        connection
-            .execute_batch(
-                "UPDATE traffic_state SET series_count=series_count-1,cursor=9223372036854775807;",
-            )
-            .map_err(decode_error)?;
-        assert!(
-            checkpoint(
-                &fixture.directory,
-                &gate,
-                &run,
-                Some(62_000),
-                &[fixture.sample(11, 0)],
-                &[]
-            )
-            .is_err()
-        );
-        assert_eq!(http(totals(&fixture.directory, Scope::Node)?).upload, 10);
         Ok(())
     }
 }

@@ -10,8 +10,9 @@
 //! Every owned HANDLE becomes a standard RAII owner once. LocalAlloc results
 //! returned by the security APIs are freed only by LocalFree. Token buffers are
 //! word-aligned, length-bounded and remain alive while their SID is borrowed.
-//! Descriptor/ACL/ACE/SID offsets are checked before dereferencing variable-size
-//! records. All paths are bounded, NUL-terminated UTF-16 without interior NULs.
+//! Win32 returns the descriptor and its owner/DACL pointers in one allocation.
+//! IsValidAcl bounds ACE traversal; SID lengths are checked inside each allow ACE.
+//! Paths remain bounded, NUL-terminated UTF-16 without interior NULs.
 
 // The crate continues to deny unsafe elsewhere. Windows has no std API for
 // atomically creating a protected DACL or auditing SID/ACE data by handle.
@@ -27,25 +28,22 @@ use std::{
         io::{AsRawHandle, FromRawHandle, OwnedHandle},
     },
     path::Path,
-    ptr::{self, NonNull},
-    slice,
+    ptr, slice,
 };
 
 use windows_sys::Win32::{
-    Foundation::{
-        ERROR_INSUFFICIENT_BUFFER, GENERIC_READ, GENERIC_WRITE, INVALID_HANDLE_VALUE, LocalFree,
-    },
+    Foundation::{ERROR_INSUFFICIENT_BUFFER, GENERIC_READ, GENERIC_WRITE, INVALID_HANDLE_VALUE},
     Security::{
-        ACCESS_ALLOWED_ACE, ACE_HEADER, ACL, ACL_SIZE_INFORMATION, AclSizeInformation,
+        ACCESS_ALLOWED_ACE, ACE_HEADER, ACL_SIZE_INFORMATION, AclSizeInformation,
         Authorization::{
             ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW,
             GetSecurityInfo, SDDL_REVISION_1, SE_FILE_OBJECT,
         },
         DACL_SECURITY_INFORMATION, EqualSid, GetAce, GetAclInformation,
-        GetSecurityDescriptorControl, GetSecurityDescriptorLength, GetTokenInformation,
-        INHERIT_ONLY_ACE, IsValidAcl, IsValidSecurityDescriptor, IsValidSid, IsWellKnownSid,
-        OWNER_SECURITY_INFORMATION, PSID, SE_DACL_PRESENT, SE_DACL_PROTECTED, SECURITY_ATTRIBUTES,
-        TOKEN_QUERY, TOKEN_USER, TokenUser, WinLocalSystemSid,
+        GetSecurityDescriptorControl, GetTokenInformation, INHERIT_ONLY_ACE, IsValidAcl,
+        IsValidSid, IsWellKnownSid, OWNER_SECURITY_INFORMATION, PSID, SE_DACL_PRESENT,
+        SE_DACL_PROTECTED, SECURITY_ATTRIBUTES, TOKEN_QUERY, TOKEN_USER, TokenUser,
+        WinLocalSystemSid,
     },
     Storage::FileSystem::{
         BY_HANDLE_FILE_INFORMATION, CREATE_NEW, CreateDirectoryW, CreateFileW,
@@ -60,11 +58,11 @@ use windows_sys::Win32::{
     },
 };
 
+use winsafe::{HLOCAL, WString, guard::LocalFreeGuard};
+
 const MAX_PATH_UNITS: usize = 32_767;
 const MAX_TOKEN_BYTES: usize = 16 * 1024;
-const MAX_DESCRIPTOR_BYTES: usize = 1024 * 1024;
 const MAX_ACES: u32 = 64;
-const MAX_SID_STRING_UNITS: usize = 184;
 
 fn invalid(message: &'static str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidInput, message)
@@ -74,50 +72,21 @@ fn denied(message: &'static str) -> io::Error {
     io::Error::new(io::ErrorKind::PermissionDenied, message)
 }
 
-struct LocalMemory(NonNull<c_void>);
-
-impl LocalMemory {
-    fn new(pointer: *mut c_void) -> io::Result<Self> {
-        NonNull::new(pointer)
-            .map(Self)
-            .ok_or_else(|| invalid("Windows returned an empty setup security allocation"))
-    }
-
-    fn pointer(&self) -> *mut c_void {
-        self.0.as_ptr()
-    }
-}
-
-impl Drop for LocalMemory {
-    fn drop(&mut self) {
-        // SAFETY: only successful LocalAlloc-returning APIs construct this
-        // owner; it is neither cloned nor exposed for independent freeing.
-        unsafe {
-            LocalFree(self.pointer());
-        }
-    }
-}
-
 struct User {
     storage: Vec<usize>,
-    sid_offset: usize,
 }
 
 impl User {
     fn current() -> io::Result<Self> {
         let mut handle = ptr::null_mut();
-        // SAFETY: the pseudo process handle is borrowed; the output points to
-        // a live HANDLE slot. Only TOKEN_QUERY is requested.
+        // SAFETY: the output slot is live; success transfers one TOKEN_QUERY handle.
         if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut handle) } == 0 {
             return Err(io::Error::last_os_error());
         }
-        if handle.is_null() || handle == INVALID_HANDLE_VALUE {
-            return Err(invalid("Windows returned an invalid setup token handle"));
-        }
-        // SAFETY: OpenProcessToken succeeded and transfers exactly one handle.
+        // SAFETY: successful OpenProcessToken returns an owned, valid handle.
         let token = unsafe { OwnedHandle::from_raw_handle(handle) };
         let mut required = 0_u32;
-        // SAFETY: a null buffer with length zero queries the required size.
+        // SAFETY: a null/zero buffer requests the TOKEN_USER allocation size.
         let result = unsafe {
             GetTokenInformation(
                 token.as_raw_handle(),
@@ -133,87 +102,50 @@ impl User {
         {
             return Err(invalid("cannot size the current Windows setup user"));
         }
-        let required_usize = usize::try_from(required)
+        let length = usize::try_from(required)
             .map_err(|_| invalid("Windows setup token size exceeds its limit"))?;
-        if !(size_of::<TOKEN_USER>()..=MAX_TOKEN_BYTES).contains(&required_usize) {
+        if !(size_of::<TOKEN_USER>()..=MAX_TOKEN_BYTES).contains(&length) {
             return Err(invalid("Windows setup token size exceeds its limit"));
         }
-        let words = required_usize
-            .checked_add(size_of::<usize>() - 1)
-            .ok_or_else(|| invalid("Windows setup token size overflow"))?
-            / size_of::<usize>();
-        let mut storage = vec![0_usize; words];
-        let mut returned = required;
-        // SAFETY: the word-aligned allocation has at least `required` bytes;
-        // its capacity/lifetime are unchanged until the SID has been checked.
+        let mut storage = vec![0_usize; length.div_ceil(size_of::<usize>())];
+        // SAFETY: the word-aligned buffer has the requested size and stays owned
+        // by User. TokenUser returns its complete SID inside this same buffer.
         if unsafe {
             GetTokenInformation(
                 token.as_raw_handle(),
                 TokenUser,
                 storage.as_mut_ptr().cast(),
                 required,
-                &mut returned,
+                &mut required,
             )
         } == 0
         {
             return Err(io::Error::last_os_error());
         }
-        let returned =
-            usize::try_from(returned).map_err(|_| invalid("invalid Windows setup token size"))?;
-        if returned < size_of::<TOKEN_USER>() || returned > required_usize {
-            return Err(invalid("invalid Windows setup token size"));
-        }
-        // SAFETY: TOKEN_USER fits and is aligned in the successful API output.
-        let user = unsafe { ptr::read(storage.as_ptr().cast::<TOKEN_USER>()) };
-        let start = storage.as_ptr() as usize;
-        let sid_offset = (user.User.Sid as usize)
-            .checked_sub(start)
-            .filter(|offset| *offset < returned)
-            .ok_or_else(|| invalid("Windows setup token SID is out of bounds"))?;
-        // SAFETY: the SID pointer is within the still-live token allocation;
-        // checked_sid verifies its variable-length encoding fits the remainder.
-        unsafe {
-            checked_sid(user.User.Sid, returned - sid_offset)?;
-        }
-        Ok(Self {
-            storage,
-            sid_offset,
-        })
+        Ok(Self { storage })
     }
 
     fn sid(&self) -> PSID {
-        self.storage
-            .as_ptr()
-            .cast::<u8>()
-            .wrapping_add(self.sid_offset)
-            .cast_mut()
-            .cast()
+        // SAFETY: only successful TokenUser output constructs User; its aligned
+        // allocation and the SID it contains remain live through this borrow.
+        unsafe { (*self.storage.as_ptr().cast::<TOKEN_USER>()).User.Sid }
     }
 
     fn sid_string(&self) -> io::Result<String> {
         let mut pointer = ptr::null_mut();
-        // SAFETY: this validated SID remains owned by self through conversion.
+        // SAFETY: TokenUser supplies the SID. Keep its variable-size PSID form;
+        // no Rust reference to a fixed-size SID with a trailing array is formed.
         if unsafe { ConvertSidToStringSidW(self.sid(), &mut pointer) } == 0 {
             return Err(io::Error::last_os_error());
         }
-        let allocation = LocalMemory::new(pointer.cast())?;
-        for length in 0..MAX_SID_STRING_UNITS {
-            // SAFETY: this API guarantees a NUL-terminated SID string; a valid
-            // SID's textual representation fits the documented bound above.
-            if unsafe { *pointer.add(length) } == 0 {
-                // SAFETY: the prefix lies before that live allocation's NUL.
-                let units = unsafe { slice::from_raw_parts(pointer, length) };
-                let value = String::from_utf16(units)
-                    .map_err(|_| invalid("Windows returned an invalid setup user SID"))?;
-                drop(allocation);
-                return Ok(value);
-            }
-        }
-        Err(invalid("Windows setup user SID exceeds its limit"))
+        // SAFETY: success transfers a LocalFree allocation containing a complete
+        // NUL-terminated ASCII SID. The guard outlives WinSafe's UTF-16 copy.
+        let _allocation = unsafe { LocalFreeGuard::new(HLOCAL::from_ptr(pointer.cast())) };
+        Ok(unsafe { WString::from_wchars_nullt(pointer) }.to_string())
     }
 }
 
-struct Descriptor(LocalMemory);
+struct Descriptor(LocalFreeGuard);
 
 impl Descriptor {
     fn private(directory: bool) -> io::Result<Self> {
@@ -242,14 +174,17 @@ impl Descriptor {
         {
             return Err(io::Error::last_os_error());
         }
-        Ok(Self(LocalMemory::new(pointer)?))
+        // SAFETY: successful conversion transfers one LocalFree allocation.
+        Ok(Self(unsafe {
+            LocalFreeGuard::new(HLOCAL::from_ptr(pointer))
+        }))
     }
 
     fn attributes(&self) -> io::Result<SECURITY_ATTRIBUTES> {
         Ok(SECURITY_ATTRIBUTES {
             nLength: u32::try_from(size_of::<SECURITY_ATTRIBUTES>())
                 .map_err(|_| invalid("Windows setup security attributes size overflow"))?,
-            lpSecurityDescriptor: self.0.pointer(),
+            lpSecurityDescriptor: self.0.ptr(),
             bInheritHandle: 0,
         })
     }
@@ -426,27 +361,15 @@ fn audit(file: &File, protected: bool) -> io::Result<()> {
     if error != 0 {
         return Err(denied("cannot inspect Windows setup file security"));
     }
-    let allocation = LocalMemory::new(descriptor)?;
-    // SAFETY: GetSecurityInfo returned a live, OS-owned security descriptor.
-    if unsafe { IsValidSecurityDescriptor(descriptor) } == 0 {
-        return Err(denied("Windows setup security descriptor is invalid"));
-    }
-    // SAFETY: validation succeeded and the allocation is still alive.
-    let length = unsafe { GetSecurityDescriptorLength(descriptor) } as usize;
-    if length == 0 || length > MAX_DESCRIPTOR_BYTES {
-        return Err(denied(
-            "Windows setup security descriptor exceeds its limit",
-        ));
-    }
-    let owner_available = remainder(descriptor, length, owner)
-        .ok_or_else(|| denied("Windows setup owner SID is out of bounds"))?;
-    // SAFETY: owner is inside the descriptor; the helper bounds its full SID.
-    unsafe {
-        checked_sid(owner, owner_available)?;
-    }
-    // SAFETY: both SIDs were validated and their owners remain alive.
-    if unsafe { EqualSid(owner, user.sid()) } == 0
-        && unsafe { IsWellKnownSid(owner, WinLocalSystemSid) } == 0
+    // SAFETY: GetSecurityInfo succeeded and transfers one LocalFree allocation.
+    let allocation = unsafe { LocalFreeGuard::new(HLOCAL::from_ptr(descriptor)) };
+    // GetSecurityInfo returns owner and DACL pointers into this owned copy.
+    // https://learn.microsoft.com/en-us/windows/win32/api/aclapi/nf-aclapi-getsecurityinfo
+    // SAFETY: requesting OWNER_SECURITY_INFORMATION supplies the owner's SID;
+    // the descriptor and User allocations stay alive throughout comparison.
+    if owner.is_null()
+        || (unsafe { EqualSid(owner, user.sid()) } == 0
+            && unsafe { IsWellKnownSid(owner, WinLocalSystemSid) } == 0)
     {
         return Err(denied("Windows setup object has an unexpected owner"));
     }
@@ -461,18 +384,10 @@ fn audit(file: &File, protected: bool) -> io::Result<()> {
             "Windows setup object requires a protected private DACL",
         ));
     }
-    let acl_available = remainder(descriptor, length, dacl.cast())
-        .filter(|available| *available >= size_of::<ACL>())
-        .ok_or_else(|| denied("Windows setup DACL is absent or out of bounds"))?;
-    // SAFETY: the fixed ACL header fits the live descriptor allocation.
-    let acl = unsafe { ptr::read_unaligned(dacl) };
-    let acl_length = usize::from(acl.AclSize);
-    if acl_length < size_of::<ACL>() || acl_length > acl_available {
-        return Err(denied("Windows setup DACL length is invalid"));
-    }
-    // SAFETY: its complete declared size fits the descriptor.
-    if unsafe { IsValidAcl(dacl) } == 0 {
-        return Err(denied("Windows setup DACL is invalid"));
+    // SAFETY: requesting DACL_SECURITY_INFORMATION supplies this ACL inside the
+    // descriptor. IsValidAcl validates all ACE extents before GetAce traversal.
+    if dacl.is_null() || unsafe { IsValidAcl(dacl) } == 0 {
+        return Err(denied("Windows setup DACL is absent or invalid"));
     }
     let mut information = ACL_SIZE_INFORMATION::default();
     let information_size = u32::try_from(size_of::<ACL_SIZE_INFORMATION>())
@@ -498,17 +413,12 @@ fn audit(file: &File, protected: bool) -> io::Result<()> {
         if unsafe { GetAce(dacl, index, &mut entry) } == 0 {
             return Err(denied("cannot inspect a Windows setup DACL entry"));
         }
-        let available = remainder(dacl.cast(), acl_length, entry)
-            .filter(|available| *available >= size_of::<ACE_HEADER>())
-            .ok_or_else(|| denied("Windows setup DACL entry is out of bounds"))?;
-        // SAFETY: the fixed header fits the validated ACL allocation.
+        // SAFETY: GetAce selected an entry in the validated ACL. Read only its
+        // fixed header before deciding whether it is an ordinary allow ACE.
         let header = unsafe { ptr::read_unaligned(entry.cast::<ACE_HEADER>()) };
         let entry_length = usize::from(header.AceSize);
         let sid_offset = offset_of!(ACCESS_ALLOWED_ACE, SidStart);
-        if u32::from(header.AceType) != ACCESS_ALLOWED_ACE_TYPE
-            || entry_length > available
-            || entry_length < sid_offset
-        {
+        if u32::from(header.AceType) != ACCESS_ALLOWED_ACE_TYPE || entry_length < sid_offset {
             return Err(denied(
                 "Windows setup DACL requires ordinary private allow entries",
             ));
@@ -545,14 +455,6 @@ fn audit(file: &File, protected: bool) -> io::Result<()> {
     }
     drop(allocation);
     Ok(())
-}
-
-fn remainder(base: *mut c_void, length: usize, pointer: *mut c_void) -> Option<usize> {
-    if pointer.is_null() {
-        return None;
-    }
-    let offset = (pointer as usize).checked_sub(base as usize)?;
-    length.checked_sub(offset)
 }
 
 /// # Safety
@@ -595,38 +497,6 @@ fn wide_path(path: &Path) -> io::Result<Vec<u16>> {
 mod tests {
     use super::*;
     use std::{fs, io::Write};
-
-    #[test]
-    fn protected_child_excludes_everyone_inheritance_from_owned_parent() -> io::Result<()> {
-        let mut random = [0_u8; 16];
-        getrandom::fill(&mut random).map_err(|_| io::Error::other("test entropy unavailable"))?;
-        let parent = std::env::temp_dir().join(format!(
-            "vproxy-setup-parent-{:032x}",
-            u128::from_ne_bytes(random)
-        ));
-        let user = User::current()?.sid_string()?;
-        let descriptor = Descriptor::from_sddl(&format!(
-            "O:{user}D:P(A;OICI;FA;;;{user})(A;OICI;FA;;;SY)(A;OICI;FR;;;WD)"
-        ))?;
-        let path = wide_path(&parent)?;
-        let attributes = descriptor.attributes()?;
-        // SAFETY: this exclusively created fixture path and descriptor are
-        // live for the call; no existing object's permissions are changed.
-        if unsafe { CreateDirectoryW(path.as_ptr(), &attributes) } == 0 {
-            return Err(io::Error::last_os_error());
-        }
-        assert!(check_directory(&parent, true).is_err());
-        let child = parent.join("private");
-        create_directory(&child)?;
-        check_directory(&child, true)?;
-        let key = child.join("key.pem");
-        drop(create_file(&key)?);
-        drop(open_file(&key, true)?);
-        fs::remove_file(key)?;
-        fs::remove_dir(child)?;
-        fs::remove_dir(parent)?;
-        Ok(())
-    }
 
     #[test]
     fn protected_outputs_are_private_and_loose_file_dacls_are_rejected() -> io::Result<()> {

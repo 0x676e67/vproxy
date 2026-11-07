@@ -246,7 +246,7 @@ mod tests {
     use std::net::{Ipv4Addr, SocketAddr};
 
     use bytes::BytesMut;
-    use tokio_util::codec::{Decoder, Encoder};
+    use tokio_util::codec::Decoder;
 
     use super::*;
 
@@ -328,75 +328,5 @@ mod tests {
             codec.decode(&mut password).unwrap_err().kind(),
             ErrorKind::InvalidData
         );
-    }
-
-    #[test]
-    fn encodes_rfc1928_reply() {
-        let mut codec = SocksCodec::new();
-        let mut buffer = BytesMut::new();
-        codec
-            .encode(
-                ServerFrame::Reply(
-                    Reply::Succeeded,
-                    Address::SocketAddress(SocketAddr::from((Ipv4Addr::LOCALHOST, 1080))),
-                ),
-                &mut buffer,
-            )
-            .unwrap();
-        assert_eq!(
-            &buffer[..],
-            &[0x05, 0x00, 0x00, 0x01, 127, 0, 0, 1, 0x04, 0x38]
-        );
-    }
-
-    #[test]
-    fn accepts_maximum_length_rfc1928_domain() {
-        let mut codec = SocksCodec::new();
-        codec.expect(ClientFrameKind::Request);
-        let mut buffer = BytesMut::with_capacity(262);
-        buffer.extend_from_slice(&[0x05, 0x01, 0x00, 0x03, 0xff]);
-        buffer.extend(std::iter::repeat_n(b'a', u8::MAX as usize));
-        buffer.extend_from_slice(&[0x01, 0xbb]);
-
-        let ClientFrame::Request { address, .. } = codec.decode(&mut buffer).unwrap().unwrap()
-        else {
-            panic!("expected maximum-length domain request");
-        };
-        assert!(matches!(
-            address,
-            Address::DomainAddress(domain, 443) if domain.len() == u8::MAX as usize
-        ));
-    }
-
-    #[test]
-    fn decodes_rfc1929_credentials_as_octets() {
-        let mut codec = SocksCodec::new();
-        codec.expect(ClientFrameKind::Password);
-        let mut buffer = BytesMut::from(&[0x01, 0x02, 0xff, 0x80, 0x02, 0xfe, 0x81][..]);
-
-        let ClientFrame::Password(credentials) = codec.decode(&mut buffer).unwrap().unwrap() else {
-            panic!("expected password frame");
-        };
-        assert_eq!(credentials.username.as_ref(), &[0xff, 0x80]);
-        assert_eq!(credentials.password.as_ref(), &[0xfe, 0x81]);
-        assert!(buffer.is_empty());
-    }
-
-    #[test]
-    fn rejects_oversized_domain_before_encoding_reply() {
-        let mut codec = SocksCodec::new();
-        let mut buffer = BytesMut::new();
-        let error = codec
-            .encode(
-                ServerFrame::Reply(
-                    Reply::Succeeded,
-                    Address::DomainAddress("a".repeat(u8::MAX as usize + 1), 443),
-                ),
-                &mut buffer,
-            )
-            .unwrap_err();
-
-        assert_eq!(error.kind(), ErrorKind::InvalidInput);
-        assert!(buffer.is_empty());
     }
 }

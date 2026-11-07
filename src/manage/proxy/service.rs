@@ -99,14 +99,6 @@ impl Error {
 }
 
 enum Operation {
-    #[cfg(test)]
-    Replace {
-        expected_generation: u64,
-        // Test-only prepared profiles include the Linux eBPF configuration.
-        // Keep that large fixture off the event enum's stack representation;
-        // production commands do not allocate this box.
-        prepared: Option<Box<Prepared>>,
-    },
     Configure {
         administrator: String,
         request: store::proxy_service::Request,
@@ -158,21 +150,6 @@ impl Control {
         }
     }
 
-    /// Admit at most one queued operation in addition to the active one. Once
-    /// queued, cancellation of its receipt does not cancel or repeat the work.
-    /// A stale generation is checked again by the owner before touching sockets.
-    #[cfg(test)]
-    pub(in crate::manage) fn request(
-        &self,
-        expected_generation: u64,
-        prepared: Option<Prepared>,
-    ) -> io::Result<oneshot::Receiver<io::Result<View>>> {
-        self.enqueue(Operation::Replace {
-            expected_generation,
-            prepared: prepared.map(Box::new),
-        })
-    }
-
     fn enqueue(&self, operation: Operation) -> io::Result<oneshot::Receiver<io::Result<View>>> {
         if self.stopping.is_cancelled() {
             return Err(Error::Stopping.io());
@@ -208,20 +185,6 @@ impl Control {
             .await
             .map_err(|_| Error::Unavailable.io())?
     }
-
-    /// Replace the current listener group, or stop it for `None`. A reply error
-    /// after admission is not proof that the generation or saved state stayed
-    /// unchanged; read the original operation through the management layer.
-    #[cfg(test)]
-    pub(in crate::manage) async fn apply(
-        &self,
-        expected_generation: u64,
-        prepared: Option<Prepared>,
-    ) -> io::Result<View> {
-        self.request(expected_generation, prepared)?
-            .await
-            .map_err(|_| Error::Unavailable.io())?
-    }
 }
 
 /// Native owner retained outside the management executor. `Drop` requests stop
@@ -234,14 +197,6 @@ pub(in crate::manage) struct Service {
 }
 
 impl Service {
-    /// Create a bounded cold owner without binding proxy sockets. Keep this
-    /// value outside Tokio and await `ready` before submitting configurations;
-    /// thread/driver failures do not authorize another author or an open proxy.
-    #[cfg(test)]
-    pub(in crate::manage) fn spawn(access: Reader, author: Arc<store::Guard>) -> io::Result<Self> {
-        Self::spawn_with(access, author, None)
-    }
-
     pub(in crate::manage) fn managed(
         managed: Managed,
         author: Arc<store::Guard>,
@@ -397,15 +352,6 @@ impl Worker {
                 Event::Stop | Event::Command(None) => break,
                 Event::Command(Some(command)) => {
                     let result = match command.operation {
-                        #[cfg(test)]
-                        Operation::Replace {
-                            expected_generation,
-                            prepared,
-                        } => worker.apply(
-                            &runtime,
-                            expected_generation,
-                            prepared.map(|value| *value),
-                        ),
                         Operation::Configure {
                             administrator,
                             request,

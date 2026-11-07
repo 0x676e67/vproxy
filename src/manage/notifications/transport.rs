@@ -216,21 +216,6 @@ async fn post(
 }
 
 #[cfg(test)]
-pub(super) async fn send_test(
-    client: Client,
-    destination: &Destination,
-    body: &[u8],
-    id: &str,
-) -> (Outcome, Option<u16>) {
-    post(client, destination, body, id).await
-}
-
-#[cfg(test)]
-pub(super) fn test_builder(roots: RootCertStore) -> Option<reqwest::ClientBuilder> {
-    builder(roots)
-}
-
-#[cfg(test)]
 mod tests {
     use super::*;
     #[test]

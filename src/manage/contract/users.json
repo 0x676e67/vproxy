@@ -651,26 +651,6 @@
         }
       }
     },
-    "UserRevisionInput": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["expected_revision"],
-      "properties": {
-        "expected_revision": {
-          "description": "Whole-policy saved revision, not a user/credential row revision.",
-          "$ref": "#/components/schemas/Revision"
-        }
-      }
-    },
-    "UserStateInput": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["expected_revision", "active"],
-      "properties": {
-        "expected_revision": { "$ref": "#/components/schemas/Revision" },
-        "active": { "type": "boolean" }
-      }
-    },
     "UserSearchCursor": {
       "type": "string",
       "minLength": 102,

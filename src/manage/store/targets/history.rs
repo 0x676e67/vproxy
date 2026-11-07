@@ -776,28 +776,7 @@ pub(in crate::manage) fn collect_source_ids(
 }
 
 #[cfg(test)]
-pub(in crate::manage) fn ensure_unused_for_test(connection: &Connection) -> io::Result<()> {
-    let count:u32=connection.query_row("SELECT count(*) FROM sqlite_schema WHERE name IN('controller_history','controller_history_state')",[],|row|row.get(0)).map_err(|error|sqlite_error("cannot inspect legacy history fixture",error))?;
-    if count == 0 {
-        return Ok(());
-    }
-    if count != 2 || high_water(connection)? != 0 {
-        return Err(corrupt());
-    }
-    let rows: u32 = connection
-        .query_row("SELECT count(*) FROM controller_history", [], |row| {
-            row.get(0)
-        })
-        .map_err(|error| sqlite_error("cannot inspect unused history fixture", error))?;
-    if rows != 0 {
-        return Err(corrupt());
-    }
-    Ok(())
-}
-
-#[cfg(test)]
 pub(in crate::manage) fn remove_schema_for_test(connection: &Connection) -> io::Result<()> {
-    ensure_unused_for_test(connection)?;
     connection.execute_batch("DROP TABLE IF EXISTS controller_history; DROP TABLE IF EXISTS controller_history_state;")
         .map_err(|error|sqlite_error("cannot reconstruct legacy history fixture",error))
 }

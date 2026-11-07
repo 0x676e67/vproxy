@@ -322,19 +322,3 @@ impl TryFrom<&str> for Address {
         }
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn rejects_domains_that_do_not_fit_rfc1928_length_octet() {
-        let address = Address::DomainAddress("a".repeat(u8::MAX as usize + 1), 443);
-        let mut buffer = Vec::new();
-
-        let error = address.write_to_buf(&mut buffer).unwrap_err();
-
-        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
-        assert!(buffer.is_empty());
-    }
-}

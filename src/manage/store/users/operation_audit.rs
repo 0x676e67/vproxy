@@ -189,30 +189,3 @@ fn number(row: &Row<'_>, column: usize) -> rusqlite::Result<Option<u64>> {
 fn malformed() -> io::Error {
     super::super::invalid_data("policy actor audit is malformed")
 }
-
-#[cfg(test)]
-pub(in crate::manage) fn require_legacy_for_test(connection: &Connection) -> io::Result<()> {
-    let current: bool = connection.query_row("SELECT EXISTS(SELECT 1 FROM pragma_table_info('proxy_policy_audit') WHERE name='automation_principal_id')", [], |row| row.get(0))
-        .map_err(|error| sqlite_error("cannot inspect policy audit fixture layout", error))?;
-    if current {
-        let present: bool = connection.query_row("SELECT EXISTS(SELECT 1 FROM proxy_policy_audit WHERE entry='automation_management' OR automation_principal_id IS NOT NULL OR automation_generation IS NOT NULL)", [], |row| row.get(0))
-            .map_err(|error| sqlite_error("cannot inspect policy audit fixture actors", error))?;
-        if present {
-            return Err(malformed());
-        }
-    }
-    Ok(())
-}
-
-#[cfg(test)]
-pub(in crate::manage) fn restore_legacy_for_test(connection: &Connection) -> io::Result<()> {
-    require_legacy_for_test(connection)?;
-    let current: bool = connection.query_row("SELECT EXISTS(SELECT 1 FROM pragma_table_info('proxy_policy_audit') WHERE name='automation_principal_id')", [], |row| row.get(0))
-        .map_err(|error| sqlite_error("cannot inspect policy audit fixture layout", error))?;
-    if !current {
-        return Ok(());
-    }
-    create_table(connection, "proxy_policy_audit_fixture17", false)?;
-    connection.execute_batch(&format!("INSERT INTO proxy_policy_audit_fixture17({LEGACY}) SELECT {LEGACY} FROM proxy_policy_audit; DROP TABLE proxy_policy_audit; ALTER TABLE proxy_policy_audit_fixture17 RENAME TO proxy_policy_audit;"))
-        .map_err(|error| sqlite_error("cannot reconstruct policy audit fixture", error))
-}

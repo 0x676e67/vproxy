@@ -23,9 +23,10 @@ it does not make a live old node safe to run beside an identity copy.
 ## Witness records
 
 `manage witness` maintains external records used by the recovery foundation.
-The optional `witness-journal` build adds transaction and continuity checks around
-protected state. Neither capability alone establishes that an old node has been
-fenced or that a complete same-identity recovery is ready to start.
+The experimental source transaction runtime has been retired. Existing source
+markers and database bindings still block ordinary startup and writes; removing
+the runtime does not release a protected identity. Ordinary backups, quarantined
+identity snapshots, and external witness records remain available.
 
 Before evaluating witnessed recovery, decide who owns the independent witness,
 how the old node is fenced, which snapshot/configuration is authoritative, and
@@ -36,6 +37,5 @@ Use `vproxy manage witness --help` and `vproxy manage snapshot --help` for the
 available offline inspection and record operations. Keep witness and recovery
 material separate from ordinary proxy credentials and browser trust.
 
-A passing package verification proves the checks it reports. Starting a protected
-node also requires its current authorization, configuration and continuity checks.
-Keep production enablement separate from testing these foundations.
+A passing package verification proves the checks it reports. This build cannot
+start a protected source or complete a same-identity recovery.

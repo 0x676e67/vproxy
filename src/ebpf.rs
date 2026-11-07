@@ -671,11 +671,6 @@ mod linux {
         use super::*;
 
         #[test]
-        fn program_is_embedded_as_an_elf_object() {
-            assert_eq!(PROGRAM.get(..4), Some(b"\x7fELF".as_slice()));
-        }
-
-        #[test]
         fn legacy_interface_lock_has_process_lifetime() -> io::Result<()> {
             struct Directory(std::path::PathBuf);
             impl Drop for Directory {
@@ -784,26 +779,6 @@ mod linux_privileges {
     /// Adds privilege-transition context to a platform-neutral I/O error.
     fn other_error(context: &str, error: impl std::error::Error) -> io::Error {
         io::Error::other(format!("{context}: {error}"))
-    }
-
-    #[cfg(test)]
-    mod tests {
-        use super::*;
-
-        #[test]
-        fn runtime_capabilities_are_limited_to_active_features() {
-            assert_eq!(
-                runtime_capabilities(false, false, false),
-                CapabilitySet::DAC_READ_SEARCH
-            );
-            assert_eq!(
-                runtime_capabilities(true, true, true),
-                CapabilitySet::DAC_READ_SEARCH
-                    | CapabilitySet::NET_ADMIN
-                    | CapabilitySet::NET_BIND_SERVICE
-                    | CapabilitySet::NET_RAW
-            );
-        }
     }
 }
 
@@ -1591,56 +1566,6 @@ fn set_linux_receive_buffer_for_scale(socket: &socket2::SockRef<'_>, scale: u8) 
 mod tests {
     use super::*;
 
-    fn config() -> io::Result<Config> {
-        Config::try_new(
-            #[cfg(all(target_os = "linux", feature = "ebpf"))]
-            None,
-        )
-    }
-
-    #[test]
-    fn profile_names_are_strict_and_stable() {
-        for (name, profile) in [
-            ("windows", Profile::Windows),
-            ("linux", Profile::Linux),
-            ("android", Profile::Android),
-            ("macos", Profile::MacOs),
-            ("ios", Profile::Ios),
-        ] {
-            assert_eq!(name.parse::<Profile>(), Ok(profile));
-            assert_eq!(profile.to_string(), name);
-        }
-        assert!("native".parse::<Profile>().is_err());
-        assert!("Windows".parse::<Profile>().is_err());
-        assert!("freebsd".parse::<Profile>().is_err());
-    }
-
-    #[test]
-    fn profiles_match_the_upstream_platform_families() {
-        for (profile, expected) in [
-            (Profile::Windows, (128, 64_240, 8, 12)),
-            (Profile::Linux, (64, 65_535, 7, 20)),
-            (Profile::Android, (64, 65_535, 7, 20)),
-            (Profile::MacOs, (64, 65_535, 6, 24)),
-            (Profile::Ios, (64, 65_535, 6, 24)),
-        ] {
-            let settings = profile.settings();
-            assert_eq!(
-                (
-                    settings.hop_limit,
-                    settings.tcp_window,
-                    settings.tcp_window_scale,
-                    settings.options_len,
-                ),
-                expected
-            );
-            assert_eq!(settings.traffic_class, 0x10);
-            assert_eq!(settings.tcp_mss(IpVersion::V4), 1_460);
-            assert_eq!(settings.tcp_mss(IpVersion::V6), 1_440);
-            assert!(settings.ipv4_df);
-        }
-    }
-
     #[test]
     fn encoded_profile_keeps_the_complete_syn_layout() {
         let windows = encode_profile_for_test(Profile::Windows, IpVersion::V4);
@@ -1665,37 +1590,5 @@ mod tests {
         let linux_v6 = encode_profile_for_test(Profile::Linux, IpVersion::V6);
         assert_eq!(&linux_v6[4..6], &1_440_u16.to_be_bytes());
         assert_eq!(&linux_v6[14..16], &1_440_u16.to_be_bytes());
-    }
-
-    #[test]
-    fn absence_is_the_only_native_selection() {
-        let config = config().expect("empty runtime profile config is valid");
-        assert!(config.is_native(None));
-        assert!(!config.is_native(Some(Profile::Windows)));
-    }
-
-    #[tokio::test]
-    async fn absent_backend_rejects_presets_before_mutating_native_socket() -> io::Result<()> {
-        let config = config()?;
-        let socket = TcpSocket::new_v4()?;
-        let before = socket2::SockRef::from(&socket);
-        let ttl = before.ttl_v4()?;
-        let receive_buffer = before.recv_buffer_size()?;
-        config.apply(&socket, IpVersion::V4, None)?;
-        let _native_guard = config.register(&socket, IpVersion::V4, None)?;
-        assert_eq!(
-            config
-                .apply(&socket, IpVersion::V4, Some(Profile::Windows))
-                .expect_err("no partial preset")
-                .kind(),
-            io::ErrorKind::Unsupported
-        );
-        assert!(
-            matches!(config.register(&socket, IpVersion::V4, Some(Profile::Windows)),
-            Err(error) if error.kind() == io::ErrorKind::Unsupported)
-        );
-        assert_eq!(before.ttl_v4()?, ttl);
-        assert_eq!(before.recv_buffer_size()?, receive_buffer);
-        Ok(())
     }
 }

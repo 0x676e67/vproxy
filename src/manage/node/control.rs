@@ -15,7 +15,7 @@ pub(in crate::manage) mod search;
 mod secrets;
 pub(in crate::manage) mod traffic;
 pub(in crate::manage) mod witness;
-pub(in crate::manage) use crate::manage::views::{Page, User};
+pub(in crate::manage) use crate::manage::views::{Credential, Page, User};
 pub(in crate::manage) use client::{
     Offline, RemoteError, TransportError, request, request_with_admission,
 };
@@ -37,9 +37,10 @@ use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
 
 use super::*;
-use crate::{
-    access::Protocol,
-    manage::{policy, store},
+use crate::manage::{
+    policy,
+    store::{self, valid_id},
+    views,
 };
 
 const VERSION: u8 = 1;
@@ -47,121 +48,7 @@ const RESOURCE: &str = "proxy_policy";
 const PREFIX: &str = "/node/v1/proxy";
 const MAX_RESPONSE_BYTES: usize = 32 * 1024;
 
-/// Fixed command vocabulary. New variants require an explicit protocol review;
-/// arbitrary JSON, URLs, credentials and executable instructions are excluded.
-#[derive(Clone, Deserialize, Serialize)]
-#[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
-pub(in crate::manage) enum Mutation {
-    CreateUser {
-        name: String,
-        protocols: Vec<Protocol>,
-        concurrent_limit: u32,
-    },
-    UpdateUser {
-        id: String,
-        name: String,
-        protocols: Vec<Protocol>,
-        concurrent_limit: u32,
-    },
-    SetUserActive {
-        id: String,
-        active: bool,
-    },
-    DeleteUser {
-        id: String,
-    },
-    CreateCredential {
-        user_id: String,
-    },
-    SetCredentialActive {
-        id: String,
-        active: bool,
-    },
-    RotateCredential {
-        id: String,
-    },
-    RevokeCredential {
-        id: String,
-    },
-}
-
-impl From<Mutation> for store::PolicyChange {
-    fn from(value: Mutation) -> Self {
-        match value {
-            Mutation::CreateUser {
-                name,
-                protocols,
-                concurrent_limit,
-            } => Self::CreateUser {
-                name,
-                protocols,
-                concurrent_limit,
-            },
-            Mutation::UpdateUser {
-                id,
-                name,
-                protocols,
-                concurrent_limit,
-            } => Self::UpdateUser {
-                id,
-                name,
-                protocols,
-                concurrent_limit,
-            },
-            Mutation::SetUserActive { id, active } => Self::SetUserActive { id, active },
-            Mutation::DeleteUser { id } => Self::DeleteUser { id },
-            Mutation::CreateCredential { user_id } => Self::CreateCredential { user_id },
-            Mutation::SetCredentialActive { id, active } => {
-                Self::SetCredentialActive { id, active }
-            }
-            Mutation::RotateCredential { id } => Self::RotateCredential { id },
-            Mutation::RevokeCredential { id } => Self::RevokeCredential { id },
-        }
-    }
-}
-
-impl TryFrom<store::PolicyChange> for Mutation {
-    type Error = io::Error;
-
-    fn try_from(value: store::PolicyChange) -> io::Result<Self> {
-        Ok(match value {
-            store::PolicyChange::CreateUser {
-                name,
-                protocols,
-                concurrent_limit,
-            } => Self::CreateUser {
-                name,
-                protocols,
-                concurrent_limit,
-            },
-            store::PolicyChange::UpdateUser {
-                id,
-                name,
-                protocols,
-                concurrent_limit,
-            } => Self::UpdateUser {
-                id,
-                name,
-                protocols,
-                concurrent_limit,
-            },
-            store::PolicyChange::SetUserActive { id, active } => Self::SetUserActive { id, active },
-            store::PolicyChange::DeleteUser { id } => Self::DeleteUser { id },
-            store::PolicyChange::CreateCredential { user_id } => Self::CreateCredential { user_id },
-            store::PolicyChange::SetCredentialActive { id, active } => {
-                Self::SetCredentialActive { id, active }
-            }
-            store::PolicyChange::RotateCredential { id } => Self::RotateCredential { id },
-            store::PolicyChange::RevokeCredential { id } => Self::RevokeCredential { id },
-            _ => {
-                return Err(io::Error::new(
-                    io::ErrorKind::Unsupported,
-                    "version-one node control does not support routing mutations",
-                ));
-            }
-        })
-    }
-}
+pub(in crate::manage) use crate::manage::store::UserMutation as Mutation;
 
 /// Decimal strings preserve SQLite's whole positive i64 range in browsers.
 /// The source administrator is an audit claim by the authenticated controller,
@@ -371,33 +258,6 @@ pub(in crate::manage) struct Policy {
     pub(in crate::manage) proxy_running: bool,
     pub(in crate::manage) user_count: u32,
     pub(in crate::manage) credential_count: u32,
-}
-
-/// Public login and lifecycle metadata only. Credential identity is stable
-/// across rotations, while verifier_revision advances with the secret.
-#[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(in crate::manage) struct Credential {
-    pub(in crate::manage) id: String,
-    pub(in crate::manage) user_id: String,
-    pub(in crate::manage) login: String,
-    pub(in crate::manage) syntax_version: u8,
-    pub(in crate::manage) active: bool,
-    pub(in crate::manage) revoked: bool,
-    pub(in crate::manage) verifier_revision: String,
-}
-impl From<store::CredentialView> for Credential {
-    fn from(value: store::CredentialView) -> Self {
-        Self {
-            id: value.id,
-            user_id: value.user_id,
-            login: value.login,
-            syntax_version: value.syntax_version,
-            active: value.active,
-            revoked: value.revoked,
-            verifier_revision: value.verifier_revision.to_string(),
-        }
-    }
 }
 
 #[derive(Serialize, Deserialize, PartialEq, Eq)]
@@ -836,23 +696,7 @@ fn decimal(value: &str, zero: bool) -> Result<u64, ApiError> {
     if zero && value == "0" {
         return Ok(0);
     }
-    if value.is_empty()
-        || value.len() > 19
-        || value.starts_with('0')
-        || !value.bytes().all(|byte| byte.is_ascii_digit())
-    {
-        return Err(bad("invalid_revision"));
-    }
-    value
-        .parse::<u64>()
-        .ok()
-        .filter(|value| *value <= i64::MAX as u64)
-        .ok_or_else(|| bad("invalid_revision"))
-}
-
-fn valid_id(value: &str) -> bool {
-    let mut bytes = [0; 16];
-    value.len() == 22 && matches!(URL_SAFE_NO_PAD.decode_slice(value, &mut bytes), Ok(16))
+    views::revision(value).map_err(|_| bad("invalid_revision"))
 }
 
 fn storage_error(error: io::Error) -> ApiError {
@@ -945,98 +789,4 @@ fn pagination(uri: &http::Uri, credentials: bool) -> Result<Pagination, ApiError
         }
     }
     Ok(result)
-}
-
-#[cfg(test)]
-pub(in crate::manage) fn decode_egress_alerts_for_test(
-    query: &crate::manage::alerts::Query,
-    bytes: &[u8],
-    expected: &str,
-) -> std::io::Result<Reply> {
-    alerts::decode(query, bytes, expected)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    pub(super) fn command() -> serde_json::Value {
-        serde_json::json!({"version":1,"target_node_id":"AAAAAAAAAAAAAAAAAAAAAA","resource":"proxy_policy","controller_epoch":"2","command_id":"1","expected_policy_revision":"1","source_administrator_id":"AQEBAQEBAQEBAQEBAQEBAQ","mutation":{"action":"create_user","name":"remote user","protocols":["http"],"concurrent_limit":2}})
-    }
-
-    #[test]
-    fn command_vocabulary_is_strict_and_all_revisions_are_canonical_decimal_strings() {
-        let input: Command = serde_json::from_value(command()).unwrap();
-        assert!(input.into_store().is_ok());
-        for field in ["controller_epoch", "command_id", "expected_policy_revision"] {
-            for invalid in ["", "0", "01", "+1", "1 ", "9223372036854775808"] {
-                let mut body = command();
-                body[field] = invalid.into();
-                let input: Command = serde_json::from_value(body).unwrap();
-                assert!(input.into_store().is_err());
-            }
-            let mut body = command();
-            body[field] = 1.into();
-            assert!(serde_json::from_value::<Command>(body).is_err());
-        }
-        for (field, value) in [
-            ("version", serde_json::json!(2)),
-            ("target_node_id", serde_json::json!("attacker")),
-            ("resource", serde_json::json!("shell")),
-            ("source_administrator_id", serde_json::json!("not-an-id")),
-        ] {
-            let mut body = command();
-            body[field] = value;
-            assert!(
-                serde_json::from_value::<Command>(body)
-                    .unwrap()
-                    .into_store()
-                    .is_err()
-            );
-        }
-        let mut body = command();
-        body["actor"] = serde_json::json!({"node_id":"forged"});
-        assert!(serde_json::from_value::<Command>(body).is_err());
-        let mut body = command();
-        body["mutation"]["password"] = serde_json::json!("chosen-secret");
-        assert!(serde_json::from_value::<Command>(body).is_err());
-        let mut body = command();
-        body["mutation"]["action"] = serde_json::json!("exec");
-        assert!(serde_json::from_value::<Command>(body).is_err());
-    }
-
-    #[test]
-    fn node_queries_reject_unknown_duplicate_or_oversized_filters() {
-        for query in [
-            "limit=0",
-            "limit=51",
-            "limit=01",
-            "limit=2&limit=3",
-            "after=not-an-id",
-            "include_deleted=1",
-            "user_id=AAAAAAAAAAAAAAAAAAAAAA",
-            "url=https://other.test",
-        ] {
-            let uri = format!("/node/v1/proxy/users?{query}").parse().unwrap();
-            assert!(pagination(&uri, false).is_err(), "accepted {query}");
-        }
-        let uri = "/node/v1/proxy/credentials?limit=50&user_id=AAAAAAAAAAAAAAAAAAAAAA"
-            .parse()
-            .unwrap();
-        let page = pagination(&uri, true).unwrap();
-        assert_eq!(page.limit, 50);
-        assert!(no_query(&"/node/v1/proxy/policy?".parse().unwrap()).is_err());
-    }
-
-    #[test]
-    fn oversized_metadata_is_rejected_before_returning_a_response() {
-        assert!(
-            respond(
-                "AAAAAAAAAAAAAAAAAAAAAA",
-                StatusCode::OK,
-                "x".repeat(MAX_RESPONSE_BYTES)
-            )
-            .is_err()
-        );
-    }
 }

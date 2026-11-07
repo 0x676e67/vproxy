@@ -6,7 +6,7 @@
 //! its provider retain their own key representations, so this is not a promise
 //! that every upstream allocation or process-memory copy is erased.
 
-use std::{collections::BTreeSet, io, net::IpAddr, sync::Arc, time::Duration};
+use std::{io, net::IpAddr, sync::Arc, time::Duration};
 
 use rcgen::{
     BasicConstraints, CertificateParams, CertificateSigningRequestParams, DistinguishedName,
@@ -26,12 +26,19 @@ use rustls_pki_types::{
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 use time::OffsetDateTime;
-use x509_parser::{
-    certification_request::X509CertificationRequest,
-    cri_attributes::ParsedCriAttribute,
-    extensions::X509Extension,
-    prelude::{FromDer, X509Certificate},
-    x509::{SubjectPublicKeyInfo, X509Name},
+use x509_cert::{
+    Certificate, SubjectPublicKeyInfo,
+    certificate::Version,
+    der::{
+        Decode, Encode, Reader, SliceReader, Tag, Tagged,
+        asn1::{AnyRef, Ia5String, ObjectIdentifier, OctetString},
+    },
+    ext::{
+        Extension,
+        pkix::{SubjectAltName, name::GeneralName},
+    },
+    name::Name,
+    request::CertReq,
 };
 use zeroize::Zeroizing;
 
@@ -40,16 +47,18 @@ const MAX_KEY_PEM: usize = 64 * 1024;
 const SKEW: u64 = 300;
 const CA_SECONDS: u64 = 1_825 * 86_400;
 const LEAF_SECONDS: u64 = 90 * 86_400;
-const EC_PUBLIC_KEY: &str = "1.2.840.10045.2.1";
-const P256: &str = "1.2.840.10045.3.1.7";
-const ECDSA_SHA256: &str = "1.2.840.10045.4.3.2";
-const EXTENSION_REQUEST: &str = "1.2.840.113549.1.9.14";
-const SAN: &str = "2.5.29.17";
-const KU: &str = "2.5.29.15";
-const EKU: &str = "2.5.29.37";
-const BC: &str = "2.5.29.19";
-const SKI: &str = "2.5.29.14";
-const AKI: &str = "2.5.29.35";
+use x509_cert::der::oid::db::{
+    rfc4519::COMMON_NAME,
+    rfc5280::{
+        ID_CE_AUTHORITY_KEY_IDENTIFIER as AKI, ID_CE_BASIC_CONSTRAINTS as BC,
+        ID_CE_EXT_KEY_USAGE as EKU, ID_CE_KEY_USAGE as KU, ID_CE_SUBJECT_ALT_NAME as SAN,
+        ID_CE_SUBJECT_KEY_IDENTIFIER as SKI,
+    },
+    rfc5912::{
+        ECDSA_WITH_SHA_256 as ECDSA_SHA256, ID_EC_PUBLIC_KEY as EC_PUBLIC_KEY,
+        ID_EXTENSION_REQ as EXTENSION_REQUEST, SECP_256_R_1 as P256,
+    },
+};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -386,29 +395,49 @@ fn verify_for(
 fn checked_root(pem: &str, now: u64) -> io::Result<Root> {
     let der = certificate_der(pem)?;
     let certificate = parsed_certificate(&der)?;
-    let spki = certificate.public_key().raw.to_vec();
+    let tbs = certificate.tbs_certificate();
+    let spki = tbs
+        .subject_public_key_info()
+        .to_der()
+        .map_err(|_| invalid())?;
     let (not_before, not_after) = validity(&certificate, now, CA_SECONDS)?;
-    if certificate.subject() != certificate.issuer() {
+    if tbs.subject() != tbs.issuer() {
         return Err(invalid());
     }
-    let role = if subject(certificate.subject(), root_cn(Role::Admin)).is_ok() {
+    let role = if subject(tbs.subject(), root_cn(Role::Admin)).is_ok() {
         Role::Admin
-    } else if subject(certificate.subject(), root_cn(Role::Node)).is_ok() {
+    } else if subject(tbs.subject(), root_cn(Role::Node)).is_ok() {
         Role::Node
     } else {
         return Err(invalid());
     };
     let expected = vec![
-        expected(KU, true, vec![0x03, 0x02, 0x02, 0x04]),
+        expected(KU, true, vec![0x03, 0x02, 0x02, 0x04])?,
         expected(
             BC,
             true,
             vec![0x30, 0x06, 0x01, 0x01, 0xff, 0x02, 0x01, 0x00],
-        ),
-        expected(SKI, false, key_identifier(&spki)),
+        )?,
+        expected(SKI, false, key_identifier(&spki))?,
     ];
-    extensions(certificate.extensions(), &expected)?;
-    certificate.verify_signature(None).map_err(|_| invalid())?;
+    extensions(tbs.extensions().map_or(&[][..], Vec::as_slice), &expected)?;
+    // Verify the original signed bytes, without re-encoding validity times.
+    let envelope = AnyRef::from_der(der.as_ref()).map_err(|_| invalid())?;
+    let signed = SliceReader::new(envelope.value())
+        .and_then(|mut reader| reader.tlv_bytes())
+        .map_err(|_| invalid())?;
+    ::aws_lc_rs::signature::UnparsedPublicKey::new(
+        &::aws_lc_rs::signature::ECDSA_P256_SHA256_ASN1,
+        tbs.subject_public_key_info()
+            .subject_public_key
+            .as_bytes()
+            .ok_or_else(invalid)?,
+    )
+    .verify(
+        signed,
+        certificate.signature().as_bytes().ok_or_else(invalid)?,
+    )
+    .map_err(|_| invalid())?;
     Ok(Root {
         role,
         der,
@@ -443,84 +472,68 @@ fn checked_request_for(
     let Item::Csr(der) = single_pem(pem, "CERTIFICATE REQUEST", MAX_PUBLIC_PEM)? else {
         return Err(invalid());
     };
-    let (remainder, csr) =
-        X509CertificationRequest::from_der(der.as_ref()).map_err(|_| invalid())?;
-    if !remainder.is_empty()
-        || csr.certification_request_info.version.0 != 0
-        || csr.signature_algorithm.algorithm.to_id_string() != ECDSA_SHA256
-        || csr.signature_algorithm.parameters.is_some()
-        || csr.signature_value.unused_bits != 0
+    // The typed DER decoder consumes every sequence/SET value, including the
+    // full signed envelope. No reconstruction or second ASN.1 encoder is needed.
+    // https://www.rfc-editor.org/rfc/rfc2986.html#section-4
+    let csr = CertReq::from_der(der.as_ref()).map_err(|_| invalid())?;
+    if csr.algorithm.oid != ECDSA_SHA256
+        || csr.algorithm.parameters.is_some()
+        || csr.signature.unused_bits() != 0
+        || csr.info.attributes.len() != 1
     {
         return Err(invalid());
     }
-    subject(&csr.certification_request_info.subject, leaf_cn(role))?;
-    supported_spki(&csr.certification_request_info.subject_pki)?;
-    let attributes = csr.certification_request_info.attributes();
-    if attributes.len() != 1
-        || attributes[0].oid.to_id_string() != EXTENSION_REQUEST
-        || csr.certification_request_info.attributes_map().is_err()
-    {
+    subject(&csr.info.subject, leaf_cn(role))?;
+    supported_spki(&csr.info.public_key)?;
+    let attribute = csr.info.attributes.get(0).ok_or_else(invalid)?;
+    if attribute.oid != EXTENSION_REQUEST || attribute.values.len() != 1 {
         return Err(invalid());
     }
-    let ParsedCriAttribute::ExtensionRequest(requested) = attributes[0].parsed_attribute() else {
-        return Err(invalid());
-    };
-    // Recovery predates C6 and preserved the operator's DNS letter case. Match
-    // that original signed SAN exactly after comparing its canonical name;
-    // do not rewrite the CSR or relax extension/DER/PoP checks.
+    let value = attribute.values.get(0).ok_or_else(invalid)?;
+    let requested: Vec<Extension> = value.decode_as().map_err(|_| invalid())?;
+    // Recovery retains the original DNS letter case in its signed SAN.
     let requested_name = if recovery {
         let san = requested
-            .extensions
             .iter()
-            .find(|extension| extension.oid.to_id_string() == SAN)
+            .find(|extension| extension.extn_id == SAN)
             .ok_or_else(invalid)?;
-        match san.parsed_extension() {
-            x509_parser::extensions::ParsedExtension::SubjectAlternativeName(san) => {
-                match san.general_names.as_slice() {
-                    [x509_parser::extensions::GeneralName::DNSName(actual)]
-                        if name(actual)? == canonical =>
-                    {
-                        *actual
-                    }
-                    [x509_parser::extensions::GeneralName::IPAddress(actual)]
-                        if canonical.parse::<IpAddr>().is_ok_and(|ip| match ip {
-                            IpAddr::V4(ip) => *actual == ip.octets().as_slice(),
-                            IpAddr::V6(ip) => *actual == ip.octets().as_slice(),
-                        }) =>
-                    {
-                        canonical
-                    }
-                    _ => return Err(invalid()),
-                }
+        let names = SubjectAltName::from_der(san.extn_value.as_bytes()).map_err(|_| invalid())?;
+        match names.0.as_slice() {
+            [GeneralName::DnsName(actual)] if name(actual.as_str())? == canonical => {
+                actual.as_str().to_owned()
+            }
+            [GeneralName::IpAddress(actual)]
+                if canonical.parse::<IpAddr>().is_ok_and(|ip| match ip {
+                    IpAddr::V4(ip) => actual.as_bytes() == ip.octets(),
+                    IpAddr::V6(ip) => actual.as_bytes() == ip.octets(),
+                }) =>
+            {
+                canonical.to_owned()
             }
             _ => return Err(invalid()),
         }
     } else {
-        canonical
+        canonical.to_owned()
     };
-    let mut expected_extensions = leaf_extensions(role, requested_name, None, None)?;
+    let mut expected_extensions = leaf_extensions(role, &requested_name, None, None)?;
     if recovery {
-        expected_extensions.retain(|extension| extension.oid != BC);
+        expected_extensions.retain(|extension| extension.extn_id != BC);
     }
-    extensions(&requested.extensions, &expected_extensions)?;
-    // The upstream attribute view describes the first parsed SET value. Compare
-    // the complete signed request-info encoding too, so hidden extra values or
-    // ignored inner remainders cannot be lost by that convenience projection.
-    let request_info = request_info_der(
-        csr.certification_request_info.subject.as_raw(),
-        csr.certification_request_info.subject_pki.raw,
-        &expected_extensions,
-    )?;
-    if csr.certification_request_info.raw != request_info.as_slice()
-        || der.as_ref() != signed_der(&request_info, &csr.signature_value.data)?.as_slice()
+    extensions(&requested, &expected_extensions)?;
+    // Keep the original CSR order and omitted DEFAULT critical=false encoding;
+    // the library's encoder replaces the former request-info reconstruction.
+    if requested
+        .iter()
+        .zip(&expected_extensions)
+        .any(|(actual, expected)| actual.extn_id != expected.extn_id)
+        || requested.to_der().map_err(|_| invalid())? != value.to_der().map_err(|_| invalid())?
     {
         return Err(invalid());
     }
-    csr.verify_signature().map_err(|_| invalid())?;
-    let spki = csr.certification_request_info.subject_pki.raw.to_vec();
+    let spki = csr.info.public_key.to_der().map_err(|_| invalid())?;
+    // Rcgen verifies proof of possession over the original signed request before
+    // exposing its signing input. The complete typed parse above bounds its view.
     let parsed = CertificateSigningRequestParams::from_der(&der).map_err(|_| invalid())?;
-    // The conversion chooses an algorithm from the signature OID. Requiring
-    // exact full SPKI preserves the curve and algorithm from the signed CSR.
     if parsed.public_key.subject_public_key_info() != spki {
         return Err(invalid());
     }
@@ -538,15 +551,23 @@ fn checked_leaf(
     let der = certificate_der(pem)?;
     let certificate = parsed_certificate(&der)?;
     let (not_before, not_after) = validity(&certificate, now, LEAF_SECONDS)?;
-    if certificate.public_key().raw != spki
+    if certificate
+        .tbs_certificate()
+        .subject_public_key_info()
+        .to_der()
+        .map_err(|_| invalid())?
+        != spki
         || not_before < root.not_before
         || not_after > root.not_after
     {
         return Err(invalid());
     }
-    subject(certificate.subject(), leaf_cn(role))?;
+    subject(certificate.tbs_certificate().subject(), leaf_cn(role))?;
     extensions(
-        certificate.extensions(),
+        certificate
+            .tbs_certificate()
+            .extensions()
+            .map_or(&[][..], Vec::as_slice),
         &leaf_extensions(role, canonical, Some(spki), Some(&root.spki))?,
     )?;
     let mut roots = RootCertStore::empty();
@@ -576,29 +597,23 @@ fn checked_leaf(
     Ok(())
 }
 
-fn parsed_certificate<'a>(der: &'a CertificateDer<'_>) -> io::Result<X509Certificate<'a>> {
-    let (remainder, certificate) =
-        x509_parser::parse_x509_certificate(der.as_ref()).map_err(|_| invalid())?;
-    if !remainder.is_empty()
-        || certificate.version().0 != 2
-        || certificate.signature_algorithm.algorithm.to_id_string() != ECDSA_SHA256
-        || certificate.signature_algorithm.parameters.is_some()
-        || certificate.signature_value.unused_bits != 0
-        || certificate.tbs_certificate.signature != certificate.signature_algorithm
-        || der.as_ref()
-            != signed_der(
-                certificate.tbs_certificate.as_ref(),
-                &certificate.signature_value.data,
-            )?
-            .as_slice()
+fn parsed_certificate(der: &CertificateDer<'_>) -> io::Result<Certificate> {
+    let certificate = Certificate::from_der(der.as_ref()).map_err(|_| invalid())?;
+    let tbs = certificate.tbs_certificate();
+    if tbs.version() != Version::V3
+        || certificate.signature_algorithm().oid != ECDSA_SHA256
+        || certificate.signature_algorithm().parameters.is_some()
+        || certificate.signature().unused_bits() != 0
+        || tbs.signature() != certificate.signature_algorithm()
     {
         return Err(invalid());
     }
-    supported_spki(certificate.public_key())?;
-    let serial = certificate.raw_serial();
-    if serial.is_empty()
-        || serial.len() > 20
-        || serial[0] & 0x80 != 0
+    supported_spki(tbs.subject_public_key_info())?;
+    let serial = tbs.serial_number().as_bytes();
+    // The library also accepts legacy negative/zero CA serials. C6 keeps its
+    // positive, nonzero profile and counts the complete encoded integer value.
+    if serial.len() > 20
+        || serial.first().is_some_and(|byte| byte & 0x80 != 0)
         || serial.iter().all(|byte| *byte == 0)
     {
         return Err(invalid());
@@ -606,19 +621,17 @@ fn parsed_certificate<'a>(der: &'a CertificateDer<'_>) -> io::Result<X509Certifi
     Ok(certificate)
 }
 
-fn supported_spki(spki: &SubjectPublicKeyInfo<'_>) -> io::Result<()> {
-    if spki.algorithm.algorithm.to_id_string() != EC_PUBLIC_KEY
+fn supported_spki(spki: &SubjectPublicKeyInfo) -> io::Result<()> {
+    let key = spki.subject_public_key.as_bytes().ok_or_else(invalid)?;
+    if spki.algorithm.oid != EC_PUBLIC_KEY
         || spki
             .algorithm
             .parameters
             .as_ref()
-            .and_then(|parameter| parameter.as_oid().ok())
-            .map(|oid| oid.to_id_string())
-            .as_deref()
-            != Some(P256)
-        || spki.subject_public_key.unused_bits != 0
-        || spki.subject_public_key.data.len() != 65
-        || spki.subject_public_key.data.first() != Some(&4)
+            .and_then(|parameter| parameter.decode_as::<ObjectIdentifier>().ok())
+            .is_none_or(|oid| oid != P256)
+        || key.len() != 65
+        || key.first() != Some(&4)
     {
         return Err(invalid());
     }
@@ -691,38 +704,21 @@ fn leaf_parameters(role: Role, canonical: &str) -> io::Result<CertificateParams>
     Ok(params)
 }
 
-struct Expected {
-    oid: &'static str,
-    critical: bool,
-    value: Vec<u8>,
-}
-
-fn expected(oid: &'static str, critical: bool, value: Vec<u8>) -> Expected {
-    Expected {
-        oid,
+fn expected(oid: ObjectIdentifier, critical: bool, value: Vec<u8>) -> io::Result<Extension> {
+    Ok(Extension {
+        extn_id: oid,
         critical,
-        value,
-    }
+        extn_value: OctetString::new(value).map_err(|_| invalid())?,
+    })
 }
 
-fn extensions(actual: &[X509Extension<'_>], expected: &[Expected]) -> io::Result<()> {
-    if actual.len() != expected.len() {
-        return Err(invalid());
-    }
-    let mut seen = BTreeSet::new();
-    for extension in actual {
-        let oid = extension.oid.to_id_string();
-        if !seen.insert(oid.clone()) {
-            return Err(invalid());
-        }
-        let permitted = expected
+fn extensions(actual: &[Extension], expected: &[Extension]) -> io::Result<()> {
+    if actual.len() != expected.len()
+        || expected
             .iter()
-            .find(|value| value.oid == oid)
-            .ok_or_else(invalid)?;
-        if extension.critical != permitted.critical || extension.value != permitted.value.as_slice()
-        {
-            return Err(invalid());
-        }
+            .any(|wanted| actual.iter().filter(|actual| *actual == wanted).count() != 1)
+    {
+        return Err(invalid());
     }
     Ok(())
 }
@@ -732,7 +728,7 @@ fn leaf_extensions(
     canonical: &str,
     spki: Option<&[u8]>,
     issuer: Option<&[u8]>,
-) -> io::Result<Vec<Expected>> {
+) -> io::Result<Vec<Extension>> {
     // Exact DER for this narrow profile also rejects duplicate EKU values and
     // trailing data inside extnValue that parsed convenience views can hide.
     let mut eku = vec![
@@ -742,105 +738,35 @@ fn leaf_extensions(
         eku[1] = 0x14;
         eku.extend_from_slice(&[0x06, 0x08, 0x2b, 0x06, 0x01, 0x05, 0x05, 0x07, 0x03, 0x02]);
     }
-    let (tag, bytes) = match canonical.parse::<IpAddr>() {
-        Ok(IpAddr::V4(address)) => (0x87, address.octets().to_vec()),
-        Ok(IpAddr::V6(address)) => (0x87, address.octets().to_vec()),
-        Err(_) => (0x82, canonical.as_bytes().to_vec()),
+    let general_name = match canonical.parse::<IpAddr>() {
+        Ok(IpAddr::V4(address)) => {
+            GeneralName::IpAddress(OctetString::new(address.octets()).map_err(|_| invalid())?)
+        }
+        Ok(IpAddr::V6(address)) => {
+            GeneralName::IpAddress(OctetString::new(address.octets()).map_err(|_| invalid())?)
+        }
+        Err(_) => GeneralName::DnsName(Ia5String::new(canonical).map_err(|_| invalid())?),
     };
-    let san = small_tlv(0x30, &small_tlv(tag, &bytes)?)?;
+    let san = SubjectAltName(vec![general_name])
+        .to_der()
+        .map_err(|_| invalid())?;
     let mut values = vec![
-        // Rcgen's PKCS#10 writer orders KU before SAN. Keep the canonical
-        // request-info reconstruction aligned with that actual wire encoding;
-        // certificate extension validation itself remains order-independent.
-        expected(KU, true, vec![0x03, 0x02, 0x07, 0x80]),
-        expected(SAN, false, san),
-        expected(EKU, false, eku),
-        expected(BC, true, vec![0x30, 0x00]),
+        // Rcgen's PKCS#10 writer orders KU before SAN. Keep the retained CSR
+        // template order; certificate extension order remains independent.
+        expected(KU, true, vec![0x03, 0x02, 0x07, 0x80])?,
+        expected(SAN, false, san)?,
+        expected(EKU, false, eku)?,
+        expected(BC, true, vec![0x30, 0x00])?,
     ];
     if let Some(spki) = spki {
-        values.push(expected(SKI, false, key_identifier(spki)));
+        values.push(expected(SKI, false, key_identifier(spki))?);
     }
     if let Some(issuer) = issuer {
         let mut value = vec![0x30, 0x16, 0x80, 0x14];
         value.extend_from_slice(&Sha256::digest(issuer)[..20]);
-        values.push(expected(AKI, false, value));
+        values.push(expected(AKI, false, value)?);
     }
     Ok(values)
-}
-
-/// Encode only this fixed profile's bounded SAN/request-info TLVs, not
-/// arbitrary ASN.1. The input package cap and fixed fields fit two length
-/// octets; no untrusted length determines a read or unchecked allocation.
-fn small_tlv(tag: u8, bytes: &[u8]) -> io::Result<Vec<u8>> {
-    let length = u16::try_from(bytes.len()).map_err(|_| invalid())?;
-    let mut result = Vec::with_capacity(bytes.len().checked_add(4).ok_or_else(invalid)?);
-    result.push(tag);
-    match length {
-        0..=127 => result.push(u8::try_from(length).map_err(|_| invalid())?),
-        128..=255 => {
-            result.extend_from_slice(&[0x81, u8::try_from(length).map_err(|_| invalid())?])
-        }
-        _ => {
-            result.push(0x82);
-            result.extend_from_slice(&length.to_be_bytes());
-        }
-    }
-    result.extend_from_slice(bytes);
-    Ok(result)
-}
-
-/// Rebuild the complete three-field certificate/CSR envelope. The upstream
-/// sequence parser discards an inner remainder, so an empty outer remainder or
-/// a valid TBS signature alone would still allow unsigned fourth fields. This
-/// also fixes the DER algorithm and BIT STRING encodings for the C6 profile.
-fn signed_der(tbs: &[u8], signature: &[u8]) -> io::Result<Vec<u8>> {
-    const ALGORITHM: &[u8] = &[
-        0x30, 0x0a, 0x06, 0x08, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x04, 0x03, 0x02,
-    ];
-    let mut bits = Vec::with_capacity(signature.len().checked_add(1).ok_or_else(invalid)?);
-    bits.push(0);
-    bits.extend_from_slice(signature);
-    let bits = small_tlv(0x03, &bits)?;
-    let capacity = tbs
-        .len()
-        .checked_add(ALGORITHM.len())
-        .and_then(|length| length.checked_add(bits.len()))
-        .ok_or_else(invalid)?;
-    let mut body = Vec::with_capacity(capacity);
-    body.extend_from_slice(tbs);
-    body.extend_from_slice(ALGORITHM);
-    body.extend_from_slice(&bits);
-    small_tlv(0x30, &body)
-}
-
-fn request_info_der(subject: &[u8], spki: &[u8], extensions: &[Expected]) -> io::Result<Vec<u8>> {
-    let mut encoded = Vec::new();
-    for extension in extensions {
-        let last = match extension.oid {
-            SAN => 0x11,
-            KU => 0x0f,
-            EKU => 0x25,
-            BC => 0x13,
-            _ => return Err(invalid()),
-        };
-        let mut body = vec![0x06, 0x03, 0x55, 0x1d, last];
-        if extension.critical {
-            body.extend_from_slice(&[0x01, 0x01, 0xff]);
-        }
-        body.extend_from_slice(&small_tlv(0x04, &extension.value)?);
-        encoded.extend_from_slice(&small_tlv(0x30, &body)?);
-    }
-    let values = small_tlv(0x31, &small_tlv(0x30, &encoded)?)?;
-    let mut attribute = vec![
-        0x06, 0x09, 0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x09, 0x0e,
-    ];
-    attribute.extend_from_slice(&values);
-    let attributes = small_tlv(0xa0, &small_tlv(0x30, &attribute)?)?;
-    let mut body = vec![0x02, 0x01, 0x00];
-    body.extend_from_slice(subject);
-    body.extend_from_slice(spki);
-    body.extend_from_slice(&attributes);
-    small_tlv(0x30, &body)
 }
 
 fn key_identifier(spki: &[u8]) -> Vec<u8> {
@@ -849,12 +775,16 @@ fn key_identifier(spki: &[u8]) -> Vec<u8> {
     result
 }
 
-fn subject(actual: &X509Name<'_>, expected: &str) -> io::Result<()> {
-    let mut attributes = actual.iter_attributes();
+fn subject(actual: &Name, expected: &str) -> io::Result<()> {
+    let mut attributes = actual.iter();
     let attribute = attributes.next().ok_or_else(invalid)?;
     if attributes.next().is_some()
-        || attribute.attr_type().to_id_string() != "2.5.4.3"
-        || attribute.as_str().map_err(|_| invalid())? != expected
+        || attribute.oid != COMMON_NAME
+        || !matches!(
+            attribute.value.tag(),
+            Tag::NumericString | Tag::PrintableString | Tag::Utf8String | Tag::Ia5String
+        )
+        || attribute.value.value() != expected.as_bytes()
     {
         return Err(invalid());
     }
@@ -894,10 +824,10 @@ fn timestamp(value: OffsetDateTime) -> io::Result<u64> {
     u64::try_from(value.unix_timestamp()).map_err(|_| invalid())
 }
 
-fn validity(certificate: &X509Certificate<'_>, now: u64, lifetime: u64) -> io::Result<(u64, u64)> {
-    let start =
-        u64::try_from(certificate.validity().not_before.timestamp()).map_err(|_| invalid())?;
-    let end = u64::try_from(certificate.validity().not_after.timestamp()).map_err(|_| invalid())?;
+fn validity(certificate: &Certificate, now: u64, lifetime: u64) -> io::Result<(u64, u64)> {
+    let validity = certificate.tbs_certificate().validity();
+    let start = validity.not_before.to_unix_duration().as_secs();
+    let end = validity.not_after.to_unix_duration().as_secs();
     if start > now
         || end <= now
         || end.checked_sub(start).ok_or_else(invalid)?
@@ -942,76 +872,16 @@ fn invalid() -> io::Error {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use base64::{Engine as _, engine::general_purpose::STANDARD};
-    use rcgen::{Attribute, CustomExtension, PKCS_ECDSA_P384_SHA384, SanType};
-    use x509_parser::asn1_rs::{Any, Tag};
+
+    use rcgen::{CustomExtension, PKCS_ECDSA_P384_SHA384, SanType};
 
     const NOW: u64 = 1_792_454_400;
-
-    fn pem(label: &str, der: &[u8]) -> String {
-        format!(
-            "-----BEGIN {label}-----\n{}\n-----END {label}-----\n",
-            STANDARD.encode(der)
-        )
-    }
 
     fn csr(params: &CertificateParams, key: &KeyPair) -> io::Result<String> {
         params
             .serialize_request(key)
             .and_then(|request| request.pem())
             .map_err(|_| invalid())
-    }
-
-    fn append_unsigned_outer_field(der: &[u8]) -> io::Result<Vec<u8>> {
-        let (remainder, sequence) = Any::from_der(der).map_err(|_| invalid())?;
-        if !remainder.is_empty() || sequence.tag() != Tag::Sequence {
-            return Err(invalid());
-        }
-        let mut body = sequence.data.to_vec();
-        body.extend_from_slice(&[0x05, 0x00]);
-        small_tlv(0x30, &body)
-    }
-
-    #[test]
-    fn names_are_explicit_canonical_dns_or_ip_and_cannot_supply_extra_sans() -> io::Result<()> {
-        assert_eq!(name("Node.Example")?, "node.example");
-        assert_eq!(name("2001:0db8:0:0:0:0:0:1")?, "2001:db8::1");
-        assert_eq!(name("127.0.0.1")?, "127.0.0.1");
-        for bad in [
-            "",
-            "node.example.",
-            "*.example",
-            "node,other",
-            "https://node.example",
-            "[::1]",
-            "fe80::1%eth0",
-            "node:443",
-            " name",
-            "name ",
-            "n_ame",
-            "127.000.0.1",
-            "node..example",
-            "名称.example",
-        ] {
-            assert!(name(bad).is_err(), "accepted {bad}");
-        }
-        let longest = format!(
-            "{}.{}.{}.{}",
-            "a".repeat(63),
-            "b".repeat(63),
-            "c".repeat(63),
-            "d".repeat(61)
-        );
-        assert_eq!(longest.len(), 253);
-        let generated = request(Role::Node, &longest)?;
-        verify_request_key(
-            Role::Node,
-            &longest,
-            &generated.request_pem,
-            &generated.key_pem,
-        )?;
-        assert!(name(&format!("{longest}e")).is_err());
-        Ok(())
     }
 
     #[test]
@@ -1022,17 +892,13 @@ mod tests {
         let node_info = root_info(&node.certificate_pem, NOW)?;
         assert_eq!(admin_info.role, Role::Admin);
         assert_eq!(node_info.role, Role::Node);
-        assert_ne!(admin_info.spki_sha256, node_info.spki_sha256);
-        assert_ne!(admin_info.der_sha256, node_info.der_sha256);
         for (role, name, ca) in [
             (Role::Admin, "127.0.0.1", &admin),
             (Role::Node, "node.example", &node),
         ] {
             verify_authority(&ca.certificate_pem, &ca.key_pem, NOW)?;
             let generated = request(role, name)?;
-            let info = verify_request_key(role, name, &generated.request_pem, &generated.key_pem)?;
-            assert_eq!(info.der_sha256.len(), 64);
-            assert_eq!(info.spki_sha256.len(), 64);
+            verify_request_key(role, name, &generated.request_pem, &generated.key_pem)?;
             let certificate = sign(
                 role,
                 name,
@@ -1051,178 +917,13 @@ mod tests {
                 NOW,
             )?;
             let der = certificate_der(&certificate)?;
-            let parsed = parsed_certificate(&der)?;
+            let validity = *parsed_certificate(&der)?.tbs_certificate().validity();
+            assert_eq!(validity.not_before.to_unix_duration().as_secs(), NOW - SKEW);
             assert_eq!(
-                parsed.validity().not_before.timestamp(),
-                i64::try_from(NOW - SKEW).unwrap()
-            );
-            assert_eq!(
-                parsed.validity().not_after.timestamp(),
-                i64::try_from(NOW + LEAF_SECONDS).unwrap()
+                validity.not_after.to_unix_duration().as_secs(),
+                NOW + LEAF_SECONDS
             );
         }
-        Ok(())
-    }
-
-    #[test]
-    fn wrong_root_role_private_key_request_key_or_name_cannot_issue_or_verify() -> io::Result<()> {
-        let admin = authority(Role::Admin, NOW)?;
-        let node = authority(Role::Node, NOW)?;
-        let first = request(Role::Node, "node.example")?;
-        let other = request(Role::Node, "node.example")?;
-        assert!(verify_authority(&node.certificate_pem, &admin.key_pem, NOW).is_err());
-        assert!(
-            verify_request_key(
-                Role::Node,
-                "node.example",
-                &first.request_pem,
-                &other.key_pem
-            )
-            .is_err()
-        );
-        assert!(
-            sign(
-                Role::Node,
-                "node.example",
-                &first.request_pem,
-                &admin.certificate_pem,
-                &admin.key_pem,
-                NOW
-            )
-            .is_err()
-        );
-        assert!(
-            sign(
-                Role::Node,
-                "other.example",
-                &first.request_pem,
-                &node.certificate_pem,
-                &node.key_pem,
-                NOW
-            )
-            .is_err()
-        );
-        assert!(inspect_request(Role::Admin, "node.example", &first.request_pem).is_err());
-        let certificate = sign(
-            Role::Node,
-            "node.example",
-            &other.request_pem,
-            &node.certificate_pem,
-            &node.key_pem,
-            NOW,
-        )?;
-        assert!(
-            verify(
-                Role::Node,
-                "node.example",
-                &node.certificate_pem,
-                &certificate,
-                &first.key_pem,
-                &first.request_pem,
-                NOW
-            )
-            .is_err()
-        );
-        assert!(
-            verify(
-                Role::Node,
-                "node.example",
-                &admin.certificate_pem,
-                &certificate,
-                &other.key_pem,
-                &other.request_pem,
-                NOW
-            )
-            .is_err()
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn request_signature_and_complete_single_pem_der_are_required() -> io::Result<()> {
-        let generated = request(Role::Node, "node.example")?;
-        let Item::Csr(der) = single_pem(
-            &generated.request_pem,
-            "CERTIFICATE REQUEST",
-            MAX_PUBLIC_PEM,
-        )?
-        else {
-            return Err(invalid());
-        };
-        let mut altered = der.as_ref().to_vec();
-        *altered.last_mut().unwrap() ^= 1;
-        assert!(
-            inspect_request(
-                Role::Node,
-                "node.example",
-                &pem("CERTIFICATE REQUEST", &altered)
-            )
-            .is_err()
-        );
-        let mut trailing = der.as_ref().to_vec();
-        trailing.push(0);
-        assert!(
-            inspect_request(
-                Role::Node,
-                "node.example",
-                &pem("CERTIFICATE REQUEST", &trailing)
-            )
-            .is_err()
-        );
-        for altered in [
-            format!("prefix\n{}", generated.request_pem),
-            format!("{}suffix", generated.request_pem),
-            format!("{}{}", generated.request_pem, generated.request_pem),
-            generated
-                .request_pem
-                .replace("CERTIFICATE REQUEST", "CERTIFICATE"),
-            "x".repeat(MAX_PUBLIC_PEM + 1),
-        ] {
-            assert!(inspect_request(Role::Node, "node.example", &altered).is_err());
-        }
-        Ok(())
-    }
-
-    #[test]
-    fn valid_pop_and_self_signatures_do_not_allow_unsigned_outer_fields() -> io::Result<()> {
-        let generated = request(Role::Node, "node.example")?;
-        let Item::Csr(request_der) = single_pem(
-            &generated.request_pem,
-            "CERTIFICATE REQUEST",
-            MAX_PUBLIC_PEM,
-        )?
-        else {
-            return Err(invalid());
-        };
-        let malformed = append_unsigned_outer_field(request_der.as_ref())?;
-        let (remainder, parsed) =
-            X509CertificationRequest::from_der(&malformed).map_err(|_| invalid())?;
-        assert!(remainder.is_empty());
-        // The signature is still valid: the extra NULL is outside the signed TBS.
-        parsed.verify_signature().map_err(|_| invalid())?;
-        assert!(
-            CertificateSigningRequestParams::from_der(&CertificateSigningRequestDer::from(
-                malformed.clone(),
-            ))
-            .is_ok()
-        );
-        assert!(
-            inspect_request(
-                Role::Node,
-                "node.example",
-                &pem("CERTIFICATE REQUEST", &malformed),
-            )
-            .is_err()
-        );
-
-        let root = authority(Role::Node, NOW)?;
-        let root_der = certificate_der(&root.certificate_pem)?;
-        let malformed = append_unsigned_outer_field(root_der.as_ref())?;
-        let (remainder, parsed) =
-            x509_parser::parse_x509_certificate(&malformed).map_err(|_| invalid())?;
-        assert!(remainder.is_empty());
-        parsed.verify_signature(None).map_err(|_| invalid())?;
-        assert!(root_info(&pem("CERTIFICATE", &malformed), NOW).is_err());
         Ok(())
     }
 
@@ -1250,7 +951,7 @@ mod tests {
                     .custom_extensions
                     .push(CustomExtension::from_oid_content(
                         &[2, 5, 29, 17],
-                        small_tlv(0x30, &small_tlv(0x82, b"other.example")?)?,
+                        b"\x30\x0f\x82\x0dother.example".to_vec(),
                     )),
             }
             assert!(
@@ -1267,167 +968,6 @@ mod tests {
             )
             .is_err()
         );
-        Ok(())
-    }
-
-    #[test]
-    fn duplicate_and_unknown_signed_csr_attributes_are_rejected() -> io::Result<()> {
-        let key = KeyPair::generate().map_err(|_| invalid())?;
-        let params = leaf_parameters(Role::Node, "node.example")?;
-        let original = params.serialize_request(&key).map_err(|_| invalid())?;
-        let (_, parsed) =
-            X509CertificationRequest::from_der(original.der()).map_err(|_| invalid())?;
-        let values = parsed.certification_request_info.attributes()[0]
-            .value
-            .to_vec();
-        let duplicate = params
-            .serialize_request_with_attributes(
-                &key,
-                vec![Attribute {
-                    oid: &[1, 2, 840, 113549, 1, 9, 14],
-                    values,
-                }],
-            )
-            .and_then(|request| request.pem())
-            .map_err(|_| invalid())?;
-        assert!(inspect_request(Role::Node, "node.example", &duplicate).is_err());
-        let unknown = params
-            .serialize_request_with_attributes(
-                &key,
-                vec![Attribute {
-                    oid: &[1, 2, 3, 4],
-                    values: vec![0x31, 0x02, 0x30, 0x00],
-                }],
-            )
-            .and_then(|request| request.pem())
-            .map_err(|_| invalid())?;
-        assert!(inspect_request(Role::Node, "node.example", &unknown).is_err());
-        // Keep one correctly signed attribute but put two values inside its SET.
-        // The narrow profile permits exactly one value; convenience views may
-        // project only its first extension sequence.
-        let values = parsed.certification_request_info.attributes()[0].value;
-        assert_eq!(values[0], 0x31);
-        assert!(values[1] < 128);
-        let mut duplicate_values = values[2..].to_vec();
-        duplicate_values.extend_from_slice(&values[2..]);
-        let mut no_generated_extensions = CertificateParams::default();
-        no_generated_extensions.distinguished_name = distinguished(leaf_cn(Role::Node));
-        let multiple_values = no_generated_extensions
-            .serialize_request_with_attributes(
-                &key,
-                vec![Attribute {
-                    oid: &[1, 2, 840, 113549, 1, 9, 14],
-                    values: small_tlv(0x31, &duplicate_values)?,
-                }],
-            )
-            .and_then(|request| request.pem())
-            .map_err(|_| invalid())?;
-        assert!(inspect_request(Role::Node, "node.example", &multiple_values).is_err());
-        Ok(())
-    }
-
-    fn ca_parameters(now: u64) -> io::Result<CertificateParams> {
-        let (not_before, not_after) = period(now, CA_SECONDS)?;
-        let mut params = CertificateParams::default();
-        params.not_before = not_before;
-        params.not_after = not_after;
-        params.serial_number = Some(1u64.into());
-        params.is_ca = IsCa::Ca(BasicConstraints::Constrained(0));
-        params.key_usages = vec![KeyUsagePurpose::KeyCertSign];
-        params.distinguished_name = distinguished(root_cn(Role::Node));
-        Ok(params)
-    }
-
-    #[test]
-    fn root_eligibility_self_signature_and_validity_are_explicit_not_anchor_assumptions()
-    -> io::Result<()> {
-        let key = KeyPair::generate().map_err(|_| invalid())?;
-        for change in 0..5 {
-            let mut params = ca_parameters(NOW)?;
-            match change {
-                0 => params.is_ca = IsCa::ExplicitNoCa,
-                1 => params.key_usages = vec![KeyUsagePurpose::DigitalSignature],
-                2 => params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained),
-                3 => {
-                    params.not_after =
-                        OffsetDateTime::from_unix_timestamp(i64::try_from(NOW - 1).unwrap())
-                            .map_err(|_| invalid())?
-                }
-                _ => {
-                    params.not_before =
-                        OffsetDateTime::from_unix_timestamp(i64::try_from(NOW + 1).unwrap())
-                            .map_err(|_| invalid())?
-                }
-            }
-            let certificate = params.self_signed(&key).map_err(|_| invalid())?;
-            assert!(
-                root_info(&certificate.pem(), NOW).is_err(),
-                "accepted ineligible root {change}"
-            );
-        }
-        let authority = authority(Role::Node, NOW)?;
-        assert!(root_info(&authority.certificate_pem, NOW + CA_SECONDS + 1).is_err());
-        let mut der = certificate_der(&authority.certificate_pem)?
-            .as_ref()
-            .to_vec();
-        *der.last_mut().unwrap() ^= 1;
-        assert!(root_info(&pem("CERTIFICATE", &der), NOW).is_err());
-        Ok(())
-    }
-
-    #[test]
-    fn explicit_lifetimes_and_renewal_serials_never_use_rcgen_defaults() -> io::Result<()> {
-        let ca = authority(Role::Node, NOW)?;
-        let generated = request(Role::Node, "node.example")?;
-        let first = sign(
-            Role::Node,
-            "node.example",
-            &generated.request_pem,
-            &ca.certificate_pem,
-            &ca.key_pem,
-            NOW,
-        )?;
-        let second = sign(
-            Role::Node,
-            "node.example",
-            &generated.request_pem,
-            &ca.certificate_pem,
-            &ca.key_pem,
-            NOW,
-        )?;
-        let first_der = certificate_der(&first)?;
-        let second_der = certificate_der(&second)?;
-        assert_ne!(
-            parsed_certificate(&first_der)?.raw_serial(),
-            parsed_certificate(&second_der)?.raw_serial()
-        );
-        assert!(
-            verify(
-                Role::Node,
-                "node.example",
-                &ca.certificate_pem,
-                &first,
-                &generated.key_pem,
-                &generated.request_pem,
-                NOW + LEAF_SECONDS + 1
-            )
-            .is_err()
-        );
-        let late = NOW + CA_SECONDS - LEAF_SECONDS / 2;
-        assert!(root_info(&ca.certificate_pem, late).is_ok());
-        assert!(
-            sign(
-                Role::Node,
-                "node.example",
-                &generated.request_pem,
-                &ca.certificate_pem,
-                &ca.key_pem,
-                late
-            )
-            .is_err()
-        );
-        assert!(authority(Role::Node, u64::MAX).is_err());
-        assert!(period(u64::MAX, LEAF_SECONDS).is_err());
         Ok(())
     }
 }

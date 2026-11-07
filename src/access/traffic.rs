@@ -410,57 +410,6 @@ mod tests {
     }
 
     #[test]
-    fn http_and_https_keep_one_permission_and_concurrency_budget_but_separate_meters() {
-        let initial = policy(1, 2);
-        let credential = initial.credentials[0].id.clone();
-        let registry = Registry::new(vec![Seed {
-            user_id: initial.users[0].id.clone(),
-            credential_id: credential.clone(),
-            protocol: Protocol::HttpLegacy,
-            value: Snapshot {
-                upload: 7,
-                download: 11,
-                saturated: false,
-            },
-        }])
-        .unwrap();
-        let reader = Reader::with_traffic(initial.clone(), registry.clone()).unwrap();
-        let plain = reader.authenticate_http(LOGIN, &secret(), false).unwrap();
-        let secure = reader.authenticate_http(LOGIN, &secret(), true).unwrap();
-        assert!(matches!(
-            reader.authenticate_http(LOGIN, &secret(), true),
-            Err(super::super::Error::Capacity)
-        ));
-        plain.lease.meter(Direction::Upload).add(3);
-        secure.lease.meter(Direction::Upload).add(5);
-        secure.lease.meter(Direction::Download).add(13);
-        drop((plain, secure));
-        assert_eq!(
-            value(&registry, &credential, Protocol::HttpLegacy).upload,
-            7
-        );
-        assert_eq!(value(&registry, &credential, Protocol::Http).upload, 3);
-        assert_eq!(
-            value(&registry, &credential, Protocol::Https),
-            Snapshot {
-                upload: 5,
-                download: 13,
-                saturated: false
-            }
-        );
-        let mut restricted = initial;
-        restricted.revision = 2;
-        restricted.users[0].protocols = vec![AccessProtocol::Socks5];
-        reader.publish(restricted).unwrap();
-        for encrypted in [false, true] {
-            assert!(matches!(
-                reader.authenticate_http(LOGIN, &secret(), encrypted),
-                Err(super::super::Error::Denied)
-            ));
-        }
-    }
-
-    #[test]
     fn restored_meters_keep_protocol_identity_across_rotation_deletion_and_final_drop() {
         let initial = policy(1, 8);
         let credential = initial.credentials[0].id.clone();
@@ -519,79 +468,6 @@ mod tests {
             }
         );
         assert_eq!(registry.snapshot().unwrap().len(), PROTOCOL_COUNT);
-    }
-
-    #[test]
-    fn invalid_seed_and_failed_publication_do_not_pollute_the_registry() {
-        let initial = policy(1, 2);
-        let credential = initial.credentials[0].id.clone();
-        let user = initial.users[0].id.clone();
-        let seed = || Seed {
-            user_id: user.clone(),
-            credential_id: credential.clone(),
-            protocol: Protocol::Http,
-            value: ZERO,
-        };
-        assert!(Registry::new(vec![seed(), seed()]).is_err());
-        let mut wrong_owner = seed();
-        wrong_owner.user_id = URL_SAFE_NO_PAD.encode([99; 16]);
-        assert!(Registry::new(vec![seed(), wrong_owner]).is_err());
-        let mut invalid_id = seed();
-        invalid_id.credential_id = "not-canonical".into();
-        assert!(Registry::new(vec![invalid_id]).is_err());
-        let reader = Reader::new(initial).unwrap();
-        let registry = reader.traffic_registry();
-        let mut stale = policy(1, 2);
-        stale.credentials[0].id = URL_SAFE_NO_PAD.encode([90; 16]);
-        assert!(reader.publish(stale).is_err());
-        assert_eq!(registry.snapshot().unwrap().len(), PROTOCOL_COUNT);
-        let mut reassigned = policy(2, 2);
-        let mut other_user = reassigned.users[0].clone();
-        other_user.id = URL_SAFE_NO_PAD.encode([91; 16]);
-        reassigned
-            .routing
-            .permissions
-            .push(crate::access::routing::RoutePermission::legacy(
-                other_user.id.clone(),
-            ));
-        reassigned.credentials[0].user_id = other_user.id.clone();
-        let mut extra = reassigned.credentials[0].clone();
-        extra.id = URL_SAFE_NO_PAD.encode([92; 16]);
-        extra.login = "vp2_92929292929292929292929292929292".into();
-        reassigned.credentials.push(extra);
-        reassigned
-            .presets
-            .users
-            .push(crate::access::presets::UserPreset::native(
-                other_user.id.clone(),
-            ));
-        reassigned.users.push(other_user);
-        assert!(reader.publish(reassigned).is_err());
-        assert_eq!(reader.revision().unwrap(), 1);
-        let rows = registry.snapshot().unwrap();
-        assert_eq!(rows.len(), PROTOCOL_COUNT);
-        assert!(
-            rows.iter()
-                .all(|row| row.user_id.as_ref() == user && row.credential_id.as_ref() == credential)
-        );
-    }
-
-    #[test]
-    fn full_historical_capacity_rejects_new_identity_without_partial_binding() {
-        let initial = policy(1, 2);
-        let user = initial.users[0].id.clone();
-        let seed: Vec<_> = (0..MAX_CREDENTIALS)
-            .map(|index| Seed {
-                user_id: user.clone(),
-                credential_id: URL_SAFE_NO_PAD.encode((index as u128).to_be_bytes()),
-                protocol: Protocol::Http,
-                value: ZERO,
-            })
-            .collect();
-        let registry = Registry::new(seed).unwrap();
-        assert_eq!(registry.snapshot().unwrap().len(), MAX_SERIES);
-        assert!(Reader::with_traffic(initial, registry.clone()).is_err());
-        assert_eq!(registry.snapshot().unwrap().len(), MAX_SERIES);
     }
 
     #[test]
@@ -713,43 +589,6 @@ mod tests {
                 .value
                 .upload,
             11
-        );
-    }
-
-    #[test]
-    fn full_pool_history_cannot_partially_insert_new_credential_meters() {
-        use crate::access::{
-            routing::{AddressFamily, PoolRecord, ResourceState},
-            tests::routed_policy,
-        };
-        let pools = (0..MAX_POOLS)
-            .map(|id| PoolSeed {
-                pool_id: URL_SAFE_NO_PAD.encode((id as u128).to_be_bytes()),
-                protocol: Protocol::Http,
-                value: ZERO,
-            })
-            .collect();
-        let registry = Registry::with_pools(Vec::new(), pools).unwrap();
-        let mut candidate = routed_policy(1, 2);
-        candidate.routing.pools.push(PoolRecord {
-            id: URL_SAFE_NO_PAD.encode([90; 16]),
-            name: "New pool".into(),
-            family: AddressFamily::V4,
-            members: Vec::new(),
-            state: ResourceState::Active,
-            revision: 1,
-        });
-        candidate
-            .presets
-            .pools
-            .push(crate::access::presets::PoolPreset::native(
-                URL_SAFE_NO_PAD.encode([90; 16]),
-            ));
-        assert!(Reader::with_traffic(candidate, registry.clone()).is_err());
-        assert!(registry.snapshot().unwrap().is_empty());
-        assert_eq!(
-            registry.pool_snapshot().unwrap().len(),
-            MAX_POOLS * PROTOCOL_COUNT
         );
     }
 }

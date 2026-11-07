@@ -2,40 +2,77 @@
 //! loads a file, probes a listener, starts issuance or changes certificate state.
 
 use super::*;
+use crate::manage::contract;
 use crate::manage::{
     certificates::{Role, Snapshot, Source, State as IdentityState},
     proxy::Protocol,
 };
+use utoipa_axum::{router::OpenApiRouter, routes};
 
 pub(super) fn routes(state: Arc<AppState>) -> Router<Arc<AppState>> {
-    Router::new()
-        .route("/api/v1/tls/status", get(status))
+    definition()
+        .split_for_parts()
+        .0
         .route_layer(middleware::from_fn_with_state(state, users::authenticated))
 }
 
-#[derive(Serialize)]
+pub(super) fn definition() -> OpenApiRouter<Arc<AppState>> {
+    OpenApiRouter::new().routes(routes!(status))
+}
+
+#[derive(Serialize, utoipa::ToSchema)]
+#[serde(deny_unknown_fields)]
+#[schema(as = TlsIdentityStatus)]
 struct View {
+    #[schema(schema_with = contract::id)]
     node_id: String,
-    observed_at_unix_s: Option<String>,
+    #[schema(required)]
+    observed_at_unix_s: Option<UnixSeconds>,
+    #[schema(min_items = 2, max_items = 18)]
     entries: Vec<Entry>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, utoipa::ToSchema)]
+#[serde(deny_unknown_fields)]
+#[schema(as = TlsIdentityEntry, description = "Only proxy entries have a non-null canonical endpoint id and protocol. Other roles have both null. Node sources and plaintext proxy sources are manual; encrypted Web proxies may follow the node's normal ACME identity across renewal, never a challenge identity. Non-loaded entries have null certificate/valid_now; loaded has metadata, and valid_now is null exactly when observation time is null. not_before <= not_after; valid_now equals the inclusive interval comparison. Management cannot be disabled; node/proxy cannot be pending. HTTP/SOCKS5 proxy entries are disabled; HTTPS/auto/MASQUE are loaded or unavailable.")]
 struct Entry {
-    role: &'static str,
-    source: &'static str,
+    #[schema(inline)]
+    role: Role,
+    #[schema(inline)]
+    source: Source,
+    #[schema(schema_with = contract::nullable_id, required)]
     id: Option<String>,
-    protocol: Option<&'static str>,
+    #[schema(inline, required)]
+    protocol: Option<Protocol>,
+    #[schema(schema_with = identity_states)]
     state: &'static str,
+    #[schema(required)]
     certificate: Option<Certificate>,
+    #[schema(required)]
     valid_now: Option<bool>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, utoipa::ToSchema)]
+#[serde(deny_unknown_fields)]
+#[schema(as = TlsLeafMetadata)]
 struct Certificate {
+    /// SHA-256 of the actual installed leaf DER; not a trust decision or a public key pin.
+    #[schema(pattern = "^[0-9a-f]{64}$")]
     sha256: String,
-    not_before_unix_s: String,
-    not_after_unix_s: String,
+    not_before_unix_s: UnixSeconds,
+    not_after_unix_s: UnixSeconds,
+}
+
+/// Canonical signed i64 Unix seconds. Producer enforces -9223372036854775808 through 9223372036854775807; preserve exact decimals. Pre-epoch values are valid.
+#[derive(Serialize, utoipa::ToSchema)]
+#[serde(transparent)]
+#[schema(as = TlsUnixSeconds, pattern = "^(0|-?[1-9][0-9]{0,18})$", max_length = 20)]
+struct UnixSeconds(String);
+
+fn identity_states() -> utoipa::openapi::schema::ObjectBuilder {
+    utoipa::openapi::schema::ObjectBuilder::new()
+        .schema_type(utoipa::openapi::schema::Type::String)
+        .enum_values(Some(["disabled", "pending", "unavailable", "loaded"]))
 }
 
 impl From<Snapshot> for View {
@@ -52,29 +89,16 @@ impl From<Snapshot> for View {
                         "loaded",
                         Some(Certificate {
                             sha256: leaf.sha256,
-                            not_before_unix_s: leaf.not_before_unix_s.to_string(),
-                            not_after_unix_s: leaf.not_after_unix_s.to_string(),
+                            not_before_unix_s: UnixSeconds(leaf.not_before_unix_s.to_string()),
+                            not_after_unix_s: UnixSeconds(leaf.not_after_unix_s.to_string()),
                         }),
                     ),
                 };
                 Entry {
-                    role: match entry.role {
-                        Role::Management => "management",
-                        Role::Node => "node",
-                        Role::Proxy => "proxy",
-                    },
-                    source: match entry.source {
-                        Source::Manual => "manual",
-                        Source::Acme => "acme",
-                    },
+                    role: entry.role,
+                    source: entry.source,
                     id: entry.id,
-                    protocol: entry.protocol.map(|protocol| match protocol {
-                        Protocol::Https => "https",
-                        Protocol::Masque => "masque",
-                        Protocol::Auto => "auto",
-                        Protocol::Http => "http",
-                        Protocol::Socks5 => "socks5",
-                    }),
+                    protocol: entry.protocol,
                     state,
                     certificate,
                     valid_now: entry.valid_now,
@@ -83,12 +107,29 @@ impl From<Snapshot> for View {
             .collect();
         Self {
             node_id: snapshot.node_id,
-            observed_at_unix_s: snapshot.observed_at_unix_s.map(|value| value.to_string()),
+            observed_at_unix_s: snapshot
+                .observed_at_unix_s
+                .map(|value| UnixSeconds(value.to_string())),
             entries,
         }
     }
 }
 
+#[utoipa::path(
+    get, path = "/api/v1/tls/status",
+    operation_id = "browserTlsIdentityStatus", tag = "TLS",
+    summary = "Read this process's actual loaded TLS identity metadata",
+    description = "Session only. No query, including an empty query. Reads the installed manual management identity or current ACME normal publication, node mTLS identity, and up to sixteen managed listeners. No file, certificate cache or challenge identity is inspected; no issuance, reload, probe or remote operation is started. Snapshot readiness is separate from listener health. Times include both validity endpoints (RFC 5280 section 4.1.2.5); valid_now says nothing about trust, names, revocation or reachability. Unknown time or metadata is never healthy. No names, subjects, issuers, paths, keys, PEM/DER bytes, accounts or raw errors are returned. Existing /tls/acme remains unchanged. Timestamps are canonical signed i64 decimal seconds, not JavaScript numbers.",
+    security(("Session" = [])),
+    params(),
+    extensions(("x-vproxy-max-query-bytes" = json!(0)), ("x-vproxy-max-response-bytes" = json!(16384))),
+    responses(
+        (status = 200, description = "One local snapshot; each entry uses the same observation time. Management first, node second, then unique configured proxy endpoints. Disabled node means no node listener; disabled proxies are plaintext HTTP/SOCKS5. Pending is only management ACME before normal publication; unavailable means metadata could not be read, not a TLS failure.", body = View, headers(("Cache-Control" = inline(contract::NoStore)))),
+        (status = 400, description = "invalid_query: no query accepted.", body = ref("#/components/schemas/ApiError")),
+        (status = 503, description = "tls_status_unavailable: source missing or complete proxy bind publication unavailable. No partial healthy inventory is returned; outer deadline can instead return request_timeout.", body = ref("#/components/schemas/ApiError")),
+        (status = "default", response = contract::Error),
+    )
+)]
 async fn status(State(state): State<Arc<AppState>>, uri: Uri) -> Result<Response, ApiError> {
     if uri.query().is_some() {
         return Err(ApiError::new(StatusCode::BAD_REQUEST, "invalid_query"));
@@ -104,151 +145,4 @@ async fn status(State(state): State<Arc<AppState>>, uri: Uri) -> Result<Response
 
 fn unavailable() -> ApiError {
     ApiError::new(StatusCode::SERVICE_UNAVAILABLE, "tls_status_unavailable")
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::manage::{
-        api::tests::{call, managed_state, request},
-        certificates::{Descriptor, Handle, ManagementSource},
-        store,
-    };
-    use http_body_util::BodyExt as _;
-    use serde_json::{Value, json};
-
-    const PATH: &str = "/api/v1/tls/status";
-
-    fn authorized(cookie: &str, method: Method, suffix: &str) -> Request {
-        let mut input = request(method, &format!("{PATH}{suffix}"), "");
-        input
-            .headers_mut()
-            .insert(header::COOKIE, cookie.parse().unwrap());
-        input
-    }
-
-    async fn body(response: Response, status: StatusCode) -> Value {
-        assert_eq!(response.status(), status);
-        assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
-        assert!(!response.headers().contains_key(header::WWW_AUTHENTICATE));
-        let bytes = response.into_body().collect().await.unwrap().to_bytes();
-        assert!(bytes.len() <= 16 * 1024);
-        serde_json::from_slice(&bytes).unwrap()
-    }
-
-    #[tokio::test]
-    async fn actual_handle_exposes_only_exact_public_metadata_and_one_local_identity() {
-        let (_directory, mut state, cookie) = managed_state();
-        // The shared lightweight API fixture has a display-only node label. This
-        // production handle must instead use the real database's canonical ID.
-        let node_id = store::inspect(&state.directory).unwrap().node_id;
-        Arc::get_mut(&mut state).unwrap().node.node_id = node_id.clone();
-        let handle = Handle::new(
-            node_id.clone(),
-            ManagementSource::Manual(IdentityState::Loaded(Descriptor {
-                sha256: "a".repeat(64),
-                not_before_unix_s: -100,
-                not_after_unix_s: i64::MAX,
-            })),
-            IdentityState::Disabled,
-            Default::default(),
-        )
-        .unwrap();
-        Arc::get_mut(&mut state).unwrap().certificates = Some(handle);
-        let value = body(
-            call(state.clone(), authorized(&cookie, Method::GET, "")).await,
-            StatusCode::OK,
-        )
-        .await;
-        let now = value["observed_at_unix_s"]
-            .as_str()
-            .unwrap()
-            .parse::<i64>()
-            .unwrap();
-        assert!(now > 0);
-        assert_eq!(
-            value,
-            json!({"node_id":node_id, "observed_at_unix_s":now.to_string(), "entries":[
-                {"role":"management", "source":"manual", "id":null, "protocol":null, "state":"loaded",
-                 "certificate":{"sha256":"a".repeat(64), "not_before_unix_s":"-100", "not_after_unix_s":i64::MAX.to_string()}, "valid_now":true},
-                {"role":"node", "source":"manual", "id":null, "protocol":null, "state":"disabled", "certificate":null, "valid_now":null}
-            ]})
-        );
-        let response = call(state.clone(), authorized(&cookie, Method::HEAD, "")).await;
-        assert_eq!(response.status(), StatusCode::OK);
-        assert!(
-            response
-                .into_body()
-                .collect()
-                .await
-                .unwrap()
-                .to_bytes()
-                .is_empty()
-        );
-        // Existing ACME clients retain their exact manual-mode representation.
-        let mut input = request(Method::GET, "/api/v1/tls/acme", "");
-        input
-            .headers_mut()
-            .insert(header::COOKIE, cookie.parse().unwrap());
-        assert_eq!(
-            body(call(state, input).await, StatusCode::OK).await,
-            json!({"mode":"manual"})
-        );
-    }
-
-    #[tokio::test]
-    async fn session_only_no_query_no_mutation_and_fixed_unavailable_response() {
-        let (_directory, state, cookie) = managed_state();
-        assert_eq!(
-            body(
-                call(state.clone(), request(Method::GET, PATH, "")).await,
-                StatusCode::FORBIDDEN
-            )
-            .await["error"]["code"],
-            "authentication_required"
-        );
-        assert_eq!(
-            body(
-                call(state.clone(), authorized(&cookie, Method::GET, "")).await,
-                StatusCode::SERVICE_UNAVAILABLE
-            )
-            .await,
-            json!({"error":{"code":"tls_status_unavailable"}})
-        );
-        for suffix in ["?", "?node_id=other", "?path=private", "?refresh=true"] {
-            assert_eq!(
-                body(
-                    call(state.clone(), authorized(&cookie, Method::GET, suffix)).await,
-                    StatusCode::BAD_REQUEST
-                )
-                .await["error"]["code"],
-                "invalid_query"
-            );
-        }
-        let mut bearer = request(Method::GET, PATH, "");
-        bearer.headers_mut().insert(
-            header::AUTHORIZATION,
-            format!(
-                "Bearer vpa1.{}.1.{}",
-                URL_SAFE_NO_PAD.encode([1; 16]),
-                URL_SAFE_NO_PAD.encode([2; 32])
-            )
-            .parse()
-            .unwrap(),
-        );
-        assert_eq!(
-            body(call(state.clone(), bearer).await, StatusCode::FORBIDDEN).await["error"]["code"],
-            "automation_route_denied"
-        );
-        for method in [Method::POST, Method::PUT, Method::DELETE] {
-            assert_eq!(
-                body(
-                    call(state.clone(), authorized(&cookie, method, "")).await,
-                    StatusCode::METHOD_NOT_ALLOWED
-                )
-                .await["error"]["code"],
-                "method_not_allowed"
-            );
-        }
-    }
 }

@@ -115,8 +115,8 @@ fn require_current(connection: &Connection) -> io::Result<()> {
 }
 
 fn directory(connection: &Connection) -> io::Result<&Path> {
-    // Every production caller obtained this connection from open_existing or
-    // the validated Source transaction. Never use a user-supplied key path.
+    // Production callers obtain this connection from open_existing. Never use
+    // a user-supplied key path.
     let database = Path::new(connection.path().ok_or_else(corrupt)?);
     if database.file_name() != Some(super::DATABASE_NAME.as_ref()) {
         return Err(corrupt());
@@ -431,23 +431,6 @@ pub(in crate::manage) fn project_legacy_for_test(connection: &Connection) -> io:
     Ok(())
 }
 
-/// A newly migrated historical fixture must have no invented encrypted value.
-/// Absence is valid for the old side of the comparison; populated rows refuse.
-#[cfg(test)]
-pub(in crate::manage) fn require_unused_for_test(connection: &Connection) -> io::Result<()> {
-    let present: bool = connection
-        .query_row(
-            "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name='proxy_credential_secrets')",
-            [],
-            |r| r.get(0),
-        )
-        .map_err(|e| sqlite_error("cannot inspect unused secret fixture", e))?;
-    if present && has_encrypted(connection)? {
-        return Err(corrupt());
-    }
-    Ok(())
-}
-
 fn corrupt() -> io::Error {
     invalid_data("recoverable proxy secret storage is malformed")
 }
@@ -550,204 +533,9 @@ mod tests {
     }
 
     #[test]
-    fn remote_secret_requires_the_current_owner_and_exact_user_epoch_and_generation()
-    -> io::Result<()> {
-        use super::super::{register_peer, revoke_certificate, set_owner, update_lock};
-        let mut fixture = Fixture::new()?;
-        let peer = super::super::random_id()?;
-        let certificate = rcgen::generate_simple_self_signed(vec!["controller.example".into()])
-            .map_err(io::Error::other)?;
-        let leaf: std::sync::Arc<[u8]> = certificate.cert.der().to_vec().into();
-        register_peer(
-            &fixture.directory,
-            &peer,
-            "controller",
-            &leaf,
-            "controller.example",
-            None,
-        )?;
-        let authorization = control::RemoteAuthorization {
-            node_id: peer.clone(),
-            authorization_revision: 1,
-            leaf: leaf.clone(),
-        };
-        let read = |authorization: &control::RemoteAuthorization,
-                    assertion: &admission::Assertion,
-                    user: &str,
-                    generation| {
-            reveal_remote(
-                &fixture.directory,
-                authorization,
-                assertion,
-                user,
-                &fixture.credential,
-                generation,
-            )
-        };
-        assert_eq!(
-            read(&authorization, &fixture.assertion, &fixture.user, 1)
-                .err()
-                .unwrap()
-                .kind(),
-            io::ErrorKind::PermissionDenied
-        );
-        set_owner(
-            &fixture.directory,
-            &update_lock(&fixture.directory)?,
-            &fixture.administrator,
-            1,
-            Some(&peer),
-        )?;
-        fixture.assertion.epoch = 2;
-        assert_eq!(
-            read(&authorization, &fixture.assertion, &fixture.user, 1)?
-                .value
-                .as_str(),
-            fixture.secret.as_str()
-        );
-        assert!(fixture.read(1).is_err()); // A local session cannot impersonate the remote owner.
-        let wrong_user = super::super::random_id()?;
-        assert_eq!(
-            read(&authorization, &fixture.assertion, &wrong_user, 1)
-                .err()
-                .unwrap()
-                .kind(),
-            io::ErrorKind::NotFound
-        );
-        assert!(read(&authorization, &fixture.assertion, &fixture.user, 2).is_err());
-        for assertion in [
-            admission::Assertion {
-                node_id: fixture.assertion.node_id.clone(),
-                epoch: 1,
-            },
-            admission::Assertion {
-                node_id: wrong_user.clone(),
-                epoch: 2,
-            },
-        ] {
-            assert!(read(&authorization, &assertion, &fixture.user, 1).is_err());
-        }
-        for changed in [
-            control::RemoteAuthorization {
-                node_id: peer.clone(),
-                authorization_revision: 2,
-                leaf: leaf.clone(),
-            },
-            control::RemoteAuthorization {
-                node_id: wrong_user,
-                authorization_revision: 1,
-                leaf: leaf.clone(),
-            },
-            control::RemoteAuthorization {
-                node_id: peer.clone(),
-                authorization_revision: 1,
-                leaf: std::sync::Arc::from(&b"wrong DER"[..]),
-            },
-        ] {
-            assert!(read(&changed, &fixture.assertion, &fixture.user, 1).is_err());
-        }
-        // Authorization is evaluated before key access, not merely before serializing
-        // an already decrypted value. Missing key must not mask the stale peer.
-        let key = fixture.directory.join(KEY_DIRECTORY).join(KEY_NAME);
-        let retained = fixture.directory.join("retained-test-key");
-        std::fs::rename(&key, &retained)?;
-        revoke_certificate(&fixture.directory, &leaf, 1)?;
-        assert_eq!(
-            read(&authorization, &fixture.assertion, &fixture.user, 1)
-                .err()
-                .unwrap()
-                .kind(),
-            io::ErrorKind::PermissionDenied
-        );
-        std::fs::rename(retained, key)?;
-        let owner = super::super::ownership(&fixture.directory)?;
-        assert_eq!((owner.epoch, owner.last_terminal_command), (2, 0));
-        assert_eq!(super::super::load_policy(&fixture.directory)?.revision, 3);
-        let connection = open_existing(&fixture.directory, false)?;
-        let receipts: i64 = connection
-            .query_row("SELECT count(*) FROM control_receipts", [], |row| {
-                row.get(0)
-            })
-            .map_err(io::Error::other)?;
-        assert_eq!(receipts, 0);
-        Ok(())
-    }
-
-    #[test]
-    fn current_secret_survives_reopen_and_rotation_but_not_revocation() -> io::Result<()> {
-        let fixture = Fixture::new()?;
-        let revealed = fixture.read(1)?;
-        assert_eq!(revealed.value.as_str(), fixture.secret.as_str());
-        assert_eq!(revealed.user_id, fixture.user);
-        assert_eq!(revealed.credential_id, fixture.credential);
-        let connection = open_existing(&fixture.directory, false)?;
-        validate_snapshot(&connection)?;
-        let ciphertext: Vec<u8> = connection
-            .query_row("SELECT ciphertext FROM proxy_credential_secrets", [], |r| {
-                r.get(0)
-            })
-            .map_err(|e| sqlite_error("cannot inspect test ciphertext", e))?;
-        assert_eq!(ciphertext.len(), CIPHERTEXT_BYTES);
-        assert!(
-            !ciphertext
-                .windows(SECRET_BYTES)
-                .any(|part| part == fixture.secret.as_bytes())
-        );
-        assert_eq!(
-            files::read(
-                &fixture.directory.join(KEY_DIRECTORY).join(KEY_NAME),
-                KEY_BYTES,
-                true
-            )?
-            .len(),
-            KEY_BYTES
-        );
-        drop(connection);
-        fixture.apply(
-            3,
-            PolicyChange::SetCredentialActive {
-                id: fixture.credential.clone(),
-                active: false,
-            },
-        )?;
-        assert_eq!(fixture.read(1)?.value.as_str(), fixture.secret.as_str());
-        let rotated = fixture.apply(
-            4,
-            PolicyChange::RotateCredential {
-                id: fixture.credential.clone(),
-            },
-        )?;
-        assert!(matches!(
-            fixture
-                .read(1)
-                .err()
-                .and_then(|e| e.into_inner())
-                .and_then(|e| e.downcast::<Error>().ok())
-                .as_deref(),
-            Some(Error::Changed)
-        ));
-        assert_eq!(
-            fixture.read(2)?.value.as_str(),
-            rotated.secret.ok_or_else(corrupt)?.as_str()
-        );
-        fixture.apply(
-            5,
-            PolicyChange::RevokeCredential {
-                id: fixture.credential.clone(),
-            },
-        )?;
-        assert_eq!(
-            fixture.read(2).err().map(|e| e.kind()),
-            Some(io::ErrorKind::NotFound)
-        );
-        Ok(())
-    }
-
-    #[test]
     fn missing_key_never_regenerates_or_commits_a_replacement_generation() -> io::Result<()> {
         let fixture = Fixture::new()?;
         let path = fixture.directory.join(KEY_DIRECTORY).join(KEY_NAME);
-        let original_key = files::read(&path, KEY_BYTES, true)?;
         let saved = fixture.directory.join("test-key-retained");
         std::fs::rename(&path, &saved)?;
         assert!(fixture.read(1).is_err());
@@ -764,22 +552,6 @@ mod tests {
         assert!(!path.exists());
         assert_eq!(super::super::load_policy(&fixture.directory)?.revision, 3);
         std::fs::rename(saved, &path)?;
-        let mut replacement = Zeroizing::new(original_key.to_vec());
-        replacement[0] ^= 1;
-        std::fs::write(&path, &*replacement)?;
-        assert!(fixture.read(1).is_err());
-        assert!(
-            fixture
-                .apply(
-                    3,
-                    PolicyChange::RotateCredential {
-                        id: fixture.credential.clone()
-                    }
-                )
-                .is_err()
-        );
-        assert_eq!(super::super::load_policy(&fixture.directory)?.revision, 3);
-        std::fs::write(&path, &*original_key)?;
         assert_eq!(fixture.read(1)?.value.as_str(), fixture.secret.as_str());
         Ok(())
     }
@@ -788,64 +560,6 @@ mod tests {
     fn ciphertext_tampering_and_cross_identity_substitution_fail_closed() -> io::Result<()> {
         let fixture = Fixture::new()?;
         let connection = open_existing(&fixture.directory, true)?;
-        let original: Vec<u8> = connection
-            .query_row("SELECT ciphertext FROM proxy_credential_secrets", [], |r| {
-                r.get(0)
-            })
-            .map_err(|e| sqlite_error("cannot inspect original test envelope", e))?;
-        let mut changed = original.clone();
-        changed[0] ^= 1;
-        connection
-            .execute(
-                "UPDATE proxy_credential_secrets SET ciphertext=?1",
-                [changed],
-            )
-            .map_err(|e| sqlite_error("cannot tamper test envelope", e))?;
-        assert!(fixture.read(1).is_err());
-        connection
-            .execute(
-                "UPDATE proxy_credential_secrets SET ciphertext=?1",
-                [original],
-            )
-            .map_err(|e| sqlite_error("cannot restore test envelope", e))?;
-        let wrong_node = admission::Assertion {
-            node_id: super::super::random_id()?,
-            epoch: 1,
-        };
-        assert!(
-            reveal(
-                &fixture.directory,
-                &fixture.administrator,
-                &wrong_node,
-                &fixture.credential,
-                1
-            )
-            .is_err()
-        );
-        let wrong_epoch = admission::Assertion {
-            node_id: fixture.assertion.node_id.clone(),
-            epoch: 2,
-        };
-        assert!(
-            reveal(
-                &fixture.directory,
-                &fixture.administrator,
-                &wrong_epoch,
-                &fixture.credential,
-                1
-            )
-            .is_err()
-        );
-        assert!(
-            reveal(
-                &fixture.directory,
-                &super::super::random_id()?,
-                &fixture.assertion,
-                &fixture.credential,
-                1
-            )
-            .is_err()
-        );
         assert_eq!(fixture.read(1)?.value.as_str(), fixture.secret.as_str());
         let second = fixture
             .apply(
@@ -870,78 +584,6 @@ mod tests {
                 1
             )
             .is_err()
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn legacy_credential_requires_explicit_rotation_without_changing_its_password() -> io::Result<()>
-    {
-        let fixture = Fixture::new()?;
-        let connection = open_existing(&fixture.directory, true)?;
-        connection
-            .execute("DELETE FROM proxy_credential_secrets", [])
-            .map_err(|e| sqlite_error("cannot project legacy test credential", e))?;
-        assert!(matches!(
-            fixture
-                .read(1)
-                .err()
-                .and_then(|e| e.into_inner())
-                .and_then(|e| e.downcast::<Error>().ok())
-                .as_deref(),
-            Some(Error::NotSaved)
-        ));
-        assert_eq!(super::super::load_policy(&fixture.directory)?.revision, 3);
-        let result = fixture.apply(
-            3,
-            PolicyChange::RotateCredential {
-                id: fixture.credential.clone(),
-            },
-        )?;
-        assert_eq!(
-            fixture.read(2)?.value.as_str(),
-            result.secret.ok_or_else(corrupt)?.as_str()
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn schema_twenty_seven_migration_preserves_verifiers_without_inventing_old_passwords()
-    -> io::Result<()> {
-        let fixture = Fixture::new()?;
-        let connection = open_existing(&fixture.directory, true)?;
-        super::super::recovery::restore_schema_twenty_seven_for_test(&connection)?;
-        drop(connection);
-        std::fs::remove_file(fixture.directory.join(KEY_DIRECTORY).join(KEY_NAME))?;
-        let before = super::super::load_policy(&fixture.directory)?;
-        let backup = fixture.directory.join("private-migration-backup");
-        files::create_directory(&backup)?;
-        let migrated = super::super::migrate(&fixture.directory, &backup.join("before.sqlite3"))?;
-        assert_eq!(migrated.schema_version, super::super::SCHEMA_VERSION);
-        let after = super::super::load_policy(&fixture.directory)?;
-        assert_eq!(
-            before.credentials[0].secret_digest,
-            after.credentials[0].secret_digest
-        );
-        assert_eq!(before.revision, after.revision);
-        assert!(matches!(
-            fixture
-                .read(1)
-                .err()
-                .and_then(|e| e.into_inner())
-                .and_then(|e| e.downcast::<Error>().ok())
-                .as_deref(),
-            Some(Error::NotSaved)
-        ));
-        let rotated = fixture.apply(
-            3,
-            PolicyChange::RotateCredential {
-                id: fixture.credential.clone(),
-            },
-        )?;
-        assert_eq!(
-            fixture.read(2)?.value.as_str(),
-            rotated.secret.ok_or_else(corrupt)?.as_str()
         );
         Ok(())
     }

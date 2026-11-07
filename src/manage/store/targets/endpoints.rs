@@ -66,27 +66,6 @@ pub(in crate::manage) fn enqueue_intent(
     }
 }
 
-/// Dispatch only the two existing typed command families inside the source's
-/// held transaction. Encoding/input checks still precede the business SQL.
-#[cfg(feature = "witness-journal")]
-pub(super) fn enqueue_intent_in(
-    tx: &Connection,
-    administrator: &str,
-    target_revision: u64,
-    intent: ControlIntent,
-) -> io::Result<Job> {
-    match intent {
-        ControlIntent::Policy(command) => {
-            let payload = super::encode(&command)?;
-            super::enqueue_in(tx, administrator, target_revision, command, payload)
-        }
-        ControlIntent::Endpoint(command) => {
-            let payload = encode(&command)?;
-            enqueue_in(tx, administrator, target_revision, command, payload)
-        }
-    }
-}
-
 fn enqueue(
     directory: &Path,
     administrator: &str,

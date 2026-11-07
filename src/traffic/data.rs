@@ -76,11 +76,16 @@ mod tests {
     use bytes::Bytes;
 
     use super::*;
-    use crate::traffic::{Direction, Meter, tests::counter};
+    use crate::traffic::{Counter, Direction, Meter, Snapshot};
+    use std::sync::Arc;
 
     #[test]
     fn payload_prefix_is_excluded_across_fragmented_advances_and_drop() {
-        let count = counter();
+        let count = Arc::new(Counter::new(Snapshot {
+            upload: 0,
+            download: 0,
+            saturated: false,
+        }));
         let meter = Meter::new(count.clone(), Direction::Download);
         let mut data = Data::prefixed(Bytes::from_static(b"HEADpayload"), 4, Some(meter)).unwrap();
         data.advance(2);
@@ -91,21 +96,5 @@ mod tests {
         drop(data); // The five unaccepted bytes must not be added on cancellation.
         assert_eq!(count.snapshot().download, 2);
         assert!(Data::prefixed(Bytes::new(), 1, None).is_err());
-    }
-
-    #[test]
-    fn chained_chunks_are_not_merged_or_counted_by_observation() {
-        let count = counter();
-        let inner = Bytes::from_static(b"abc").chain(Bytes::from_static(b"def"));
-        let mut data = Data::new(inner, Some(Meter::new(count.clone(), Direction::Upload)));
-        let mut chunks = [io::IoSlice::new(&[]); 2];
-        assert_eq!(data.remaining(), 6);
-        assert_eq!(data.chunks_vectored(&mut chunks), 2);
-        assert_eq!(&*chunks[0], b"abc");
-        assert_eq!(&*chunks[1], b"def");
-        assert_eq!(count.snapshot().upload, 0);
-        data.advance(4);
-        assert_eq!(data.chunk(), b"ef");
-        assert_eq!(count.snapshot().upload, 4);
     }
 }

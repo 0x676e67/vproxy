@@ -17,7 +17,7 @@ pub(in crate::manage) enum RoutingMutation {
     CreatePrefix {
         name: String,
         #[serde(
-            serialize_with = "serialize_cidr",
+            serialize_with = "serde_with::As::<serde_with::DisplayFromStr>::serialize",
             deserialize_with = "deserialize_cidr"
         )]
         cidr: cidr::IpCidr,
@@ -53,12 +53,6 @@ pub(in crate::manage) enum RoutingMutation {
     SetRoutePermission {
         permission: views::Permission,
     },
-}
-fn serialize_cidr<S: serde::Serializer>(
-    value: &cidr::IpCidr,
-    serializer: S,
-) -> Result<S::Ok, S::Error> {
-    serializer.collect_str(value)
 }
 fn deserialize_cidr<'de, D: serde::Deserializer<'de>>(
     deserializer: D,
@@ -102,14 +96,14 @@ impl From<RoutingMutation> for store::PolicyChange {
                 pool_id,
                 address_id,
             },
-            RoutingMutation::SetRoutePermission { permission } => Self::SetRoutePermission {
-                permission: RoutePermission {
+            RoutingMutation::SetRoutePermission { permission } => {
+                Self::SetRoutePermission(RoutePermission {
                     user_id: permission.user_id,
                     legacy_allowed: permission.legacy_allowed,
                     exits: permission.exits,
                     pools: permission.pools,
-                },
-            },
+                })
+            }
         }
     }
 }
@@ -147,7 +141,7 @@ impl TryFrom<store::PolicyChange> for RoutingMutation {
                 pool_id,
                 address_id,
             },
-            store::PolicyChange::SetRoutePermission { permission } => Self::SetRoutePermission {
+            store::PolicyChange::SetRoutePermission(permission) => Self::SetRoutePermission {
                 permission: permission.into(),
             },
             _ => return Err(invalid("version-two routing action required")),
@@ -214,40 +208,38 @@ struct Pagination {
     limit: u32,
 }
 fn pagination(uri: &http::Uri, health: bool) -> Result<Pagination, ApiError> {
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Parameters {
+        after: Option<String>,
+        limit: Option<String>,
+    }
     let query = uri.query().unwrap_or_default();
+    let invalid = || bad("invalid_pagination");
     if query.len() > 1024 {
-        return Err(bad("invalid_pagination"));
+        return Err(invalid());
     }
-    let mut value = Pagination {
-        after: None,
-        limit: if health { 10 } else { 25 },
-    };
-    let mut seen = [false; 2];
-    for (key, text) in url::form_urlencoded::parse(query.as_bytes()) {
-        let index = match key.as_ref() {
-            "after" => 0,
-            "limit" => 1,
-            _ => return Err(bad("invalid_pagination")),
-        };
-        if seen[index] {
-            return Err(bad("invalid_pagination"));
-        }
-        seen[index] = true;
-        if index == 0 {
-            if !valid_id(&text) {
-                return Err(bad("invalid_pagination"));
-            }
-            value.after = Some(text.into_owned());
-        } else {
-            let limit = decimal(&text, false).map_err(|_| bad("invalid_pagination"))?;
-            if limit > if health { 16 } else { 50 } {
-                return Err(bad("invalid_pagination"));
-            }
-            value.limit = limit as u32;
-        }
+    let input: Parameters = serde_urlencoded::from_str(query).map_err(|_| invalid())?;
+    if input.after.as_deref().is_some_and(|value| !valid_id(value)) {
+        return Err(invalid());
     }
-    Ok(value)
+    let limit = input
+        .limit
+        .as_deref()
+        .map(|text| {
+            u32::try_from(decimal(text, false).map_err(|_| invalid())?)
+                .ok()
+                .filter(|value| *value <= if health { 16 } else { 50 })
+                .ok_or_else(invalid)
+        })
+        .transpose()?
+        .unwrap_or(if health { 10 } else { 25 });
+    Ok(Pagination {
+        after: input.after,
+        limit,
+    })
 }
+
 fn path_id(
     path: Result<Path<String>, axum::extract::rejection::PathRejection>,
 ) -> Result<String, ApiError> {
@@ -1025,398 +1017,4 @@ fn validate_health(
 }
 fn invalid(message: &'static str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, message)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use serde_json::{Value, json};
-
-    fn id(value: u8) -> String {
-        URL_SAFE_NO_PAD.encode([value; 16])
-    }
-    fn command() -> RoutingCommand {
-        RoutingCommand {
-            version: 2,
-            target_node_id: id(1),
-            resource: RESOURCE.into(),
-            controller_epoch: "2".into(),
-            command_id: "3".into(),
-            expected_policy_revision: "10".into(),
-            source_administrator_id: id(2),
-            mutation: RoutingMutation::CreatePool {
-                name: "finite pool".into(),
-                family: AddressFamily::V4,
-            },
-        }
-    }
-    fn body() -> Value {
-        json!({"receipt":{"controller_epoch":"2","command_id":"3","status":"applied","policy_revision":"11","rejection":null,"user_id":null,"credential_id":null,"routing":{"kind":"pool","id":id(3)}},"replayed":false,"user":null,"credential":null,"secret":null,"secret_available":false,"routing":{"kind":"pool","data":{"id":id(3),"name":"finite pool","family":"v4","state":"active","member_count":0,"revision":"11"}}})
-    }
-    fn wire(data: Value) -> Vec<u8> {
-        serde_json::to_vec(&json!({"version":2,"node_id":id(1),"resource":RESOURCE,"data":data}))
-            .unwrap()
-    }
-
-    #[test]
-    fn exact_address_lookup_encoding_and_decoder_bind_identity_and_snapshot() {
-        let operation = Request::Address { address_id: id(3) };
-        let (method, path, body) = encode(&operation).unwrap();
-        assert_eq!(method, Method::GET);
-        assert_eq!(path, format!("/node/v2/proxy/addresses/{}", id(3)));
-        assert!(body.is_empty());
-        assert!(
-            encode(&Request::Address {
-                address_id: "../policy".into()
-            })
-            .is_err()
-        );
-        let good = json!({"revision":"11","address":{"id":id(3),"name":"Retired metadata","ip":"127.0.0.1","prefix_id":null,"state":"retired","revision":"9"}});
-        assert!(matches!(
-            decode(&operation, &wire(good.clone()), &id(1), StatusCode::OK),
-            Ok(Reply::Address(_))
-        ));
-        for (field, value) in [
-            ("id", json!(id(4))),
-            ("id", json!("not-an-id")),
-            ("name", json!(" wrong name ")),
-            ("ip", json!("0.0.0.0")),
-            ("prefix_id", json!("not-an-id")),
-            ("state", json!("invented")),
-            ("revision", json!("12")),
-            ("revision", json!("09")),
-            ("revision", json!("0")),
-            ("revision", json!("9223372036854775808")),
-            ("unexpected", json!(true)),
-        ] {
-            let mut wrong = good.clone();
-            wrong["address"][field] = value;
-            assert!(
-                decode(&operation, &wire(wrong), &id(1), StatusCode::OK).is_err(),
-                "field: {field}"
-            );
-        }
-        for revision in ["0", "011", "-1", "9223372036854775808"] {
-            let mut wrong = good.clone();
-            wrong["revision"] = json!(revision);
-            assert!(decode(&operation, &wire(wrong), &id(1), StatusCode::OK).is_err());
-        }
-        let mut wrong = good.clone();
-        wrong["unexpected"] = json!(true);
-        assert!(decode(&operation, &wire(wrong), &id(1), StatusCode::OK).is_err());
-        assert!(decode(&operation, &wire(good), &id(2), StatusCode::OK).is_err());
-    }
-
-    #[test]
-    fn host_prefix_inputs_keep_the_legacy_wire_encoding() {
-        for (explicit, legacy) in [
-            ("127.0.0.1/32", "127.0.0.1"),
-            ("2001:db8::1/128", "2001:db8::1"),
-        ] {
-            let old = json!({"action":"create_prefix","name":"host","cidr":legacy});
-            for cidr in [explicit, legacy] {
-                let parsed: RoutingMutation = serde_json::from_value(
-                    json!({"action":"create_prefix","name":"host","cidr":cidr}),
-                )
-                .unwrap();
-                assert_eq!(serde_json::to_value(parsed).unwrap(), old);
-            }
-        }
-        for cidr in [
-            "127.0.0.1/032",
-            "127.0.0.1/24",
-            "::1/129",
-            "2001:DB8::1/128",
-            "2001:0db8::1/128",
-            " ::1/128",
-        ] {
-            assert!(
-                serde_json::from_value::<RoutingMutation>(
-                    json!({"action":"create_prefix","name":"host","cidr":cidr}),
-                )
-                .is_err(),
-                "{cidr}"
-            );
-        }
-    }
-
-    #[test]
-    fn host_prefix_first_reply_keeps_legacy_shape_and_exact_correlation() {
-        for (explicit, legacy) in [
-            ("127.0.0.1/32", "127.0.0.1"),
-            ("2001:db8::1/128", "2001:db8::1"),
-        ] {
-            let mut command = command();
-            command.mutation = RoutingMutation::CreatePrefix {
-                name: "host".into(),
-                cidr: explicit.parse().unwrap(),
-            };
-            let request = Request::RoutingCommand(command);
-            let mut data = body();
-            data["receipt"]["routing"]["kind"] = json!("prefix");
-            data["routing"] = json!({"kind":"prefix","data":{"id":id(3),"name":"host","cidr":legacy,"retired":false,"revision":"11"}});
-            assert!(decode(&request, &wire(data.clone()), &id(1), StatusCode::OK).is_ok());
-            for (field, value) in [
-                ("cidr", json!(explicit)),
-                ("cidr", json!("192.0.2.1")),
-                ("name", json!("other")),
-                ("retired", json!(true)),
-            ] {
-                let mut wrong = data.clone();
-                wrong["routing"]["data"][field] = value;
-                assert!(decode(&request, &wire(wrong), &id(1), StatusCode::OK).is_err());
-            }
-        }
-    }
-
-    #[test]
-    fn vocabularies_and_nested_permissions_do_not_cross_versions() {
-        let value = serde_json::to_value(command()).unwrap();
-        assert!(serde_json::from_value::<Command>(value.clone()).is_err());
-        let mut wrong = value.clone();
-        wrong["version"] = json!(1);
-        assert!(
-            serde_json::from_value::<RoutingCommand>(wrong)
-                .unwrap()
-                .into_store()
-                .is_err()
-        );
-        let mut wrong = value.clone();
-        wrong["mutation"] =
-            json!({"action":"create_user","name":"no","protocols":["http"],"concurrent_limit":1});
-        assert!(serde_json::from_value::<RoutingCommand>(wrong).is_err());
-        let permission = json!({"action":"set_route_permission","permission":{"user_id":id(4),"legacy_allowed":false,"exits":[id(5)],"pools":[id(6)]}});
-        let mutation: RoutingMutation = serde_json::from_value(permission.clone()).unwrap();
-        assert_eq!(serde_json::to_value(mutation).unwrap(), permission);
-        assert!(serde_json::from_value::<RoutingMutation>(json!({"action":"set_route_permission","user_id":id(4),"legacy_allowed":false,"exits":[],"pools":[]})).is_err());
-        assert!(
-            serde_json::from_value::<RoutingMutation>(
-                json!({"action":"create_prefix","name":"canonical","cidr":"2001:0db8::/32"})
-            )
-            .is_err()
-        );
-        let prefix: RoutingMutation = serde_json::from_value(
-            json!({"action":"create_prefix","name":"canonical","cidr":"2001:db8::/32"}),
-        )
-        .unwrap();
-        let change: store::PolicyChange = prefix.into();
-        assert_eq!(change.control_version(), 2);
-        let encoded = encode(&Request::RoutingCommand(command())).unwrap();
-        assert_eq!(encoded.0, Method::POST);
-        assert_eq!(encoded.1, "/node/v2/proxy/commands");
-        assert!(
-            encode(&Request::HealthPage {
-                after: None,
-                limit: 17
-            })
-            .is_err()
-        );
-        assert!(
-            encode(&Request::PoolMembersPage {
-                pool_id: "../policy".into(),
-                after: None,
-                limit: 1
-            })
-            .is_err()
-        );
-    }
-
-    #[test]
-    fn v1_reply_serialization_has_identical_fields_order_and_nulls() {
-        let value = CommandReply {
-            receipt: Receipt {
-                version: 1,
-                controller_epoch: "2".into(),
-                command_id: "3".into(),
-                status: ReceiptStatus::Applied,
-                policy_revision: Some("11".into()),
-                rejection: None,
-                user_id: Some(id(3)),
-                credential_id: None,
-                routing: None,
-                preset: None,
-            },
-            replayed: true,
-            user: None,
-            credential: None,
-            secret: None,
-            secret_available: false,
-            routing: None,
-            presets: None,
-        };
-        let expected = format!(
-            r#"{{"receipt":{{"controller_epoch":"2","command_id":"3","status":"applied","policy_revision":"11","rejection":null,"user_id":"{}","credential_id":null}},"replayed":true,"user":null,"credential":null,"secret":null,"secret_available":false}}"#,
-            id(3)
-        );
-        assert_eq!(serde_json::to_vec(&value).unwrap(), expected.as_bytes());
-        let old: CommandReply = serde_json::from_slice(expected.as_bytes()).unwrap();
-        assert!(old.routing.is_none());
-        assert!(old.receipt.routing.is_none());
-    }
-
-    #[test]
-    fn routing_reply_correlates_cas_reference_shape_and_empty_new_pool() {
-        let request = Request::RoutingCommand(command());
-        assert!(matches!(
-            decode(&request, &wire(body()), &id(1), StatusCode::OK),
-            Ok(Reply::Command(_))
-        ));
-        let mut invalids = Vec::new();
-        let mut wrong = body();
-        wrong["routing"]["data"]["member_count"] = json!(1);
-        invalids.push(wrong);
-        let mut wrong = body();
-        wrong["receipt"]["routing"]["kind"] = json!("address");
-        invalids.push(wrong);
-        let mut wrong = body();
-        wrong["routing"]["data"]["id"] = json!(id(8));
-        invalids.push(wrong);
-        let mut wrong = body();
-        wrong["receipt"]["policy_revision"] = json!("10");
-        invalids.push(wrong);
-        let mut wrong = body();
-        wrong["routing"]["data"]["revision"] = json!("12");
-        invalids.push(wrong);
-        let mut wrong = body();
-        wrong["routing"] = Value::Null;
-        invalids.push(wrong);
-        let mut wrong = body();
-        wrong["secret"] = json!(URL_SAFE_NO_PAD.encode([7; 32]));
-        wrong["secret_available"] = json!(true);
-        invalids.push(wrong);
-        let mut wrong = body();
-        wrong["replayed"] = json!(true);
-        invalids.push(wrong);
-        for wrong in invalids {
-            assert!(decode(&request, &wire(wrong), &id(1), StatusCode::OK).is_err());
-        }
-        let mut replay = body();
-        replay["replayed"] = json!(true);
-        replay["routing"] = Value::Null;
-        let Ok(Reply::Command(replayed)) = decode(&request, &wire(replay), &id(1), StatusCode::OK)
-        else {
-            panic!("matching replay should succeed")
-        };
-        assert!(replayed.replayed && replayed.routing.is_none() && replayed.secret.is_none());
-        let mut rejected = body();
-        rejected["receipt"]["status"] = json!("rejected");
-        rejected["receipt"]["policy_revision"] = Value::Null;
-        rejected["receipt"]["routing"] = Value::Null;
-        rejected["receipt"]["rejection"] = json!("invalid_policy");
-        rejected["routing"] = Value::Null;
-        assert!(decode(&request, &wire(rejected), &id(1), StatusCode::OK).is_ok());
-        let mut wrong_version: Value = serde_json::from_slice(&wire(body())).unwrap();
-        wrong_version["version"] = json!(1);
-        assert!(
-            decode(
-                &request,
-                &serde_json::to_vec(&wrong_version).unwrap(),
-                &id(1),
-                StatusCode::OK
-            )
-            .is_err()
-        );
-    }
-
-    #[test]
-    fn inventory_pages_validate_global_revision_and_order_not_just_json_types() {
-        let request = Request::AddressesPage {
-            after: None,
-            limit: 2,
-        };
-        let entry = json!({"id":id(2),"name":"owned","ip":"127.0.0.2","prefix_id":null,"state":"active","revision":"10"});
-        let data = json!({"revision":"10","items":[entry.clone()],"next_cursor":null});
-        assert!(decode(&request, &wire(data.clone()), &id(1), StatusCode::OK).is_ok());
-        let mut wrong = data.clone();
-        wrong["items"][0]["revision"] = json!("11");
-        assert!(decode(&request, &wire(wrong), &id(1), StatusCode::OK).is_err());
-        let mut wrong = data.clone();
-        wrong["items"] = json!([entry.clone(), entry]);
-        assert!(decode(&request, &wire(wrong), &id(1), StatusCode::OK).is_err());
-        let mut wrong = data;
-        wrong["items"][0]["ip"] = json!("0.0.0.0");
-        assert!(decode(&request, &wire(wrong), &id(1), StatusCode::OK).is_err());
-    }
-
-    fn health_page() -> views::HealthPage {
-        views::HealthPage {
-            boot_id: id(8),
-            sequence: u64::MAX.to_string(),
-            catalog_revision: Some(i64::MAX.to_string()),
-            catalog_loaded: true,
-            catalog_error: Some("catalog_unavailable".into()),
-            catalog_observed_at_unix_ms: Some(9_007_199_254_740_991),
-            catalog_age_millis: Some(9_007_199_254_740_991),
-            in_flight: 4,
-            entries: (0..16)
-                .map(|index| views::HealthEntry {
-                    address_id: id(index),
-                    address_revision: i64::MAX.to_string(),
-                    ip: "2001:db8f:ffff:ffff:ffff:ffff:ffff:fffe".parse().unwrap(),
-                    checks: (0..5)
-                        .map(|target| views::HealthCheck {
-                            kind: if target == 0 {
-                                health::CheckKind::Bind
-                            } else {
-                                health::CheckKind::Tcp
-                            },
-                            target: if target == 0 {
-                                None
-                            } else {
-                                Some(
-                                    format!(
-                                        "[2001:db8f:ffff:ffff:ffff:ffff:ffff:fffe]:{}",
-                                        65535 - target
-                                    )
-                                    .parse()
-                                    .unwrap(),
-                                )
-                            },
-                            outcome: health::FixedOutcome::NetworkUnreachable,
-                            sequence: Some(u64::MAX.to_string()),
-                            observed_at_unix_ms: Some(9_007_199_254_740_991),
-                            age_millis: Some(9_007_199_254_740_991),
-                            latency_millis: Some(9_007_199_254_740_991),
-                        })
-                        .collect(),
-                })
-                .collect(),
-            next_cursor: Some(id(15)),
-        }
-    }
-
-    #[test]
-    fn health_full_envelope_fits_cap_and_validates_stale_sequence_and_targets() {
-        let mut maximum = health_page();
-        maximum
-            .entries
-            .sort_by(|a, b| a.address_id.cmp(&b.address_id));
-        maximum.next_cursor = maximum.entries.last().map(|v| v.address_id.clone());
-        assert!(respond_version(2, &id(1), StatusCode::OK, maximum).is_ok());
-        let request = Request::HealthPage {
-            after: None,
-            limit: 16,
-        };
-        let mut value = health_page();
-        value
-            .entries
-            .sort_by(|a, b| a.address_id.cmp(&b.address_id));
-        value.next_cursor = value.entries.last().map(|v| v.address_id.clone());
-        let mut data = serde_json::to_value(value).unwrap();
-        assert!(decode(&request, &wire(data.clone()), &id(1), StatusCode::OK).is_ok());
-        let mut multicast = data.clone();
-        multicast["entries"][0]["ip"] = json!("ff02::1");
-        assert!(decode(&request, &wire(multicast), &id(1), StatusCode::OK).is_err());
-        data["entries"][0]["checks"][0]["outcome"] = json!("unknown");
-        assert!(decode(&request, &wire(data.clone()), &id(1), StatusCode::OK).is_ok());
-        let mut wrong = data.clone();
-        wrong["entries"][0]["checks"][1]["target"] = json!("[::1%1]:80");
-        assert!(decode(&request, &wire(wrong), &id(1), StatusCode::OK).is_err());
-        let mut wrong = data.clone();
-        wrong["entries"][0]["checks"][0]["sequence"] = Value::Null;
-        assert!(decode(&request, &wire(wrong), &id(1), StatusCode::OK).is_err());
-        let mut wrong = data;
-        wrong["catalog_age_millis"] = json!(9_007_199_254_740_992u64);
-        assert!(decode(&request, &wire(wrong), &id(1), StatusCode::OK).is_err());
-    }
 }

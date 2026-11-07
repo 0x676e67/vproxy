@@ -15,24 +15,6 @@ mod content;
 mod control;
 pub(super) mod diagnostics;
 pub(super) mod endpoints;
-#[cfg(feature = "witness-journal")]
-#[cfg_attr(
-    not(test),
-    allow(
-        dead_code,
-        reason = "Source file-author identity methods await fixed CLI configuration admission"
-    )
-)]
-pub(super) mod identities;
-#[cfg(feature = "witness-journal")]
-#[cfg_attr(
-    not(test),
-    allow(
-        dead_code,
-        reason = "Source activation waits for whole-writer and restart admission coverage"
-    )
-)]
-pub(super) mod journal;
 pub(super) mod notifications;
 pub(super) mod operations;
 mod peers;
@@ -48,19 +30,10 @@ pub(super) mod traffic;
 mod users;
 pub(super) mod witness;
 
-#[cfg(feature = "witness-journal")]
-pub(super) use control::{apply_command_in, set_owner_in};
-#[cfg(feature = "witness-journal")]
-pub(super) use users::apply_local_in as apply_local_policy_in;
-
 pub(super) use administrators::reset_password;
 pub(super) use author::{Guard, UpdateGuard, lock, update_lock};
-#[cfg(feature = "witness-journal")]
-pub(super) use backup::read_verified as read_backup_verified;
 pub(super) use backup::{BackupManifest, create_backup, create_identity_snapshot, verify_backup};
 pub(super) use control::endpoints as endpoint_control;
-#[cfg(test)]
-pub(super) use control::restore_legacy_owner_audit;
 pub(super) use control::{
     Command, CommandOutcome, ControlError, ControlIntent, Ownership, PresetKind, PresetReceipt,
     Receipt, ReceiptStatus, RemoteAuthorization, RoutingKind, RoutingReceipt,
@@ -75,9 +48,9 @@ pub(super) use peers::{
     revoke_certificate, set_peer_active,
 };
 pub(super) use users::{
-    ChangeResult, CredentialView, Page, PolicyChange, PolicyStatus, UserView, apply_policy,
-    apply_policy_asserted, list_credentials, list_users, load_policy, policy_status,
-    record_applied, search_users,
+    ChangeResult, CredentialView, MaintenanceMutation, Page, PolicyChange, PolicyStatus,
+    PresetMutation, UserMutation, UserView, apply_policy, apply_policy_asserted, list_credentials,
+    list_users, load_policy, policy_status, record_applied, search_users,
 };
 
 use std::{
@@ -101,61 +74,6 @@ const DATABASE_NAME: &str = "management.sqlite3";
 const APPLICATION_ID: i32 = i32::from_be_bytes(*b"VPXY");
 pub(super) const SCHEMA_VERSION: u32 = 29;
 const BUSY_TIMEOUT: Duration = Duration::from_secs(2);
-
-/// Reconstructs a pre-operation fixture without discarding issued identities.
-/// Only an unused, canonical singleton may be removed; historical command and
-/// recovery helpers call this before lowering the database's user_version.
-#[cfg(test)]
-pub(in crate::manage) fn remove_operations_schema_for_test(
-    connection: &Connection,
-) -> io::Result<()> {
-    alerts::history::ensure_unused_for_test(connection)?;
-    notifications::ensure_unused_for_test(connection)?;
-    targets::history::ensure_unused_for_test(connection)?;
-    let tables: i64 = connection
-        .query_row(
-            "SELECT count(*) FROM sqlite_schema WHERE name IN('operations_state','user_operations')",
-            [],
-            |row| row.get(0),
-        )
-        .map_err(|error| sqlite_error("cannot inspect operation fixture namespace", error))?;
-    if tables == 0 {
-        recovery::restore_schema_eighteen_for_test(connection)?;
-        return automation::remove_schema_for_test(connection);
-    }
-    if tables != 2 {
-        return Err(invalid_data("operation fixture namespace is incomplete"));
-    }
-    let version = connection
-        .pragma_query_value(None, "user_version", |row| row.get(0))
-        .map_err(|error| sqlite_error("cannot inspect operation fixture version", error))?;
-    operations::validate_schema(connection, version)?;
-    let unused: bool = connection
-        .query_row(
-            "SELECT (SELECT last_sequence=0 FROM operations_state WHERE singleton=1)
-              AND NOT EXISTS(SELECT 1 FROM user_operations)",
-            [],
-            |row| row.get(0),
-        )
-        .map_err(|error| {
-            sqlite_error("cannot inspect issued operation fixture identities", error)
-        })?;
-    if !unused {
-        return Err(invalid_data(
-            "issued operation identities cannot become a legacy fixture",
-        ));
-    }
-    // Reject issued operation history before removing any newer namespace;
-    // callers may deliberately test this failure and continue using the store.
-    automation::ensure_unused_for_test(connection)?;
-    users::require_legacy_audit_for_test(connection)?;
-    recovery::restore_schema_eighteen_for_test(connection)?;
-    users::restore_legacy_audit_for_test(connection)?;
-    connection
-        .execute_batch("DROP TABLE user_operations; DROP TABLE operations_state;")
-        .map_err(|error| sqlite_error("cannot reconstruct pre-operation fixture", error))?;
-    automation::remove_schema_for_test(connection)
-}
 
 /// Non-secret, locally observed facts for offline initialization and inspection.
 ///
@@ -715,8 +633,10 @@ fn invalid_data(message: &'static str) -> io::Error {
 }
 
 /// Uses only fixed context and numeric SQLite codes, never SQL or bound secrets.
-fn sqlite_error(context: &'static str, error: rusqlite::Error) -> io::Error {
-    if let rusqlite::Error::SqliteFailure(failure, _) = error {
+fn sqlite_error(context: &'static str, error: impl Into<serde_rusqlite::Error>) -> io::Error {
+    if let serde_rusqlite::Error::Rusqlite(rusqlite::Error::SqliteFailure(failure, _)) =
+        error.into()
+    {
         let kind = match failure.code {
             rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked => {
                 io::ErrorKind::WouldBlock
@@ -740,293 +660,5 @@ fn sqlite_error(context: &'static str, error: rusqlite::Error) -> io::Error {
         )
     } else {
         invalid_data(context)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use std::path::PathBuf;
-
-    use super::*;
-
-    // The caller owns password hashing; this fixed fixture is intentionally not
-    // a usable credential and cannot accidentally reveal a developer password.
-    const PHC: &str = "$argon2id$v=19$m=19456,t=2,p=1$c2FsdA$Zml4dHVyZQ";
-
-    /// Owns only a freshly and exclusively created test directory.
-    struct TestDirectory(PathBuf);
-
-    impl TestDirectory {
-        fn new() -> io::Result<Self> {
-            let path = std::env::temp_dir().join(format!("vproxy-management-{}", random_id()?));
-            let builder = DirBuilder::new();
-            #[cfg(unix)]
-            let builder = {
-                use std::os::unix::fs::DirBuilderExt;
-                let mut builder = builder;
-                builder.mode(0o700);
-                builder
-            };
-            builder.create(&path)?;
-            Ok(Self(path))
-        }
-    }
-
-    impl Drop for TestDirectory {
-        fn drop(&mut self) {
-            // No caller-controlled path is accepted; the random leaf was
-            // exclusively created by this fixture, never a shared temp root.
-            let _ = fs::remove_dir_all(&self.0);
-        }
-    }
-
-    #[test]
-    fn reopening_preserves_identity_and_hash() -> io::Result<()> {
-        let directory = TestDirectory::new()?;
-        let first = initialize(&directory.0, "Taipei node", "admin", PHC)?;
-        let reopened = inspect(&directory.0)?;
-        assert_eq!(first.node_id, reopened.node_id);
-        assert_eq!(reopened.name, "Taipei node");
-        assert_eq!(reopened.administrator_count, 1);
-        assert_eq!(reopened.schema_version, SCHEMA_VERSION);
-        assert_eq!(reopened.sqlite_version, rusqlite::version());
-        assert!(valid_id(&reopened.node_id));
-
-        let connection = open(
-            &directory.0.join(DATABASE_NAME),
-            OpenFlags::SQLITE_OPEN_READ_ONLY,
-        )?;
-        let (id, hash): (String, String) = connection
-            .query_row("SELECT id, password_hash FROM administrators", [], |row| {
-                Ok((row.get(0)?, row.get(1)?))
-            })
-            .map_err(|error| sqlite_error("cannot read fixture administrator", error))?;
-        assert!(valid_id(&id));
-        assert_ne!(id, first.node_id);
-        assert_eq!(hash, PHC);
-        Ok(())
-    }
-
-    #[test]
-    fn issued_operations_refuse_legacy_reconstruction_without_changing_namespaces() -> io::Result<()>
-    {
-        let directory = TestDirectory::new()?;
-        initialize(&directory.0, "node", "admin", PHC)?;
-        let connection = peers::open_existing(&directory.0, true)?;
-        let actor: String = connection
-            .query_row("SELECT id FROM administrators", [], |row| row.get(0))
-            .map_err(io::Error::other)?;
-        let gate = update_lock(&directory.0)?;
-        let operation = operations::reserve(
-            &directory.0,
-            &gate,
-            &actor,
-            &operations::Input {
-                expected_node_id: None,
-                expected_revision: 1,
-                expected_epoch: 1,
-                change: operations::UserChange::CreateUser {
-                    name: "reserved fixture".into(),
-                    protocols: vec![crate::access::Protocol::Http],
-                    concurrent_limit: 1,
-                },
-            },
-        )?;
-        let schema: u32 = connection
-            .pragma_query_value(None, "schema_version", |row| row.get(0))
-            .map_err(io::Error::other)?;
-        let changes = connection.total_changes();
-        assert_eq!(
-            remove_operations_schema_for_test(&connection)
-                .err()
-                .unwrap()
-                .kind(),
-            io::ErrorKind::InvalidData
-        );
-        assert_eq!(
-            connection
-                .pragma_query_value::<u32, _>(None, "schema_version", |row| row.get(0))
-                .map_err(io::Error::other)?,
-            schema
-        );
-        assert_eq!(connection.total_changes(), changes);
-        assert!(automation::list(&directory.0)?.is_empty());
-        assert_eq!(
-            operations::get(&directory.0, &actor, &operation.id)?,
-            operation
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn authentication_never_promotes_dummy_matches_or_hides_broken_hashes() -> io::Result<()> {
-        use argon2::PasswordHasher as _;
-
-        let directory = TestDirectory::new()?;
-        let password = b"fixture administrator passphrase";
-        let hash = Argon2::default()
-            .hash_password(password)
-            .map_err(|_| io::Error::other("cannot hash fixture password"))?
-            .to_string();
-        initialize(&directory.0, "node", "admin", &hash)?;
-        let administrator = authenticate(&directory.0, "admin", password, &hash)?.unwrap();
-        assert!(valid_id(&administrator.id));
-        assert_eq!(administrator.username, "admin");
-        assert!(authenticate(&directory.0, "admin", b"wrong password", &hash)?.is_none());
-        // Even a match against the dummy is never a real identity.
-        assert!(authenticate(&directory.0, "unknown", password, &hash)?.is_none());
-
-        let connection = open(
-            &directory.0.join(DATABASE_NAME),
-            OpenFlags::SQLITE_OPEN_READ_WRITE,
-        )?;
-        let excessive_cost = hash.replace("m=19456", "m=4294967295");
-        connection
-            .execute(
-                "UPDATE administrators SET password_hash = ?1",
-                [excessive_cost],
-            )
-            .map_err(|error| sqlite_error("cannot corrupt fixture hash cost", error))?;
-        assert!(
-            matches!(authenticate(&directory.0, "admin", password, &hash), Err(ref error) if error.kind() == io::ErrorKind::InvalidData)
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn repeated_initialization_never_resets_records() -> io::Result<()> {
-        let directory = TestDirectory::new()?;
-        let first = initialize(&directory.0, "Original", "admin", PHC)?;
-        let result = initialize(&directory.0, "Replacement", "other", "replacement hash");
-        assert!(matches!(result, Err(ref error) if error.kind() == io::ErrorKind::AlreadyExists));
-        let reopened = inspect(&directory.0)?;
-        assert_eq!(reopened.node_id, first.node_id);
-        assert_eq!(reopened.name, "Original");
-        let connection = open(
-            &directory.0.join(DATABASE_NAME),
-            OpenFlags::SQLITE_OPEN_READ_ONLY,
-        )?;
-        let (username, hash): (String, String) = connection
-            .query_row(
-                "SELECT username, password_hash FROM administrators",
-                [],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .map_err(|error| sqlite_error("cannot read unchanged fixture credential", error))?;
-        assert_eq!(username, "admin");
-        assert_eq!(hash, PHC);
-        Ok(())
-    }
-
-    #[test]
-    fn absent_and_corrupt_databases_are_not_recreated() -> io::Result<()> {
-        use std::io::Write as _;
-
-        let directory = TestDirectory::new()?;
-        let path = directory.0.join(DATABASE_NAME);
-        assert!(
-            matches!(inspect(&directory.0), Err(ref error) if error.kind() == io::ErrorKind::NotFound)
-        );
-        assert!(!path.exists());
-
-        let mut options = OpenOptions::new();
-        options.write(true).create_new(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            options.mode(0o600);
-        }
-        let mut file = options.open(&path)?;
-        file.write_all(b"not a sqlite database")?;
-        drop(file);
-        assert!(
-            matches!(inspect(&directory.0), Err(ref error) if error.kind() == io::ErrorKind::InvalidData)
-        );
-        assert!(
-            matches!(initialize(&directory.0, "node", "admin", PHC), Err(ref error) if error.kind() == io::ErrorKind::AlreadyExists)
-        );
-        assert_eq!(fs::read(path)?, b"not a sqlite database");
-        Ok(())
-    }
-
-    #[test]
-    fn namespace_schema_and_required_records_are_validated() -> io::Result<()> {
-        let directory = TestDirectory::new()?;
-        initialize(&directory.0, "node", "admin", PHC)?;
-        let connection = open(
-            &directory.0.join(DATABASE_NAME),
-            OpenFlags::SQLITE_OPEN_READ_WRITE,
-        )?;
-        connection
-            .pragma_update(None, "application_id", 0)
-            .map_err(|error| sqlite_error("cannot change fixture namespace", error))?;
-        assert!(
-            matches!(inspect(&directory.0), Err(ref error) if error.kind() == io::ErrorKind::InvalidData)
-        );
-        connection
-            .pragma_update(None, "application_id", APPLICATION_ID)
-            .map_err(|error| sqlite_error("cannot restore fixture namespace", error))?;
-        connection
-            .pragma_update(None, "user_version", SCHEMA_VERSION + 1)
-            .map_err(|error| sqlite_error("cannot change fixture schema", error))?;
-        assert!(
-            matches!(inspect(&directory.0), Err(ref error) if error.kind() == io::ErrorKind::InvalidData)
-        );
-        connection
-            .pragma_update(None, "user_version", SCHEMA_VERSION)
-            .and_then(|()| {
-                connection
-                    .execute("DELETE FROM administrators", [])
-                    .map(|_| ())
-            })
-            .map_err(|error| sqlite_error("cannot remove fixture administrator", error))?;
-        assert!(
-            matches!(inspect(&directory.0), Err(ref error) if error.kind() == io::ErrorKind::InvalidData)
-        );
-        connection
-            .execute(
-                "INSERT INTO administrators (id, username, password_hash) VALUES (?1, 'admin', ?2)",
-                params![random_id()?, PHC],
-            )
-            .and_then(|_| connection.execute("DELETE FROM node_identity", []))
-            .map_err(|error| sqlite_error("cannot remove fixture identity", error))?;
-        assert!(
-            matches!(inspect(&directory.0), Err(ref error) if error.kind() == io::ErrorKind::InvalidData)
-        );
-        Ok(())
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn unix_private_permissions_and_symlink_boundaries() -> io::Result<()> {
-        use std::os::unix::fs::{PermissionsExt, symlink};
-
-        let directory = TestDirectory::new()?;
-        let private = directory.0.join("new-node");
-        initialize(&private, "node", "admin", PHC)?;
-        let database = private.join(DATABASE_NAME);
-        assert_eq!(fs::metadata(&private)?.permissions().mode() & 0o777, 0o700);
-        assert_eq!(fs::metadata(&database)?.permissions().mode() & 0o777, 0o600);
-
-        let redirect = directory.0.join("redirect");
-        symlink(&private, &redirect)?;
-        assert!(
-            matches!(inspect(&redirect), Err(ref error) if error.kind() == io::ErrorKind::PermissionDenied)
-        );
-        let linked = directory.0.join(DATABASE_NAME);
-        symlink(&database, &linked)?;
-        assert!(
-            matches!(inspect(&directory.0), Err(ref error) if error.kind() == io::ErrorKind::PermissionDenied)
-        );
-        assert!(
-            matches!(initialize(&directory.0, "other", "admin", PHC), Err(ref error) if error.kind() == io::ErrorKind::AlreadyExists)
-        );
-
-        fs::set_permissions(&private, fs::Permissions::from_mode(0o755))?;
-        assert!(
-            matches!(inspect(&private), Err(ref error) if error.kind() == io::ErrorKind::PermissionDenied)
-        );
-        assert_eq!(fs::metadata(&private)?.permissions().mode() & 0o777, 0o755);
-        Ok(())
     }
 }

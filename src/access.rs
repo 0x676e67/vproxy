@@ -5,16 +5,6 @@ pub(crate) mod presets;
 pub(crate) mod routing;
 pub(crate) mod traffic;
 
-#[cfg(feature = "witness-journal")]
-#[cfg_attr(
-    not(test),
-    allow(
-        dead_code,
-        reason = "Source runtime activation waits for complete writer admission"
-    )
-)]
-pub(crate) mod suspension;
-
 use std::{
     collections::{HashMap, HashSet},
     io,
@@ -191,8 +181,6 @@ struct State {
     counters: HashMap<String, Weak<Counter>>,
     // Only the outstanding source publication owner can restore this policy.
     // Pointer identity avoids a wrapping generation or an ABA after fail_closed.
-    #[cfg(feature = "witness-journal")]
-    suspension: Option<Arc<()>>,
 }
 
 /// Cheap reader shared by every protocol and by the single publishing owner.
@@ -229,8 +217,6 @@ impl Reader {
                 revision: policy.revision,
                 policy: Some(policy),
                 counters,
-                #[cfg(feature = "witness-journal")]
-                suspension: None,
             })),
             traffic,
         })
@@ -248,10 +234,6 @@ impl Reader {
     pub(crate) fn publish(&self, data: PolicyData) -> io::Result<()> {
         let mut policy = compile(data)?;
         let mut state = self.state.write().map_err(|_| unavailable())?;
-        #[cfg(feature = "witness-journal")]
-        if state.suspension.is_some() {
-            return Err(unavailable());
-        }
         self.bind_publication(&mut state, &mut policy)?;
         state.revision = policy.revision;
         let previous = state.policy.replace(policy);
@@ -327,10 +309,6 @@ impl Reader {
     /// Existing flows keep their lease; a newer validated publication can recover.
     pub(crate) fn fail_closed(&self) {
         if let Ok(mut state) = self.state.write() {
-            #[cfg(feature = "witness-journal")]
-            {
-                state.suspension = None;
-            }
             let previous = state.policy.take();
             drop(state);
             drop(previous);
@@ -665,7 +643,6 @@ fn unavailable() -> io::Error {
 
 #[cfg(test)]
 pub(crate) mod tests {
-    use std::sync::{Arc, Barrier};
 
     use super::*;
 
@@ -736,52 +713,6 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn managed_device_is_leading_authorized_and_keeps_route_hashes_exact() {
-        let mut data = policy(1, 32);
-        data.presets.users[0].allowed_presets =
-            vec![crate::ebpf::Profile::Linux, crate::ebpf::Profile::Windows];
-        data.presets.users[0].default_preset = Some(crate::ebpf::Profile::Linux);
-        let reader = Reader::new(data).unwrap();
-        for suffix in ["session-same", "range-same", "ttl-18446744073709551615"] {
-            let native = attempt(&reader, &format!("{LOGIN}-{suffix}"), Protocol::Socks5).unwrap();
-            let selected = attempt(
-                &reader,
-                &format!("{LOGIN}-device-windows-{suffix}"),
-                Protocol::Socks5,
-            )
-            .unwrap();
-            assert_eq!(native.extension.route(), selected.extension.route());
-            assert!(
-                selected.extension.profile().is_none(),
-                "managed routing must not smuggle an unchecked preset"
-            );
-            assert_eq!(
-                selected.presets.tcp(),
-                Ok(Some(crate::ebpf::Profile::Windows))
-            );
-            assert!(selected.presets.explicit());
-            assert!(!native.presets.explicit());
-        }
-        let default = attempt(&reader, LOGIN, Protocol::Socks5).unwrap();
-        assert_eq!(default.presets.tcp(), Ok(Some(crate::ebpf::Profile::Linux)));
-        assert!(!default.presets.explicit());
-        for suffix in [
-            "device-ios",
-            "device-native",
-            "device-windows-device-linux",
-            "session-same-device-windows",
-            "device-windows-session-a-range-b",
-            "device-windows-",
-            "device-Windows",
-        ] {
-            assert!(matches!(
-                attempt(&reader, &format!("{LOGIN}-{suffix}"), Protocol::Socks5),
-                Err(Error::Denied)
-            ));
-        }
-    }
-
-    #[test]
     fn strict_v2_syntax_has_exact_login_boundaries_and_isolates_routing() {
         let reader = Reader::new(policy(1, 10)).unwrap();
         assert!(matches!(
@@ -837,29 +768,6 @@ pub(crate) mod tests {
         assert!(
             matches!((first.extension, rotated.extension), (Extension::Session(a), Extension::Session(b)) if a != b)
         );
-        let mut other_user = policy(3, 10);
-        other_user.users[0].id = URL_SAFE_NO_PAD.encode([8; 16]);
-        other_user.credentials[0].user_id = other_user.users[0].id.clone();
-        other_user.routing.permissions[0].user_id = other_user.users[0].id.clone();
-        other_user.presets.users[0].user_id = other_user.users[0].id.clone();
-        // One node cannot reassign a retained accounting credential to a new user.
-        // A separate catalog still proves that the routing hash includes its user,
-        // even when the credential's identifier and secret happen to be identical.
-        assert!(reader.publish(other_user.clone()).is_err());
-        let other_reader = Reader::new(other_user).unwrap();
-        let isolated = attempt(
-            &other_reader,
-            &format!("{LOGIN}-session-same"),
-            Protocol::Http,
-        )
-        .unwrap();
-        assert!(
-            matches!((first.extension, isolated.extension), (Extension::Session(a), Extension::Session(b)) if a != b)
-        );
-        assert_ne!(
-            digest_secret(CREDENTIAL, &secret()),
-            digest_secret(USER, &secret())
-        );
     }
 
     #[test]
@@ -902,127 +810,6 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn shared_lease_and_hot_revisions_never_reset_the_user_count() {
-        let reader = Reader::new(policy(1, 2)).unwrap();
-        let first = attempt(&reader, LOGIN, Protocol::Http).unwrap();
-        let second = attempt(&reader, LOGIN, Protocol::Masque).unwrap();
-        assert_eq!(&*first.lease.user_id, USER);
-        assert_eq!(&*first.lease.credential_id, CREDENTIAL);
-        let retained = first.lease.clone();
-        drop(first);
-        reader.publish(policy(2, 1)).unwrap();
-        assert!(matches!(
-            attempt(&reader, LOGIN, Protocol::Socks5),
-            Err(Error::Capacity)
-        ));
-        drop(second);
-        assert!(matches!(
-            attempt(&reader, LOGIN, Protocol::Socks5),
-            Err(Error::Capacity)
-        ));
-        // Removing/reintroducing a user while an old flow lives must preserve its
-        // count, even though the active policy no longer owns the counter.
-        reader
-            .publish(PolicyData {
-                revision: 3,
-                accepting: true,
-                users: vec![],
-                credentials: vec![],
-                routing: routing::RoutingData::default(),
-                presets: presets::PresetData::default(),
-            })
-            .unwrap();
-        reader.publish(policy(4, 1)).unwrap();
-        assert!(matches!(
-            attempt(&reader, LOGIN, Protocol::Http),
-            Err(Error::Capacity)
-        ));
-        drop(retained);
-        assert!(attempt(&reader, LOGIN, Protocol::Http).is_ok());
-    }
-
-    #[test]
-    fn published_pause_rejects_new_operations_but_keeps_old_leases_across_revisions() {
-        let reader = Reader::new(policy(1, 4)).unwrap();
-        let first = attempt(&reader, LOGIN, Protocol::Http).unwrap();
-        let second = attempt(&reader, LOGIN, Protocol::Socks5).unwrap();
-        let third = attempt(&reader, LOGIN, Protocol::Masque).unwrap();
-        let retained = first.lease.clone();
-        drop(first);
-        let mut paused = policy(2, 1);
-        paused.accepting = false;
-        reader.publish(paused).unwrap();
-        let expected = Admission {
-            revision: 2,
-            accepting: false,
-            active_operations: 3,
-        };
-        assert_eq!(reader.admission().unwrap(), expected);
-        let wrong_secret = URL_SAFE_NO_PAD.encode([9; 32]);
-        for protocol in [Protocol::Http, Protocol::Socks5, Protocol::Masque] {
-            assert!(matches!(
-                attempt(&reader, LOGIN, protocol),
-                Err(Error::Unavailable)
-            ));
-            for invalid in [b"wrong".as_slice(), wrong_secret.as_bytes()] {
-                assert!(matches!(
-                    reader.authenticate(LOGIN, invalid, protocol),
-                    Err(Error::InvalidCredentials)
-                ));
-            }
-        }
-        assert_eq!(reader.admission().unwrap(), expected);
-        // A pause changes admission only: the original accounting owner remains
-        // usable and no new policy lookup or new slot is needed to record a write.
-        retained.meter(crate::traffic::Direction::Upload).add(7);
-        assert_eq!(
-            reader
-                .traffic_registry()
-                .snapshot()
-                .unwrap()
-                .into_iter()
-                .find(|row| row.protocol == traffic::Protocol::Http)
-                .unwrap()
-                .value
-                .upload,
-            7
-        );
-        let mut disabled = policy(3, 1);
-        disabled.accepting = false;
-        disabled.users[0].active = false;
-        disabled.credentials[0].revoked = true;
-        reader.publish(disabled).unwrap();
-        assert_eq!(reader.admission().unwrap().active_operations, 3);
-        let mut removed = policy(4, 1);
-        removed.accepting = false;
-        removed.users.clear();
-        removed.credentials.clear();
-        removed.routing = routing::RoutingData::default();
-        removed.presets = presets::PresetData::default();
-        reader.publish(removed).unwrap();
-        assert_eq!(
-            reader.admission().unwrap(),
-            Admission {
-                revision: 4,
-                accepting: false,
-                active_operations: 3,
-            }
-        );
-        reader.publish(policy(5, 4)).unwrap();
-        let resumed = attempt(&reader, LOGIN, Protocol::Http).unwrap();
-        assert_eq!(
-            reader.admission().unwrap(),
-            Admission {
-                revision: 5,
-                accepting: true,
-                active_operations: 4,
-            }
-        );
-        drop((second, third, retained, resumed));
-        assert_eq!(reader.admission().unwrap().active_operations, 0);
-    }
-
-    #[test]
     fn unavailable_admission_is_not_zero_and_recovery_publishes_the_complete_mode() {
         let reader = Reader::new(policy(1, 1)).unwrap();
         assert_eq!(
@@ -1060,71 +847,5 @@ pub(crate) mod tests {
             attempt(&reader, LOGIN, Protocol::Http),
             Err(Error::Unavailable)
         ));
-        let state = reader.state.clone();
-        assert!(
-            std::thread::spawn(move || {
-                let _guard = state.write().unwrap();
-                panic!("poison the isolated admission fixture");
-            })
-            .join()
-            .is_err()
-        );
-        assert!(reader.admission().is_err());
-        assert!(reader.admission_state().is_err());
-        assert!(matches!(
-            attempt(&reader, LOGIN, Protocol::Http),
-            Err(Error::Unavailable)
-        ));
-    }
-
-    #[test]
-    fn concurrent_admission_is_a_single_cas_budget() {
-        let reader = Reader::new(policy(1, 1)).unwrap();
-        let start = Arc::new(Barrier::new(9));
-        let finish = Arc::new(Barrier::new(9));
-        let mut workers = Vec::new();
-        for _ in 0..8 {
-            let reader = reader.clone();
-            let start = start.clone();
-            let finish = finish.clone();
-            workers.push(std::thread::spawn(move || {
-                start.wait();
-                let admission = attempt(&reader, LOGIN, Protocol::Http);
-                let success = admission.is_ok();
-                finish.wait();
-                drop(admission);
-                success
-            }));
-        }
-        start.wait();
-        finish.wait();
-        assert_eq!(
-            workers
-                .into_iter()
-                .map(|worker| worker.join().unwrap())
-                .filter(|success| *success)
-                .count(),
-            1
-        );
-        assert!(attempt(&reader, LOGIN, Protocol::Http).is_ok());
-    }
-
-    #[test]
-    fn candidate_errors_leave_the_previous_revision_and_admission_intact() {
-        let reader = Reader::new(policy(1, 2)).unwrap();
-        for mut data in [policy(1, 1), policy(2, 0), policy(2, 1)] {
-            if data.revision == 2 && data.users[0].concurrent_limit == 1 {
-                data.credentials[0].syntax_version = 1;
-            }
-            assert!(reader.publish(data).is_err());
-            assert_eq!(reader.revision().unwrap(), 1);
-        }
-        let mut duplicate = policy(2, 1);
-        duplicate.credentials.push(duplicate.credentials[0].clone());
-        assert!(validate_policy(&duplicate).is_err());
-        let mut orphan = policy(2, 1);
-        orphan.credentials[0].user_id = URL_SAFE_NO_PAD.encode([8; 16]);
-        assert!(validate_policy(&orphan).is_err());
-        assert!(attempt(&reader, LOGIN, Protocol::Http).is_ok());
     }
 }

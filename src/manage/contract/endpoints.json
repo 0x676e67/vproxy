@@ -396,12 +396,7 @@
         "mutation": { "$ref": "#/components/schemas/EndpointMutation" }
       }
     },
-    "EndpointRefreshInput": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["job_id"],
-      "properties": { "job_id": { "$ref": "#/components/schemas/Id" } }
-    },
+    "EndpointRefreshInput": {"$ref": "#/components/schemas/TargetJobInput"},
     "MetadataReceipt": {
       "type": "object",
       "additionalProperties": false,

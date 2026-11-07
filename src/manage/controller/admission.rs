@@ -132,34 +132,4 @@ impl Admission {
             _peer: peer,
         })
     }
-
-    #[cfg(test)]
-    pub(super) fn try_claim(&self, id: &str) -> io::Result<Claim> {
-        let peer = self.peer(id)?;
-        let permit = peer.owner.clone().try_acquire_owned().map_err(|_| busy())?;
-        Ok(Claim {
-            _permit: permit,
-            _peer: peer,
-        })
-    }
-
-    #[cfg(test)]
-    pub(super) fn is_active(&self, id: &str) -> io::Result<bool> {
-        let peers = self.peers.lock().map_err(|_| unavailable())?;
-        Ok(peers
-            .get(id)
-            .and_then(Weak::upgrade)
-            .is_some_and(|peer| peer.owner.available_permits() == 0))
-    }
-
-    #[cfg(test)]
-    pub(super) fn try_is_active(&self, id: &str) -> Option<bool> {
-        let peers = self.peers.try_lock().ok()?;
-        Some(
-            peers
-                .get(id)
-                .and_then(Weak::upgrade)
-                .is_some_and(|peer| peer.owner.available_permits() == 0),
-        )
-    }
 }

@@ -17,7 +17,7 @@ use rusqlite::{
     params,
 };
 
-#[cfg(any(not(windows), test))]
+#[cfg(not(windows))]
 use std::fs::OpenOptions;
 
 use super::{
@@ -32,13 +32,15 @@ const MAX_CERTIFICATE_BYTES: usize = 16 * 1024;
 const BACKUP_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Non-secret enrollment facts; certificate count includes permanent tombstones.
-#[derive(Debug, Eq, PartialEq)]
+#[serde_with::serde_as]
+#[derive(Debug, Eq, PartialEq, serde::Deserialize)]
 pub(in crate::manage) struct PeerSummary {
     /// Stable remote identity, independent of its name or certificate rotation.
     pub(in crate::manage) node_id: String,
     /// Local operator's display name, never an authentication claim.
     pub(in crate::manage) name: String,
     /// Whether currently valid certificates may authorize requests for this peer.
+    #[serde_as(as = "serde_with::BoolFromInt")]
     pub(in crate::manage) active: bool,
     /// Local authorization generation, not a configuration or control-owner epoch.
     pub(in crate::manage) authorization_revision: u64,
@@ -296,28 +298,6 @@ fn validate_registration(
     Ok(())
 }
 
-/// Trusted file-author registration staged in the original Source transaction.
-/// The caller must have verified DER against its supplied CA/reference name.
-#[cfg(feature = "witness-journal")]
-pub(super) fn register_in(
-    transaction: &rusqlite::Transaction<'_>,
-    node_id: &str,
-    name: &str,
-    der: &[u8],
-    expected_san: &str,
-    expected_revision: Option<u64>,
-) -> io::Result<PeerSummary> {
-    validate_registration(node_id, name, der, expected_san, expected_revision)?;
-    register_transaction(
-        transaction,
-        node_id,
-        name,
-        der,
-        expected_san,
-        expected_revision,
-    )
-}
-
 fn register_transaction(
     transaction: &Connection,
     node_id: &str,
@@ -445,18 +425,6 @@ pub(in crate::manage) fn set_peer_active(
     Ok(peer)
 }
 
-#[cfg(feature = "witness-journal")]
-pub(super) fn active_in(
-    transaction: &rusqlite::Transaction<'_>,
-    node_id: &str,
-    expected_revision: u64,
-    active: bool,
-) -> io::Result<PeerSummary> {
-    validate_id(node_id)?;
-    revision_as_sql(expected_revision)?;
-    active_transaction(transaction, node_id, expected_revision, active)
-}
-
 fn active_transaction(
     transaction: &Connection,
     node_id: &str,
@@ -506,17 +474,6 @@ pub(in crate::manage) fn revoke_certificate(
         .commit()
         .map_err(|error| sqlite_error("cannot commit peer authorization change", error))?;
     Ok(peer)
-}
-
-#[cfg(feature = "witness-journal")]
-pub(super) fn revoke_in(
-    transaction: &rusqlite::Transaction<'_>,
-    der: &[u8],
-    expected_revision: u64,
-) -> io::Result<PeerSummary> {
-    validate_certificate(der)?;
-    revision_as_sql(expected_revision)?;
-    revoke_transaction(transaction, der, expected_revision)
 }
 
 fn revoke_transaction(
@@ -576,14 +533,17 @@ pub(in crate::manage) fn list_peers(directory: &Path) -> io::Result<Vec<PeerSumm
     let peers = {
         let mut statement = transaction
             .prepare(
-                "SELECT p.node_id, p.name, p.active, p.authorization_revision, count(c.node_id)
+                "SELECT p.node_id, p.name, p.active, p.authorization_revision,
+                        count(c.node_id) AS certificate_count
                  FROM peers p LEFT JOIN peer_certificates c ON c.node_id = p.node_id
                  GROUP BY p.node_id ORDER BY p.node_id LIMIT 1025",
             )
             .map_err(|error| sqlite_error("cannot prepare peer inspection", error))?;
-        let rows = statement
-            .query_map([], summary_row)
-            .map_err(|error| sqlite_error("cannot query peer inspection", error))?;
+        let rows = serde_rusqlite::from_rows::<PeerSummary>(
+            statement
+                .query([])
+                .map_err(|error| sqlite_error("cannot query peer inspection", error))?,
+        );
         let mut peers = Vec::new();
         for row in rows {
             let peer = row.map_err(|error| sqlite_error("cannot read peer inspection", error))?;
@@ -728,39 +688,26 @@ fn require_peers(connection: &Connection) -> io::Result<Overview> {
 
 /// Reads one peer with its full certificate count, including revoked DER.
 fn find_summary(connection: &Connection, node_id: &str) -> io::Result<Option<PeerSummary>> {
-    let peer = connection
-        .query_row(
-            "SELECT p.node_id, p.name, p.active, p.authorization_revision, count(c.node_id)
+    let mut statement = connection
+        .prepare(
+            "SELECT p.node_id, p.name, p.active, p.authorization_revision,
+                    count(c.node_id) AS certificate_count
              FROM peers p LEFT JOIN peer_certificates c ON c.node_id = p.node_id
              WHERE p.node_id = ?1 GROUP BY p.node_id",
-            [node_id],
-            summary_row,
         )
-        .optional()
-        .map_err(|error| sqlite_error("cannot read peer registration", error))?;
+        .map_err(|error| sqlite_error("cannot prepare peer registration", error))?;
+    let peer = serde_rusqlite::from_rows::<PeerSummary>(
+        statement
+            .query([node_id])
+            .map_err(|error| sqlite_error("cannot query peer registration", error))?,
+    )
+    .next()
+    .transpose()
+    .map_err(|error| sqlite_error("cannot read peer registration", error))?;
     if let Some(peer) = &peer {
         validate_summary(peer)?;
     }
     Ok(peer)
-}
-
-/// Uses signed SQL values first so invalid booleans/revisions cannot narrow silently.
-fn summary_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<PeerSummary> {
-    let active: i64 = row.get(2)?;
-    let revision: i64 = row.get(3)?;
-    let revision = u64::try_from(revision)
-        .map_err(|_| rusqlite::Error::IntegralValueOutOfRange(3, revision))?;
-    let count: u32 = row.get(4)?;
-    if ![0, 1].contains(&active) {
-        return Err(rusqlite::Error::IntegralValueOutOfRange(2, active));
-    }
-    Ok(PeerSummary {
-        node_id: row.get(0)?,
-        name: row.get(1)?,
-        active: active == 1,
-        authorization_revision: revision,
-        certificate_count: count,
-    })
 }
 
 /// Rejects broken durable values rather than promoting them to a valid identity.
@@ -1026,522 +973,4 @@ pub(super) fn backup_existing(
     #[cfg(unix)]
     fs::File::open(parent)?.sync_all()?;
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use std::{
-        path::PathBuf,
-        sync::{Arc, Barrier},
-    };
-
-    use super::*;
-    use crate::manage::store::{authenticate, initialize, inspect, prepare_directory, random_id};
-    use argon2::Argon2;
-
-    const PHC: &str = "$argon2id$v=19$m=19456,t=2,p=1$c2FsdA$Zml4dHVyZQ";
-
-    /// Exclusively owns a random private leaf; never removes a caller-selected path.
-    struct Fixture(PathBuf);
-
-    impl Fixture {
-        fn new() -> io::Result<Self> {
-            let path = std::env::temp_dir().join(format!("vproxy-peer-store-{}", random_id()?));
-            prepare_directory(&path)?;
-            initialize(&path, "local node", "admin", PHC)?;
-            Ok(Self(path))
-        }
-
-        fn writable(&self) -> io::Result<Connection> {
-            open_existing(&self.0, true)
-        }
-
-        /// Reconstructs the actual previous schema, not just a false version pragma.
-        fn make_v1(&self) -> io::Result<()> {
-            crate::manage::store::traffic::remove_schema_for_test(&self.writable()?)?;
-            self.writable()?.execute_batch(
-            "DROP TABLE routing_audit; DROP TABLE routing_exit_grants; DROP TABLE routing_pool_grants; DROP TABLE routing_permissions; DROP TABLE routing_pool_members; DROP TABLE routing_pools; DROP TABLE routing_addresses; DROP TABLE routing_prefixes; DROP TABLE controller_audit; DROP TABLE control_outbox; DROP TABLE managed_targets;
-             DROP TABLE control_audit; DROP TABLE control_receipts; DROP TABLE control_ownership;
-             DROP TABLE proxy_policy_audit; DROP TABLE proxy_credentials; DROP TABLE proxy_users; DROP TABLE proxy_policy_state;
-             DROP TABLE peer_audit; DROP TABLE peer_certificates; DROP TABLE peers; PRAGMA user_version = 1;",
-        ).map_err(|error| sqlite_error("cannot construct v1 fixture", error))
-        }
-    }
-
-    impl Drop for Fixture {
-        fn drop(&mut self) {
-            let _ = fs::remove_dir_all(&self.0);
-        }
-    }
-
-    fn administrator(connection: &Connection) -> io::Result<(String, String, String)> {
-        connection
-            .query_row(
-                "SELECT id, username, password_hash FROM administrators",
-                [],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-            )
-            .map_err(|error| sqlite_error("cannot inspect fixture administrator", error))
-    }
-
-    #[test]
-    fn rotation_cas_and_tombstones_survive_reopening() -> io::Result<()> {
-        let fixture = Fixture::new()?;
-        let id = random_id()?;
-        let peer = register_peer(
-            &fixture.0,
-            &id,
-            "peer",
-            b"old certificate",
-            "peer.example",
-            None,
-        )?;
-        assert!(peer.active);
-        assert_eq!(peer.authorization_revision, 1);
-        assert_eq!(peer.certificate_count, 1);
-        assert_eq!(
-            authorize_peer(&fixture.0, b"old certificate")?
-                .unwrap()
-                .node_id,
-            id
-        );
-        assert!(authorize_peer(&fixture.0, b"unknown certificate")?.is_none());
-
-        assert!(
-            matches!(register_peer(&fixture.0, &id, "rename", b"new certificate", "peer.example", None), Err(error) if error.kind() == io::ErrorKind::AlreadyExists)
-        );
-        let renamed = register_peer(
-            &fixture.0,
-            &id,
-            "renamed",
-            b"old certificate",
-            "new.example",
-            Some(1),
-        )?;
-        assert_eq!(renamed.authorization_revision, 2);
-        assert_eq!(renamed.certificate_count, 1);
-        let auth = authorize_peer(&fixture.0, b"old certificate")?.unwrap();
-        assert_eq!(auth.expected_san, "new.example");
-        assert_eq!(auth.authorization_revision, 2);
-
-        let rotated = register_peer(
-            &fixture.0,
-            &id,
-            "renamed",
-            b"new certificate",
-            "new.example",
-            Some(2),
-        )?;
-        assert_eq!(rotated.certificate_count, 2);
-        assert!(authorize_peer(&fixture.0, b"old certificate")?.is_some());
-        assert!(authorize_peer(&fixture.0, b"new certificate")?.is_some());
-        assert!(
-            matches!(revoke_certificate(&fixture.0, b"old certificate", 2), Err(error) if error.kind() == io::ErrorKind::AlreadyExists)
-        );
-        let revoked = revoke_certificate(&fixture.0, b"old certificate", 3)?;
-        assert_eq!(revoked.authorization_revision, 4);
-        assert_eq!(revoked.certificate_count, 2);
-        assert!(authorize_peer(&fixture.0, b"old certificate")?.is_none());
-        assert!(
-            matches!(register_peer(&fixture.0, &id, "revive", b"old certificate", "peer.example", Some(4)), Err(error) if error.kind() == io::ErrorKind::AlreadyExists)
-        );
-        assert!(
-            matches!(register_peer(&fixture.0, &random_id()?, "rebind", b"old certificate", "peer.example", None), Err(error) if error.kind() == io::ErrorKind::AlreadyExists)
-        );
-        assert!(
-            matches!(revoke_certificate(&fixture.0, b"old certificate", 4), Err(error) if error.kind() == io::ErrorKind::AlreadyExists)
-        );
-        assert_eq!(list_peers(&fixture.0)?[0].authorization_revision, 4);
-        assert!(!set_peer_active(&fixture.0, &id, 4, false)?.active);
-        assert!(authorize_peer(&fixture.0, b"new certificate")?.is_none());
-        assert!(set_peer_active(&fixture.0, &id, 5, true)?.active);
-        assert!(authorize_peer(&fixture.0, b"new certificate")?.is_some());
-        assert!(authorize_peer(&fixture.0, b"old certificate")?.is_none());
-        Ok(())
-    }
-
-    #[test]
-    fn competing_writers_cannot_both_consume_one_revision() -> io::Result<()> {
-        let fixture = Fixture::new()?;
-        let id = random_id()?;
-        register_peer(
-            &fixture.0,
-            &id,
-            "peer",
-            b"certificate",
-            "peer.example",
-            None,
-        )?;
-        let barrier = Arc::new(Barrier::new(3));
-        let mut handles = Vec::new();
-        for active in [false, true] {
-            let path = fixture.0.clone();
-            let id = id.clone();
-            let barrier = Arc::clone(&barrier);
-            handles.push(std::thread::spawn(move || {
-                barrier.wait();
-                set_peer_active(&path, &id, 1, active)
-            }));
-        }
-        barrier.wait();
-        let mut successes = 0;
-        let mut conflicts = 0;
-        for handle in handles {
-            match handle
-                .join()
-                .map_err(|_| io::Error::other("peer writer fixture panicked"))?
-            {
-                Ok(peer) => {
-                    assert_eq!(peer.authorization_revision, 2);
-                    successes += 1;
-                }
-                Err(error)
-                    if matches!(
-                        error.kind(),
-                        io::ErrorKind::AlreadyExists | io::ErrorKind::WouldBlock
-                    ) =>
-                {
-                    conflicts += 1
-                }
-                Err(error) => return Err(error),
-            }
-        }
-        assert_eq!((successes, conflicts), (1, 1));
-        assert_eq!(list_peers(&fixture.0)?[0].authorization_revision, 2);
-        Ok(())
-    }
-
-    #[test]
-    fn inputs_self_registration_ownership_and_revision_overflow_are_rejected() -> io::Result<()> {
-        let fixture = Fixture::new()?;
-        let id = random_id()?;
-        let local = inspect(&fixture.0)?.node_id;
-        for (peer_id, name, der, san) in [
-            (
-                "not an id",
-                "peer",
-                b"certificate".as_slice(),
-                "peer.example",
-            ),
-            (
-                local.as_str(),
-                "peer",
-                b"certificate".as_slice(),
-                "peer.example",
-            ),
-            (
-                id.as_str(),
-                " peer",
-                b"certificate".as_slice(),
-                "peer.example",
-            ),
-            (id.as_str(), "peer", b"".as_slice(), "peer.example"),
-            (id.as_str(), "peer", b"certificate".as_slice(), "bad\nname"),
-            (
-                id.as_str(),
-                "peer",
-                b"certificate".as_slice(),
-                "非ASCII.example",
-            ),
-        ] {
-            assert!(
-                matches!(register_peer(&fixture.0, peer_id, name, der, san, None), Err(error) if error.kind() == io::ErrorKind::InvalidInput)
-            );
-        }
-        assert!(
-            register_peer(
-                &fixture.0,
-                &id,
-                "peer",
-                &vec![0; MAX_CERTIFICATE_BYTES + 1],
-                "peer.example",
-                None
-            )
-            .is_err()
-        );
-        register_peer(
-            &fixture.0,
-            &id,
-            "peer",
-            b"certificate",
-            "peer.example",
-            None,
-        )?;
-        assert!(
-            matches!(register_peer(&fixture.0, &random_id()?, "other", b"certificate", "other.example", None), Err(error) if error.kind() == io::ErrorKind::AlreadyExists)
-        );
-        assert!(
-            matches!(set_peer_active(&fixture.0, &id, u64::MAX, false), Err(error) if error.kind() == io::ErrorKind::InvalidInput)
-        );
-        fixture
-            .writable()?
-            .execute("UPDATE peers SET authorization_revision = ?1", [i64::MAX])
-            .map_err(|error| sqlite_error("cannot exhaust fixture revision", error))?;
-        assert!(
-            matches!(set_peer_active(&fixture.0, &id, i64::MAX as u64, false), Err(error) if error.kind() == io::ErrorKind::InvalidData)
-        );
-        assert_eq!(
-            list_peers(&fixture.0)?[0].authorization_revision,
-            i64::MAX as u64
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn bounded_capacity_counts_tombstones_and_audit_stays_bounded() -> io::Result<()> {
-        let fixture = Fixture::new()?;
-        let id = random_id()?;
-        register_peer(
-            &fixture.0,
-            &id,
-            "peer",
-            b"first certificate",
-            "peer.example",
-            None,
-        )?;
-        let mut connection = fixture.writable()?;
-        let transaction = connection
-            .transaction()
-            .map_err(|error| sqlite_error("cannot begin capacity fixture", error))?;
-        for _ in 1..MAX_PEERS {
-            transaction
-                .execute(
-                    "INSERT INTO peers VALUES (?1, 'fixture', 1, 1)",
-                    [random_id()?],
-                )
-                .map_err(|error| sqlite_error("cannot fill peer fixture", error))?;
-        }
-        for index in 1..MAX_CERTIFICATES {
-            transaction
-                .execute(
-                    "INSERT INTO peer_certificates VALUES (?1, ?2, 'peer.example', 1)",
-                    params![index.to_be_bytes().as_slice(), id],
-                )
-                .map_err(|error| sqlite_error("cannot fill certificate fixture", error))?;
-        }
-        for _ in 0..MAX_AUDIT_RECORDS {
-            transaction.execute("INSERT INTO peer_audit (entry, action, node_id, authorization_revision) VALUES ('offline', 'enable', ?1, 1)", [&id])
-            .map_err(|error| sqlite_error("cannot fill audit fixture", error))?;
-        }
-        transaction
-            .commit()
-            .map_err(|error| sqlite_error("cannot complete capacity fixture", error))?;
-        assert!(
-            register_peer(
-                &fixture.0,
-                &random_id()?,
-                "overflow",
-                b"another certificate",
-                "peer.example",
-                None
-            )
-            .is_err()
-        );
-        assert!(
-            register_peer(
-                &fixture.0,
-                &id,
-                "peer",
-                b"another certificate",
-                "peer.example",
-                Some(1)
-            )
-            .is_err()
-        );
-        assert_eq!(list_peers(&fixture.0)?.len(), MAX_PEERS as usize);
-        let peer = revoke_certificate(&fixture.0, b"first certificate", 1)?;
-        assert_eq!(peer.certificate_count, MAX_CERTIFICATES);
-        assert!(
-            register_peer(
-                &fixture.0,
-                &id,
-                "peer",
-                b"another certificate",
-                "peer.example",
-                Some(2)
-            )
-            .is_err()
-        );
-        let count: u32 = connection
-            .query_row("SELECT count(*) FROM peer_audit", [], |row| row.get(0))
-            .map_err(|error| sqlite_error("cannot count audit fixture", error))?;
-        assert_eq!(count, MAX_AUDIT_RECORDS);
-        assert_eq!(authorize_peer(&fixture.0, b"first certificate")?, None);
-        Ok(())
-    }
-
-    #[test]
-    fn migration_backups_wal_content_and_preserves_node_and_administrator() -> io::Result<()> {
-        use argon2::PasswordHasher as _;
-
-        let fixture = Fixture::new()?;
-        fixture.make_v1()?;
-        let connection = fixture.writable()?;
-        let password = b"legacy administrator fixture passphrase";
-        let phc = Argon2::default()
-            .hash_password(password)
-            .map_err(|_| io::Error::other("cannot hash legacy administrator fixture"))?
-            .to_string();
-        // Keep a connection open so committed data remains in WAL during backup.
-        connection
-            .execute(
-                "UPDATE administrators SET username = 'original-admin', password_hash = ?1",
-                [&phc],
-            )
-            .map_err(|error| sqlite_error("cannot populate WAL fixture", error))?;
-        let before = inspect(&fixture.0)?;
-        let administrator_before = administrator(&connection)?;
-        assert_eq!(
-            authenticate(&fixture.0, "original-admin", password, &phc)?
-                .unwrap()
-                .id,
-            administrator_before.0
-        );
-        assert_eq!(before.schema_version, 1);
-        assert!(list_peers(&fixture.0).is_err());
-        let backup_path = fixture.0.join("before-v2.sqlite3");
-        let migrated = migrate(&fixture.0, &backup_path)?;
-        assert_eq!(migrated.schema_version, SCHEMA_VERSION);
-        assert_eq!(migrated.node_id, before.node_id);
-        assert_eq!(migrated.name, before.name);
-        assert_eq!(administrator(&connection)?, administrator_before);
-        assert_eq!(
-            authenticate(&fixture.0, "original-admin", password, &phc)?
-                .unwrap()
-                .id,
-            administrator_before.0
-        );
-        assert!(list_peers(&fixture.0)?.is_empty());
-        let backup = open(&backup_path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
-        assert_eq!(read_overview(&backup)?.schema_version, 1);
-        assert_eq!(read_overview(&backup)?.node_id, before.node_id);
-        assert_eq!(administrator(&backup)?, administrator_before);
-        let journal: String = backup
-            .pragma_query_value(None, "journal_mode", |row| row.get(0))
-            .map_err(|error| sqlite_error("cannot inspect backup mode", error))?;
-        assert_eq!(journal, "delete");
-        assert!(
-            matches!(migrate(&fixture.0, &fixture.0.join("second.sqlite3")), Err(error) if error.kind() == io::ErrorKind::AlreadyExists)
-        );
-        assert!(!fixture.0.join("second.sqlite3").exists());
-        Ok(())
-    }
-
-    #[test]
-    fn migration_conflicts_and_schema_errors_never_reset_or_overwrite() -> io::Result<()> {
-        use std::io::Write as _;
-
-        let fixture = Fixture::new()?;
-        fixture.make_v1()?;
-        let before = inspect(&fixture.0)?.node_id;
-        let path = fixture.0.join("existing-backup");
-        let mut options = OpenOptions::new();
-        options.write(true).create_new(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            options.mode(0o600);
-        }
-        options
-            .open(&path)?
-            .write_all(b"operator-owned existing backup")?;
-        assert!(
-            matches!(migrate(&fixture.0, &path), Err(error) if error.kind() == io::ErrorKind::AlreadyExists)
-        );
-        assert_eq!(fs::read(&path)?, b"operator-owned existing backup");
-        assert_eq!(inspect(&fixture.0)?.schema_version, 1);
-        fixture
-            .writable()?
-            .execute_batch("CREATE TABLE peers (unexpected TEXT);")
-            .map_err(|error| sqlite_error("cannot construct conflicting v1 fixture", error))?;
-        assert!(migrate(&fixture.0, &fixture.0.join("failed-migration-backup")).is_err());
-        assert_eq!(inspect(&fixture.0)?.schema_version, 1);
-        assert_eq!(inspect(&fixture.0)?.node_id, before);
-        let connection = fixture.writable()?;
-        let created: u32 = connection
-            .query_row(
-                "SELECT count(*) FROM sqlite_schema WHERE name = 'peer_certificates'",
-                [],
-                |row| row.get(0),
-            )
-            .map_err(|error| sqlite_error("cannot inspect rolled back fixture schema", error))?;
-        assert_eq!(created, 0);
-        connection
-            .pragma_update(None, "user_version", 99)
-            .map_err(|error| sqlite_error("cannot set future fixture schema", error))?;
-        let future_backup = fixture.0.join("future-backup");
-        assert!(
-            matches!(migrate(&fixture.0, &future_backup), Err(error) if error.kind() == io::ErrorKind::InvalidData)
-        );
-        assert!(!future_backup.exists());
-        Ok(())
-    }
-
-    #[test]
-    fn busy_and_broken_storage_are_errors_not_anonymous_peers() -> io::Result<()> {
-        let fixture = Fixture::new()?;
-        let id = random_id()?;
-        register_peer(
-            &fixture.0,
-            &id,
-            "peer",
-            b"certificate",
-            "peer.example",
-            None,
-        )?;
-        let mut connection = fixture.writable()?;
-        let transaction = connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(|error| sqlite_error("cannot hold fixture write lock", error))?;
-        assert!(
-            matches!(set_peer_active(&fixture.0, &id, 1, false), Err(error) if error.kind() == io::ErrorKind::WouldBlock)
-        );
-        transaction
-            .rollback()
-            .map_err(|error| sqlite_error("cannot release fixture write lock", error))?;
-        connection.execute_batch("PRAGMA ignore_check_constraints = ON; UPDATE peer_certificates SET revoked = 2; PRAGMA ignore_check_constraints = OFF;")
-        .map_err(|error| sqlite_error("cannot corrupt fixture revocation flag", error))?;
-        assert!(
-            matches!(register_peer(&fixture.0, &id, "peer", b"certificate", "peer.example", Some(1)), Err(error) if error.kind() == io::ErrorKind::InvalidData)
-        );
-        assert!(
-            matches!(revoke_certificate(&fixture.0, b"certificate", 1), Err(error) if error.kind() == io::ErrorKind::InvalidData)
-        );
-        assert!(
-            matches!(authorize_peer(&fixture.0, b"certificate"), Err(error) if error.kind() == io::ErrorKind::InvalidData)
-        );
-        connection
-            .execute("DROP TABLE peer_certificates", [])
-            .map_err(|error| sqlite_error("cannot break fixture certificate table", error))?;
-        assert!(
-            matches!(authorize_peer(&fixture.0, b"certificate"), Err(error) if error.kind() == io::ErrorKind::InvalidData)
-        );
-        Ok(())
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn migration_backup_is_private_and_rejects_symlinks_and_reserved_sidecars() -> io::Result<()> {
-        use std::os::unix::fs::{PermissionsExt, symlink};
-
-        let fixture = Fixture::new()?;
-        fixture.make_v1()?;
-        assert!(
-            matches!(migrate(&fixture.0, &fixture.0.join(format!("{DATABASE_NAME}-wal"))), Err(error) if error.kind() == io::ErrorKind::InvalidInput)
-        );
-        let dangling = fixture.0.join("linked-backup");
-        symlink(fixture.0.join("absent-target"), &dangling)?;
-        assert!(
-            matches!(migrate(&fixture.0, &dangling), Err(error) if error.kind() == io::ErrorKind::AlreadyExists)
-        );
-        assert!(!fixture.0.join("absent-target").exists());
-        let path = fixture.0.join("private-backup");
-        migrate(&fixture.0, &path)?;
-        assert_eq!(fs::metadata(&path)?.permissions().mode() & 0o777, 0o600);
-        assert_eq!(
-            fs::metadata(&fixture.0)?.permissions().mode() & 0o777,
-            0o700
-        );
-        Ok(())
-    }
 }

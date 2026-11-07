@@ -8,7 +8,6 @@ use std::{
     time::Duration,
 };
 
-use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use bytes::Bytes;
 use http_body_util::{BodyExt as _, Empty};
 use hyper_util::rt::TokioIo;
@@ -18,7 +17,10 @@ use serde::Deserialize;
 use tokio::{net::TcpStream, task::JoinSet, time::timeout};
 use tokio_rustls::TlsConnector;
 
-use super::super::{store, tls};
+use super::super::{
+    store::{self, valid_id},
+    tls,
+};
 use super::{CAPABILITIES, IDENTITY_PATH, PROTOCOL_VERSION, PublicOrigin};
 
 const PROBE_TIMEOUT: Duration = Duration::from_secs(10);
@@ -344,90 +346,6 @@ fn validate_identity(identity: &Identity, expected_peer: &str, local_id: &str) -
     Ok(())
 }
 
-fn valid_id(value: &str) -> bool {
-    let mut decoded = [0; 16];
-    value.len() == 22 && matches!(URL_SAFE_NO_PAD.decode_slice(value, &mut decoded), Ok(16))
-}
-
 fn invalid(message: &'static str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, message)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::manage::node::tests::Fixture;
-
-    fn args(fixture: &Fixture) -> ProbeArgs {
-        ProbeArgs {
-            endpoint: "https://localhost:9".into(),
-            peer_id: fixture.server_id.clone(),
-            ca: fixture.ca.clone(),
-            cert: fixture.client_cert.clone(),
-            key: fixture.client_key.clone(),
-            data_dir: Some(fixture.client_state.clone()),
-        }
-    }
-
-    fn restored(fixture: &Fixture, phase: &str, key: [u8; 32]) -> io::Result<()> {
-        let connection =
-            rusqlite::Connection::open(fixture.client_state.join("management.sqlite3"))
-                .map_err(io::Error::other)?;
-        connection.execute(
-            "UPDATE recovery_state SET kind='restored',phase=?1,recovery_id=?2,source_node_id=?3,
-             source_schema_version=13,source_database_sha256=?4,node_key_sha256=?5,
-             imported_users=0,imported_prefixes=0,imported_addresses=0,imported_pools=0 WHERE singleton=1",
-            rusqlite::params![phase, "AAAAAAAAAAAAAAAAAAAAAA", fixture.server_id, "3".repeat(64), &key[..]],
-        ).map_err(io::Error::other)?;
-        Ok(())
-    }
-
-    #[test]
-    fn preparation_works_while_author_is_held_but_rejects_pending_or_wrong_key() -> io::Result<()> {
-        let fixture = Fixture::new(true, true)?;
-        let _author = store::lock(&fixture.client_state)?;
-        assert!(prepare(args(&fixture)).is_ok());
-        let key = tls::node_key_sha256(&fixture.client_key)?;
-        restored(&fixture, "pending_review", key)?;
-        assert_eq!(
-            prepare(args(&fixture)).err().unwrap().kind(),
-            io::ErrorKind::PermissionDenied
-        );
-        // Any other pin is rejected even if the supplied certificate/key pair
-        // has valid CA, dual EKU and a matching private key of its own.
-        let mut wrong = key;
-        wrong[0] ^= 1;
-        restored(&fixture, "ready", wrong)?;
-        assert_eq!(
-            prepare(args(&fixture)).err().unwrap().kind(),
-            io::ErrorKind::PermissionDenied
-        );
-        restored(&fixture, "ready", key)?;
-        assert!(prepare(args(&fixture)).is_ok());
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn prepared_probe_rechecks_local_recovery_before_any_connect() -> io::Result<()> {
-        let fixture = tokio::task::spawn_blocking(|| Fixture::new(true, true))
-            .await
-            .map_err(io::Error::other)??;
-        let prepared = prepare(args(&fixture))?;
-        restored(
-            &fixture,
-            "pending_review",
-            tls::node_key_sha256(&fixture.client_key)?,
-        )?;
-        let error = timeout(PROBE_TIMEOUT, probe_once(prepared))
-            .await
-            .map_err(io::Error::other)?
-            .err()
-            .unwrap();
-        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
-        assert_eq!(
-            error.to_string(),
-            "management recovery is pending; inspect its phase before selecting a recovery workflow"
-        );
-        Ok(())
-    }
 }

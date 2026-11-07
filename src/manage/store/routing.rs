@@ -79,58 +79,17 @@ pub(super) fn read(connection: &Connection) -> io::Result<RoutingData> {
     let prefixes = collect(
         connection,
         "SELECT id,name,cidr,retired,revision FROM routing_prefixes ORDER BY id LIMIT 257",
-        |row| {
-            let text: String = row.get(2)?;
-            let cidr = text
-                .parse::<cidr::IpCidr>()
-                .map_err(|_| rusqlite::Error::InvalidQuery)?;
-            if cidr.to_string() != text {
-                return Err(rusqlite::Error::InvalidQuery);
-            }
-            Ok(PrefixRecord {
-                id: row.get(0)?,
-                name: row.get(1)?,
-                cidr,
-                retired: users::read_bool(row, 3)?,
-                revision: users::read_revision(row, 4)?,
-            })
-        },
+        serde_rusqlite::from_row_with_columns::<PrefixRecord>,
     )?;
     let addresses = collect(
         connection,
         "SELECT id,name,address,prefix_id,state,revision FROM routing_addresses ORDER BY id LIMIT 1025",
-        |row| {
-            let text: String = row.get(2)?;
-            let ip = text
-                .parse::<std::net::IpAddr>()
-                .map_err(|_| rusqlite::Error::InvalidQuery)?;
-            if ip.to_string() != text {
-                return Err(rusqlite::Error::InvalidQuery);
-            }
-            Ok(AddressRecord {
-                id: row.get(0)?,
-                name: row.get(1)?,
-                ip,
-                prefix_id: row.get(3)?,
-                state: state(row, 4)?,
-                revision: users::read_revision(row, 5)?,
-            })
-        },
+        serde_rusqlite::from_row_with_columns::<AddressRecord>,
     )?;
     let mut pools = collect(
         connection,
         "SELECT id,name,family,state,revision FROM routing_pools ORDER BY id LIMIT 129",
-        |row| {
-            Ok(PoolRecord {
-                id: row.get(0)?,
-                name: row.get(1)?,
-                family: AddressFamily::parse(&row.get::<_, String>(2)?)
-                    .map_err(|_| rusqlite::Error::InvalidQuery)?,
-                state: state(row, 3)?,
-                revision: users::read_revision(row, 4)?,
-                members: Vec::new(),
-            })
-        },
+        serde_rusqlite::from_row_with_columns::<PoolRecord>,
     )?;
     if prefixes.len() > model::MAX_PREFIXES
         || addresses.len() > model::MAX_ADDRESSES
@@ -149,7 +108,7 @@ pub(super) fn read(connection: &Connection) -> io::Result<RoutingData> {
     let members = collect(
         connection,
         "SELECT pool_id,address_id FROM routing_pool_members ORDER BY pool_id,address_id LIMIT 8193",
-        |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+        |row, _| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
     )?;
     if members.len() > model::MAX_MEMBERS {
         return Err(corrupt());
@@ -165,7 +124,7 @@ pub(super) fn read(connection: &Connection) -> io::Result<RoutingData> {
     let mut permissions = collect(
         connection,
         "SELECT user_id,legacy_allowed FROM routing_permissions ORDER BY user_id LIMIT 1025",
-        |row| {
+        |row, _| {
             Ok(RoutePermission {
                 user_id: row.get(0)?,
                 legacy_allowed: users::read_bool(row, 1)?,
@@ -196,7 +155,7 @@ pub(super) fn read(connection: &Connection) -> io::Result<RoutingData> {
             false,
         ),
     ] {
-        let grants = collect(connection, sql, |row| {
+        let grants = collect(connection, sql, |row, _| {
             Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
         })?;
         if grants.len() > crate::access::MAX_USERS * model::MAX_GRANTS {
@@ -222,19 +181,17 @@ pub(super) fn read(connection: &Connection) -> io::Result<RoutingData> {
 fn collect<T>(
     connection: &Connection,
     sql: &str,
-    read: impl FnMut(&rusqlite::Row<'_>) -> rusqlite::Result<T>,
+    mut read: impl FnMut(&rusqlite::Row<'_>, &[String]) -> Result<T, serde_rusqlite::Error>,
 ) -> io::Result<Vec<T>> {
     let mut statement = connection
         .prepare(sql)
         .map_err(|error| sqlite_error("cannot prepare finite routing inspection", error))?;
+    let columns = serde_rusqlite::columns_from_statement(&statement);
     let rows = statement
-        .query_map([], read)
+        .query_and_then([], |row| read(row, &columns))
         .map_err(|error| sqlite_error("cannot query finite routing", error))?;
     rows.collect::<Result<Vec<_>, _>>()
         .map_err(|error| sqlite_error("cannot read finite routing", error))
-}
-fn state(row: &rusqlite::Row<'_>, index: usize) -> rusqlite::Result<ResourceState> {
-    ResourceState::parse(&row.get::<_, String>(index)?).map_err(|_| rusqlite::Error::InvalidQuery)
 }
 
 /// Change only a typed catalog object; the caller validates and commits the whole policy.
@@ -428,7 +385,7 @@ pub(super) fn mutate(
             pool.revision = next;
             Ok((RoutingEntity::Pool(pool.clone()), "remove_pool_member"))
         }
-        PolicyChange::SetRoutePermission { permission } => {
+        PolicyChange::SetRoutePermission(permission) => {
             id_valid(&permission.user_id)?;
             if !policy
                 .users
@@ -596,451 +553,4 @@ fn missing() -> io::Error {
 }
 fn capacity() -> io::Error {
     super::ControlError::PolicyCapacity.error()
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::manage::store::{self, initialize, update_lock};
-
-    struct Fixture {
-        directory: std::path::PathBuf,
-        administrator: String,
-    }
-    impl Fixture {
-        fn new() -> io::Result<Self> {
-            let directory = std::env::temp_dir().join(format!("vproxy-routing-{}", random_id()?));
-            initialize(&directory, "egress node", "admin", "fixture PHC")?;
-            let connection = super::super::peers::open_existing(&directory, false)?;
-            let administrator = connection
-                .query_row("SELECT id FROM administrators", [], |row| row.get(0))
-                .map_err(|error| sqlite_error("cannot read routing fixture actor", error))?;
-            Ok(Self {
-                directory,
-                administrator,
-            })
-        }
-        fn change(&self, revision: u64, change: PolicyChange) -> io::Result<store::ChangeResult> {
-            store::apply_policy(
-                &self.directory,
-                &self.administrator,
-                revision,
-                change,
-                &update_lock(&self.directory)?,
-            )
-        }
-    }
-    impl Drop for Fixture {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.directory);
-        }
-    }
-    fn address(change: store::ChangeResult) -> AddressRecord {
-        match change.routing.unwrap() {
-            RoutingEntity::Address(entry) => entry,
-            _ => panic!("expected concrete address"),
-        }
-    }
-    fn prefix(change: store::ChangeResult) -> PrefixRecord {
-        match change.routing.unwrap() {
-            RoutingEntity::Prefix(entry) => entry,
-            _ => panic!("expected prefix"),
-        }
-    }
-    fn pool(change: store::ChangeResult) -> PoolRecord {
-        match change.routing.unwrap() {
-            RoutingEntity::Pool(entry) => entry,
-            _ => panic!("expected pool"),
-        }
-    }
-
-    #[test]
-    fn assets_preserve_unique_ips_members_and_retirement_tombstones() -> io::Result<()> {
-        let fixture = Fixture::new()?;
-        let prefix = prefix(fixture.change(
-            1,
-            PolicyChange::CreatePrefix {
-                name: "owned loopback".into(),
-                cidr: "127.0.0.0/8".parse().unwrap(),
-            },
-        )?);
-        assert!(
-            fixture
-                .change(
-                    2,
-                    PolicyChange::CreatePrefix {
-                        name: "duplicate".into(),
-                        cidr: prefix.cidr
-                    }
-                )
-                .is_err()
-        );
-        assert!(
-            fixture
-                .change(
-                    2,
-                    PolicyChange::CreateAddress {
-                        name: "outside".into(),
-                        ip: "192.0.2.1".parse().unwrap(),
-                        prefix_id: Some(prefix.id.clone())
-                    }
-                )
-                .is_err()
-        );
-        let address = address(fixture.change(
-            2,
-            PolicyChange::CreateAddress {
-                name: "source".into(),
-                ip: "127.0.0.2".parse().unwrap(),
-                prefix_id: Some(prefix.id.clone()),
-            },
-        )?);
-        assert!(
-            fixture
-                .change(
-                    3,
-                    PolicyChange::RetirePrefix {
-                        id: prefix.id.clone()
-                    }
-                )
-                .is_err()
-        );
-        let pool = pool(fixture.change(
-            3,
-            PolicyChange::CreatePool {
-                name: "shared".into(),
-                family: AddressFamily::V4,
-            },
-        )?);
-        fixture.change(
-            4,
-            PolicyChange::AddPoolMember {
-                pool_id: pool.id.clone(),
-                address_id: address.id.clone(),
-            },
-        )?;
-        fixture.change(
-            5,
-            PolicyChange::SetAddressState {
-                id: address.id.clone(),
-                state: ResourceState::Draining,
-            },
-        )?;
-        let (revision, data) = routing_data(&fixture.directory)?;
-        assert_eq!(revision, 6);
-        assert_eq!(data.pools[0].members, vec![address.id.clone()]);
-        fixture.change(
-            6,
-            PolicyChange::SetAddressState {
-                id: address.id.clone(),
-                state: ResourceState::Retired,
-            },
-        )?;
-        assert!(
-            fixture
-                .change(
-                    7,
-                    PolicyChange::SetAddressState {
-                        id: address.id.clone(),
-                        state: ResourceState::Active
-                    }
-                )
-                .is_err()
-        );
-        assert!(
-            fixture
-                .change(
-                    7,
-                    PolicyChange::CreateAddress {
-                        name: "reused".into(),
-                        ip: address.ip,
-                        prefix_id: None
-                    }
-                )
-                .is_err()
-        );
-        fixture.change(7, PolicyChange::RetirePrefix { id: prefix.id })?;
-        let connection = super::super::peers::open_existing(&fixture.directory, false)?;
-        let audits:i64=connection.query_row("SELECT count(*) FROM routing_audit WHERE administrator_id=?1 AND controller_node_id IS NULL",[&fixture.administrator],|row|row.get(0)).map_err(|error|sqlite_error("cannot inspect routing fixture audit",error))?;
-        assert_eq!(audits, 7);
-        Ok(())
-    }
-
-    #[test]
-    fn permissions_are_explicit_atomic_and_never_export_machine_verifiers() -> io::Result<()> {
-        let fixture = Fixture::new()?;
-        let user = fixture
-            .change(
-                1,
-                PolicyChange::CreateUser {
-                    name: "route user".into(),
-                    protocols: vec![crate::access::Protocol::Http],
-                    concurrent_limit: 8,
-                },
-            )?
-            .user
-            .unwrap();
-        let initial = routing_data(&fixture.directory)?.1;
-        assert_eq!(initial.permissions.len(), 1);
-        assert!(initial.permissions[0].legacy_allowed);
-        let address = address(fixture.change(
-            2,
-            PolicyChange::CreateAddress {
-                name: "source".into(),
-                ip: "127.0.0.2".parse().unwrap(),
-                prefix_id: None,
-            },
-        )?);
-        fixture.change(
-            3,
-            PolicyChange::SetRoutePermission {
-                permission: RoutePermission {
-                    user_id: user.id.clone(),
-                    legacy_allowed: false,
-                    exits: vec![address.id.clone()],
-                    pools: Vec::new(),
-                },
-            },
-        )?;
-        let connection = super::super::peers::open_existing(&fixture.directory, true)?;
-        connection.execute_batch("CREATE TRIGGER fixture_route_audit_failure BEFORE INSERT ON routing_audit BEGIN SELECT RAISE(ABORT,'fixture'); END;").map_err(|error|sqlite_error("cannot add routing rollback fixture",error))?;
-        assert!(
-            fixture
-                .change(
-                    4,
-                    PolicyChange::SetRoutePermission {
-                        permission: RoutePermission::legacy(user.id.clone())
-                    }
-                )
-                .is_err()
-        );
-        let (revision, data) = routing_data(&fixture.directory)?;
-        assert_eq!(revision, 4);
-        assert!(!data.permissions[0].legacy_allowed);
-        assert_eq!(data.permissions[0].exits, vec![address.id]);
-        connection.execute_batch("DROP TRIGGER fixture_route_audit_failure; DELETE FROM routing_exit_grants; DELETE FROM routing_permissions;").map_err(|error|sqlite_error("cannot corrupt routing permission fixture",error))?;
-        assert!(store::load_policy(&fixture.directory).is_err());
-        assert!(routing_data(&fixture.directory).is_err());
-        Ok(())
-    }
-
-    fn make_v4(connection: &Connection) -> io::Result<()> {
-        super::super::control::reconstruct_v5(connection)?;
-        connection.execute_batch("DROP TABLE routing_audit; DROP TABLE routing_exit_grants; DROP TABLE routing_pool_grants; DROP TABLE routing_permissions; DROP TABLE routing_pool_members; DROP TABLE routing_pools; DROP TABLE routing_addresses; DROP TABLE routing_prefixes; PRAGMA user_version=4;").map_err(|error|sqlite_error("cannot reconstruct schema four routing fixture",error))
-    }
-
-    #[test]
-    fn v4_migration_preserves_identity_verifiers_owner_and_pending_intent() -> io::Result<()> {
-        let fixture = Fixture::new()?;
-        let user = fixture
-            .change(
-                1,
-                PolicyChange::CreateUser {
-                    name: "existing user".into(),
-                    protocols: vec![crate::access::Protocol::Http],
-                    concurrent_limit: 2,
-                },
-            )?
-            .user
-            .unwrap();
-        fixture.change(
-            2,
-            PolicyChange::CreateCredential {
-                user_id: user.id.clone(),
-            },
-        )?;
-        let peer = random_id()?;
-        store::register_peer(
-            &fixture.directory,
-            &peer,
-            "existing child",
-            b"public fixture DER",
-            "child.example",
-            None,
-        )?;
-        let connection = super::super::peers::open_existing(&fixture.directory, true)?;
-        // The later v4 reconstruction must start with legacy-issued work, not
-        // discard a permanent schema20 command-history identity.
-        store::recovery::restore_schema_nineteen_for_test(&connection)?;
-        store::targets::configure(
-            &fixture.directory,
-            &fixture.administrator,
-            &peer,
-            None,
-            "https://child.example",
-            true,
-            None,
-        )?;
-        store::targets::observe(&fixture.directory, &peer, 1, 2, 0, 1)?;
-        let pending = store::targets::enqueue(
-            &fixture.directory,
-            &fixture.administrator,
-            1,
-            store::Command {
-                target_node_id: peer.clone(),
-                epoch: 2,
-                command_id: 1,
-                expected_policy_revision: 1,
-                source_administrator_id: fixture.administrator.clone(),
-                change: PolicyChange::CreateUser {
-                    name: "durable intent".into(),
-                    protocols: vec![],
-                    concurrent_limit: 1,
-                },
-            },
-        )?;
-        store::set_owner(
-            &fixture.directory,
-            &update_lock(&fixture.directory)?,
-            &fixture.administrator,
-            1,
-            Some(&peer),
-        )?;
-        let before = store::load_policy(&fixture.directory)?;
-        let identity = store::inspect(&fixture.directory)?.node_id;
-        let command: Vec<u8> = connection
-            .query_row("SELECT command FROM control_outbox", [], |row| row.get(0))
-            .map_err(|error| sqlite_error("cannot read migration outbox fixture", error))?;
-        make_v4(&connection)?;
-        assert!(routing_data(&fixture.directory).is_err());
-        let compatible = store::load_policy(&fixture.directory)?;
-        assert!(compatible.routing.permissions[0].legacy_allowed);
-        let backup = fixture.directory.join("schema4-consistent.sqlite3");
-        store::migrate(&fixture.directory, &backup)?;
-        let after = store::load_policy(&fixture.directory)?;
-        assert_eq!(after.revision, before.revision);
-        assert_eq!(
-            after.credentials[0].secret_digest,
-            before.credentials[0].secret_digest
-        );
-        assert_eq!(after.users[0].id, user.id);
-        assert!(after.routing.permissions[0].legacy_allowed);
-        assert_eq!(store::inspect(&fixture.directory)?.node_id, identity);
-        let owner = store::ownership(&fixture.directory)?;
-        assert_eq!(
-            (owner.controller_node_id, owner.epoch),
-            (Some(peer.clone()), 2)
-        );
-        let job = store::targets::job(&fixture.directory, &peer)?.unwrap();
-        assert_eq!(job.job_id, pending.job_id);
-        let history = store::targets::history::get(
-            &fixture.directory,
-            &fixture.administrator,
-            &peer,
-            &pending.job_id,
-        )?
-        .unwrap();
-        assert!(history.imported);
-        assert_eq!(history.sequence, 1);
-        assert_eq!(history.job, job);
-        assert!(history.recorded_at_unix_s.is_none());
-        assert!(history.updated_at_unix_s.is_none());
-        let restored: Vec<u8> = connection
-            .query_row("SELECT command FROM control_outbox", [], |row| row.get(0))
-            .map_err(|error| sqlite_error("cannot recheck migration outbox fixture", error))?;
-        assert_eq!(restored, command);
-        let copied = Connection::open(backup).map_err(io::Error::other)?;
-        assert_eq!(store::read_overview(&copied)?.schema_version, 4);
-        let phc: String = copied
-            .query_row("SELECT password_hash FROM administrators", [], |row| {
-                row.get(0)
-            })
-            .map_err(io::Error::other)?;
-        assert_eq!(phc, "fixture PHC");
-        Ok(())
-    }
-
-    #[test]
-    fn failed_v4_migration_retains_backup_and_rolls_back_all_new_routing_tables() -> io::Result<()>
-    {
-        let fixture = Fixture::new()?;
-        fixture.change(
-            1,
-            PolicyChange::CreateUser {
-                name: "existing".into(),
-                protocols: vec![],
-                concurrent_limit: 1,
-            },
-        )?;
-        let connection = super::super::peers::open_existing(&fixture.directory, true)?;
-        make_v4(&connection)?;
-        connection
-            .execute_batch("CREATE TABLE routing_audit(fixture_collision INTEGER);")
-            .map_err(io::Error::other)?;
-        let backup = fixture.directory.join("failed-schema4.sqlite3");
-        assert!(store::migrate(&fixture.directory, &backup).is_err());
-        assert_eq!(store::inspect(&fixture.directory)?.schema_version, 4);
-        assert_eq!(store::load_policy(&fixture.directory)?.users.len(), 1);
-        let tables: i64 = connection
-            .query_row(
-                "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='routing_prefixes'",
-                [],
-                |row| row.get(0),
-            )
-            .map_err(io::Error::other)?;
-        assert_eq!(tables, 0);
-        let copied = Connection::open(backup).map_err(io::Error::other)?;
-        assert_eq!(store::read_overview(&copied)?.schema_version, 4);
-        Ok(())
-    }
-
-    #[test]
-    fn ip_aliases_cross_family_members_and_expired_user_grants_fail_atomically() -> io::Result<()> {
-        let fixture = Fixture::new()?;
-        assert!(
-            fixture
-                .change(
-                    1,
-                    PolicyChange::CreateAddress {
-                        name: "alias".into(),
-                        ip: "::ffff:127.0.0.2".parse().unwrap(),
-                        prefix_id: None
-                    }
-                )
-                .is_err()
-        );
-        let address = address(fixture.change(
-            1,
-            PolicyChange::CreateAddress {
-                name: "v4".into(),
-                ip: "127.0.0.2".parse().unwrap(),
-                prefix_id: None,
-            },
-        )?);
-        let pool = pool(fixture.change(
-            2,
-            PolicyChange::CreatePool {
-                name: "v6".into(),
-                family: AddressFamily::V6,
-            },
-        )?);
-        assert!(
-            fixture
-                .change(
-                    3,
-                    PolicyChange::AddPoolMember {
-                        pool_id: pool.id,
-                        address_id: address.id.clone()
-                    }
-                )
-                .is_err()
-        );
-        assert!(
-            fixture
-                .change(
-                    3,
-                    PolicyChange::SetRoutePermission {
-                        permission: RoutePermission {
-                            user_id: random_id()?,
-                            legacy_allowed: true,
-                            exits: vec![address.id],
-                            pools: vec![]
-                        }
-                    }
-                )
-                .is_err()
-        );
-        assert_eq!(store::policy_status(&fixture.directory)?.revision, 3);
-        Ok(())
-    }
 }

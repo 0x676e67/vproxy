@@ -26,7 +26,7 @@ pub(in crate::manage) struct Configuration {
     #[serde(deserialize_with = "Option::deserialize")]
     pub(in crate::manage) egress: Option<Egress>,
     /// Only format 2 selects witnessed export. Older Native descriptions omit
-    /// this field; absence never enables or silently downgrades Source capture.
+    /// this field. A retained binding is rejected after source runtime retirement.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(in crate::manage) source: Option<Source>,
 }
@@ -98,40 +98,6 @@ pub(in crate::manage) struct Egress {
 }
 
 impl Configuration {
-    /// Pure binary-capability check before any transport/runtime or kernel work.
-    /// Static capture is portable and intentionally does not call this check.
-    #[cfg(feature = "witness-journal")]
-    pub(in crate::manage) fn check_egress_support(&self) -> io::Result<()> {
-        #[cfg(not(all(target_os = "linux", feature = "ebpf")))]
-        if self.egress.is_some() {
-            return Err(io::Error::new(
-                io::ErrorKind::Unsupported,
-                "registered egress requires the Linux eBPF backend",
-            ));
-        }
-        Ok(())
-    }
-
-    /// Apply exactly the declared backend on the original startup thread,
-    /// before Tokio or a Source worker exists. Unsupported platforms/features
-    /// reject a selected backend instead of silently using native sockets.
-    /// This may attach kernel programs; capture/verify never calls it.
-    #[cfg(feature = "witness-journal")]
-    pub(in crate::manage) fn load_egress(&self) -> io::Result<crate::ebpf::Config> {
-        self.validate()?;
-        self.check_egress_support()?;
-        #[cfg(all(target_os = "linux", feature = "ebpf"))]
-        if let Some(egress) = &self.egress {
-            return crate::ebpf::Config::try_new(Some(crate::ebpf::LinuxConfig {
-                interfaces: &egress.interfaces,
-                allow_legacy_tc: egress.allow_legacy_tc,
-                replace_stale_legacy_tc: egress.replace_stale_legacy_tc,
-                map_capacity: egress.map_capacity.get(),
-            }));
-        }
-        crate::ebpf::Args::default().load()
-    }
-
     /// Check bounded pure choices before claiming output. Certificate and
     /// referenced-file validation happen on the captured private copy, not on
     /// a different read of the source. No port or kernel availability is implied.
@@ -155,10 +121,9 @@ impl Configuration {
                     "snapshot source enrollment or canonical witness origin differs",
                 ));
             }
-            #[cfg(not(feature = "witness-journal"))]
             return Err(io::Error::new(
                 io::ErrorKind::Unsupported,
-                "witnessed snapshot export requires witness-journal",
+                "witnessed source snapshots are no longer supported",
             ));
         }
         crate::manage::api::PublicOrigin::parse(&self.management.origin)?;

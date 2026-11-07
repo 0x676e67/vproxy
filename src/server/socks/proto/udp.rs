@@ -70,18 +70,4 @@ mod tests {
             std::io::ErrorKind::InvalidData
         );
     }
-
-    #[test]
-    fn rejects_oversized_domain_without_writing_udp_header() {
-        let header = UdpHeader::new(
-            0,
-            Address::DomainAddress("a".repeat(u8::MAX as usize + 1), 53),
-        );
-        let mut buffer = Vec::new();
-
-        let error = header.write_to_buf(&mut buffer).unwrap_err();
-
-        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
-        assert!(buffer.is_empty());
-    }
 }

@@ -185,20 +185,6 @@ pub(in crate::manage) fn apply(
     Ok(outcome)
 }
 
-/// Apply under the source worker's transaction without committing or publishing
-/// policy. Terminal replay rechecks current peer/owner authority, then only reads
-/// its original v4 receipt; it consumes neither command nor witness sequence.
-#[cfg(feature = "witness-journal")]
-pub(in crate::manage) fn apply_in(
-    tx: &mut rusqlite::Transaction<'_>,
-    authorization: &RemoteAuthorization,
-    inventory: &Inventory,
-    command: Command,
-) -> io::Result<Outcome> {
-    let digest = digest(&command)?;
-    apply_with_digest(tx, authorization, inventory, command, digest)
-}
-
 fn apply_with_digest(
     tx: &mut rusqlite::Transaction<'_>,
     authorization: &RemoteAuthorization,

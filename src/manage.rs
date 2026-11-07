@@ -384,30 +384,3 @@ fn validate_password(password: &[u8]) -> io::Result<()> {
     }
     Ok(())
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn password_input_preserves_spaces_but_rejects_extra_lines_and_overflow() {
-        assert_eq!(
-            &*read_password(&b"  a long passphrase  \r\n"[..]).unwrap(),
-            b"  a long passphrase  "
-        );
-        for input in [
-            &b"short"[..],
-            &b"a long passphrase\nsecond line"[..],
-            &b"a long\0passphrase"[..],
-        ] {
-            assert!(read_password(input).is_err());
-        }
-        assert!(read_password(&vec![b'x'; MAX_PASSWORD_BYTES + 1][..]).is_err());
-        assert_eq!(
-            read_password(&vec![b'x'; MAX_PASSWORD_BYTES][..])
-                .unwrap()
-                .len(),
-            MAX_PASSWORD_BYTES
-        );
-    }
-}

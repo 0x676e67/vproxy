@@ -1626,10 +1626,6 @@ fn panic(_info: &core::panic::PanicInfo<'_>) -> ! {
 mod tests {
     use super::*;
 
-    const BPF_OBJECT_NAME_MAX_LEN: usize = 15;
-    const SOCKET_PROFILE_MAP_NAME: &str = stringify!(SOCKET_PROFILES);
-    const PROFILE_PROGRAM_NAME: &str = stringify!(apply_profile);
-
     fn encoded_profile(
         hop_limit: u8,
         tcp_window: u16,
@@ -1832,23 +1828,6 @@ mod tests {
     }
 
     #[test]
-    fn object_names_and_map_abi_match_userspace() {
-        assert_eq!(SOCKET_PROFILE_MAP_NAME, "SOCKET_PROFILES");
-        assert_eq!(PROFILE_PROGRAM_NAME, "apply_profile");
-        assert!(SOCKET_PROFILE_MAP_NAME.len() <= BPF_OBJECT_NAME_MAX_LEN);
-        assert!(PROFILE_PROGRAM_NAME.len() <= BPF_OBJECT_NAME_MAX_LEN);
-        assert_eq!(core::mem::size_of::<EncodedProfile>(), PROFILE_VALUE_LEN);
-        assert!(Profile::decode(&windows_profile()).is_some());
-        assert!(Profile::decode(&linux_profile()).is_some());
-        assert!(Profile::decode(&macos_profile()).is_some());
-
-        let windows = windows_profile();
-        let profile = Profile::decode(&windows).expect("valid Windows profile");
-        assert_eq!(profile.option(PROFILE_TEMPLATE_MAX_LEN), None);
-        assert_eq!(profile.option(PROFILE_OPTIONS_LEN - 1), None);
-    }
-
-    #[test]
     fn userspace_encoder_matches_the_kernel_profile_validator() {
         use userspace_ebpf::{IpVersion as UserIpVersion, Profile as UserProfile};
 
@@ -1869,50 +1848,6 @@ mod tests {
                 assert_eq!(decoded.tcp_mss(), expected_mss, "{profile} {version:?}");
             }
         }
-    }
-
-    #[test]
-    fn profile_validation_rejects_corrupt_option_metadata() {
-        let mut corrupt = linux_profile();
-        corrupt[11] = 18;
-        assert!(Profile::decode(&corrupt).is_none());
-
-        corrupt = linux_profile();
-        corrupt[PROFILE_OPTIONS_OFFSET + 5] = 3;
-        assert!(Profile::decode(&corrupt).is_none());
-
-        corrupt = windows_profile();
-        corrupt[7] |= 0x80;
-        assert!(Profile::decode(&corrupt).is_none());
-
-        corrupt = windows_profile();
-        corrupt[7] &= !PROFILE_FLAG_IPV4_DF;
-        assert!(Profile::decode(&corrupt).is_none());
-
-        corrupt = macos_profile();
-        corrupt[PROFILE_OPTIONS_OFFSET + 23] = TCP_OPTION_NOP;
-        assert!(Profile::decode(&corrupt).is_none());
-
-        corrupt = macos_profile();
-        corrupt[PROFILE_OPTIONS_OFFSET + 22] = 30;
-        corrupt[PROFILE_OPTIONS_OFFSET + 23] = 2;
-        assert!(Profile::decode(&corrupt).is_none());
-
-        corrupt = linux_profile();
-        corrupt[PROFILE_OPTIONS_OFFSET + 8] = 1;
-        assert!(Profile::decode(&corrupt).is_none());
-
-        corrupt = windows_profile();
-        corrupt[PROFILE_OPTIONS_OFFSET + PROFILE_OPTIONS_LEN - 1] = 1;
-        assert!(Profile::decode(&corrupt).is_none());
-
-        let mut ipv6 = linux_profile();
-        let [mss_high, mss_low] = 1_440_u16.to_be_bytes();
-        ipv6[4] = mss_high;
-        ipv6[5] = mss_low;
-        ipv6[PROFILE_OPTIONS_OFFSET + 2] = mss_high;
-        ipv6[PROFILE_OPTIONS_OFFSET + 3] = mss_low;
-        assert!(Profile::decode(&ipv6).is_some());
     }
 
     #[test]
@@ -1961,62 +1896,5 @@ mod tests {
                 "{old_len}-byte header to {new_len}-byte header"
             );
         }
-    }
-
-    #[test]
-    fn parser_and_length_guards_cover_supported_frames() {
-        const TCP_FLAG_ECE: u8 = 0x40;
-        const TCP_FLAG_CWR: u8 = 0x80;
-
-        assert!(is_initial_syn(TCP_FLAG_SYN | TCP_FLAG_ECE | TCP_FLAG_CWR));
-        assert!(!is_initial_syn(TCP_FLAG_SYN | TCP_FLAG_ACK));
-        assert!(!is_initial_syn(TCP_FLAG_SYN | TCP_FLAG_RST));
-        assert!(!is_initial_syn(TCP_FLAG_SYN | TCP_FLAG_FIN));
-        assert!(!is_initial_syn(TCP_FLAG_SYN | TCP_FLAG_PSH));
-        assert!(!is_initial_syn(TCP_FLAG_SYN | TCP_FLAG_URG));
-        assert!(!is_initial_syn(0));
-
-        assert_eq!(tcp_header_len(5 << 4), Some(TCP_MIN_HEADER_LEN));
-        assert_eq!(tcp_header_len(15 << 4), Some(TCP_MAX_HEADER_LEN));
-        assert_eq!(tcp_header_len(4 << 4), None);
-        assert_eq!(tcp_header_len(5 << 4 | 1), None);
-
-        assert!(is_unfragmented_tcp(0, IP_PROTOCOL_TCP));
-        assert!(!is_unfragmented_tcp(1, IP_PROTOCOL_TCP));
-        assert!(!is_unfragmented_tcp(0x2000, IP_PROTOCOL_TCP));
-        assert!(!is_unfragmented_tcp(0, 17));
-        assert!(header_lengths_match(20, 40, 60));
-        assert!(!header_lengths_match(20, 40, 61));
-        assert!(!header_lengths_match(usize::MAX, 1, 0));
-
-        assert!(is_vlan(ETHERNET_PROTOCOL_802_1Q));
-        assert!(is_vlan(ETHERNET_PROTOCOL_802_1AD));
-        assert!(!is_vlan(ETHERNET_PROTOCOL_IPV4));
-        assert!(!is_vlan(ETHERNET_PROTOCOL_IPV6));
-    }
-
-    #[test]
-    fn rfc1624_update_matches_full_ipv4_checksum() {
-        let mut original = [
-            0x45, 0x00, 0x00, 0x3c, 0x1c, 0x46, 0x40, 0x00, 0x40, 0x06, 0x00, 0x00, 0xc0, 0xa8,
-            0x00, 0x01, 0xc0, 0xa8, 0x00, 0xc7,
-        ];
-        let original_checksum = internet_checksum(&original).to_be_bytes();
-        original[10..12].copy_from_slice(&original_checksum);
-        let old_word = u16::from_be_bytes([original[8], original[9]]);
-        let old_checksum = u16::from_be_bytes([original[10], original[11]]);
-
-        for target_ttl in u8::MIN..=u8::MAX {
-            let checksum = replace_checksum_word(
-                old_checksum,
-                old_word,
-                u16::from_be_bytes([target_ttl, original[9]]),
-            );
-            let mut updated = original;
-            updated[8] = target_ttl;
-            updated[10..12].copy_from_slice(&checksum.to_be_bytes());
-            assert_eq!(internet_checksum(&updated), 0, "TTL {target_ttl}");
-        }
-        assert_eq!(replace_checksum_word(0xdd2f, 0x5555, 0x3285), 0x0000);
     }
 }

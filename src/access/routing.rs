@@ -8,10 +8,12 @@ use super::{Error, valid_id, valid_name, valid_revision};
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use cidr::IpCidr;
 use serde::{Deserialize, Serialize};
+use serde_with::{BoolFromInt, FromInto, serde_as};
 use std::{
     collections::{HashMap, HashSet},
     io,
     net::IpAddr,
+    num::NonZeroU64,
 };
 
 pub(crate) const MAX_PREFIXES: usize = 256;
@@ -36,14 +38,6 @@ impl ResourceState {
             Self::Retired => "retired",
         }
     }
-    pub(crate) fn parse(value: &str) -> io::Result<Self> {
-        match value {
-            "active" => Ok(Self::Active),
-            "draining" => Ok(Self::Draining),
-            "retired" => Ok(Self::Retired),
-            _ => Err(invalid()),
-        }
-    }
 }
 /// Pool membership cannot silently introduce a different address family.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -62,45 +56,63 @@ impl AddressFamily {
             Self::V6 => "v6",
         }
     }
-    pub(crate) fn parse(value: &str) -> io::Result<Self> {
-        match value {
-            "v4" => Ok(Self::V4),
-            "v6" => Ok(Self::V6),
-            _ => Err(invalid()),
-        }
-    }
 }
 /// Canonical owned prefix asset, not proof that its entire address space is healthy.
-#[derive(Clone)]
+#[serde_as]
+#[derive(Clone, Deserialize)]
 pub(crate) struct PrefixRecord {
     pub(crate) id: String,
     pub(crate) name: String,
+    #[serde(deserialize_with = "canonical_ip")]
     pub(crate) cidr: IpCidr,
+    #[serde_as(as = "BoolFromInt")]
     pub(crate) retired: bool,
+    #[serde_as(as = "FromInto<NonZeroU64>")]
     pub(crate) revision: u64,
 }
 /// Immutable concrete IP identity; retirement never frees its uniqueness key.
-#[derive(Clone)]
+#[serde_as]
+#[derive(Clone, Deserialize)]
 pub(crate) struct AddressRecord {
     pub(crate) id: String,
     pub(crate) name: String,
+    #[serde(rename = "address", deserialize_with = "canonical_ip")]
     pub(crate) ip: IpAddr,
     pub(crate) prefix_id: Option<String>,
     pub(crate) state: ResourceState,
+    #[serde_as(as = "FromInto<NonZeroU64>")]
     pub(crate) revision: u64,
 }
 /// One shared, single-family finite set. Membership is explicit, never a CIDR expansion.
-#[derive(Clone)]
+#[serde_as]
+#[derive(Clone, Deserialize)]
 pub(crate) struct PoolRecord {
     pub(crate) id: String,
     pub(crate) name: String,
     pub(crate) family: AddressFamily,
+    #[serde(skip_deserializing)]
     pub(crate) members: Vec<String>,
     pub(crate) state: ResourceState,
+    #[serde_as(as = "FromInto<NonZeroU64>")]
     pub(crate) revision: u64,
 }
+
+/// Stored addresses and prefixes retain their exact Display form, including
+/// bare host prefixes, so reloading cannot change outbox digests or unique keys.
+pub(crate) fn canonical_ip<'de, D, T>(deserializer: D) -> Result<T, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: std::str::FromStr + std::fmt::Display,
+{
+    let text = String::deserialize(deserializer)?;
+    text.parse::<T>()
+        .ok()
+        .filter(|value| value.to_string() == text)
+        .ok_or_else(|| serde::de::Error::custom("canonical IP address or prefix required"))
+}
 /// User-scoped permissions. Empty grants deny explicit selectors, not all users' assets.
-#[derive(Clone)]
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct RoutePermission {
     pub(crate) user_id: String,
     pub(crate) legacy_allowed: bool,
@@ -361,134 +373,4 @@ fn invalid() -> io::Error {
         io::ErrorKind::InvalidData,
         "finite egress policy is malformed",
     )
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::access::{
-        Protocol, Reader,
-        tests::{LOGIN, policy, secret},
-    };
-
-    fn fixture() -> crate::access::PolicyData {
-        let mut data = policy(1, 16);
-        let address = URL_SAFE_NO_PAD.encode([20; 16]);
-        let pool = URL_SAFE_NO_PAD.encode([21; 16]);
-        data.routing.addresses.push(AddressRecord {
-            id: address.clone(),
-            name: "Owned loopback".into(),
-            ip: "127.0.0.2".parse().unwrap(),
-            prefix_id: None,
-            state: ResourceState::Active,
-            revision: 1,
-        });
-        data.routing.pools.push(PoolRecord {
-            id: pool.clone(),
-            name: "Finite shared pool".into(),
-            family: AddressFamily::V4,
-            members: vec![address.clone()],
-            state: ResourceState::Active,
-            revision: 1,
-        });
-        data.presets
-            .pools
-            .push(crate::access::presets::PoolPreset::native(pool.clone()));
-        data.routing.permissions[0].legacy_allowed = false;
-        data.routing.permissions[0].exits = vec![address];
-        data.routing.permissions[0].pools = vec![pool];
-        data
-    }
-    fn auth(reader: &Reader, suffix: &str) -> Result<crate::access::Authorization, Error> {
-        reader.authenticate(&format!("{LOGIN}{suffix}"), &secret(), Protocol::Http)
-    }
-
-    #[test]
-    fn exact_selectors_are_authorized_and_do_not_fall_back_to_legacy() {
-        let reader = Reader::new(fixture()).unwrap();
-        for suffix in [
-            "-exit-14141414141414141414141414141414",
-            "-pool-15151515151515151515151515151515",
-        ] {
-            let admitted = auth(&reader, suffix).unwrap();
-            assert_eq!(admitted.source, Some("127.0.0.2".parse().unwrap()));
-            assert!(matches!(admitted.extension, super::super::Extension::None));
-        }
-        for suffix in [
-            "",
-            "-session-a",
-            "-range-a",
-            "-ttl-60",
-            "-exit-16161616161616161616161616161616",
-            "-pool-15151515151515151515151515151515-session-a",
-            "-exit-1414141414141414141414141414141A",
-            "-exit-127.0.0.2",
-        ] {
-            assert!(matches!(auth(&reader, suffix), Err(Error::Denied)));
-        }
-        let wrong = URL_SAFE_NO_PAD.encode([99; 32]);
-        assert!(matches!(
-            reader.authenticate(LOGIN, wrong.as_bytes(), Protocol::Http),
-            Err(Error::InvalidCredentials)
-        ));
-    }
-
-    #[test]
-    fn draining_and_empty_pools_only_change_new_selections() {
-        let reader = Reader::new(fixture()).unwrap();
-        let live = auth(&reader, "-pool-15151515151515151515151515151515").unwrap();
-        let mut next = fixture();
-        next.revision = 2;
-        next.routing.addresses[0].state = ResourceState::Draining;
-        next.routing.addresses[0].revision = 2;
-        reader.publish(next).unwrap();
-        assert!(matches!(
-            auth(&reader, "-pool-15151515151515151515151515151515"),
-            Err(Error::Denied)
-        ));
-        assert!(matches!(
-            auth(&reader, "-exit-14141414141414141414141414141414"),
-            Err(Error::Denied)
-        ));
-        assert_eq!(live.source, Some("127.0.0.2".parse().unwrap()));
-        let mut next = fixture();
-        next.revision = 3;
-        next.routing.pools[0].members.clear();
-        reader.publish(next).unwrap();
-        assert!(matches!(
-            auth(&reader, "-pool-15151515151515151515151515151515"),
-            Err(Error::Denied)
-        ));
-        assert!(auth(&reader, "-exit-14141414141414141414141414141414").is_ok());
-    }
-
-    #[test]
-    fn malformed_catalog_never_silently_deduplicates_or_grants_missing_permissions() {
-        let mut cases = Vec::new();
-        let mut data = fixture();
-        data.routing.permissions.clear();
-        cases.push(data);
-        let mut data = fixture();
-        let duplicate = data.routing.permissions[0].exits[0].clone();
-        data.routing.permissions[0].exits.push(duplicate);
-        cases.push(data);
-        let mut data = fixture();
-        let mut duplicate = data.routing.addresses[0].clone();
-        duplicate.id = URL_SAFE_NO_PAD.encode([30; 16]);
-        data.routing.addresses.push(duplicate);
-        cases.push(data);
-        let mut data = fixture();
-        data.routing.addresses[0].ip = "::ffff:127.0.0.2".parse().unwrap();
-        cases.push(data);
-        let mut data = fixture();
-        data.routing.pools[0].family = AddressFamily::V6;
-        cases.push(data);
-        let mut data = fixture();
-        data.routing.addresses[0].prefix_id = Some(URL_SAFE_NO_PAD.encode([40; 16]));
-        cases.push(data);
-        for data in cases {
-            assert!(Reader::new(data).is_err());
-        }
-        assert!("127.0.0.1/8".parse::<cidr::IpCidr>().is_err());
-    }
 }

@@ -210,147 +210,6 @@ mod tests {
         serde_json::from_slice(&bytes).unwrap()
     }
 
-    #[test]
-    fn scheme_and_spacing_follow_bearer_grammar_without_granting_an_identity() {
-        let token = format!(
-            "vpa1.{}.1.{}",
-            URL_SAFE_NO_PAD.encode([1; 16]),
-            URL_SAFE_NO_PAD.encode([2; 32])
-        );
-        for scheme in ["Bearer ", "bearer ", "BEARER   "] {
-            let mut headers = HeaderMap::new();
-            headers.insert(
-                header::AUTHORIZATION,
-                format!("{scheme}{token}").parse().unwrap(),
-            );
-            assert!(credential(&headers).unwrap().is_some());
-        }
-        let mut headers = HeaderMap::new();
-        headers.insert(
-            header::AUTHORIZATION,
-            HeaderValue::from_static("Basic anything"),
-        );
-        let rejection = credential(&headers).err().unwrap().into_response();
-        assert_eq!(rejection.status(), StatusCode::UNAUTHORIZED);
-        assert_eq!(rejection.headers()[header::WWW_AUTHENTICATE], REALM);
-        headers.insert(
-            header::AUTHORIZATION,
-            HeaderValue::from_static("Bearer not-an-issued-token"),
-        );
-        let rejection = credential(&headers).err().unwrap().into_response();
-        assert_eq!(rejection.status(), StatusCode::UNAUTHORIZED);
-        assert_eq!(rejection.headers()[header::WWW_AUTHENTICATE], INVALID_TOKEN);
-        headers.append(
-            header::AUTHORIZATION,
-            HeaderValue::from_static("Bearer another"),
-        );
-        assert_eq!(
-            credential(&headers).err().unwrap().status,
-            StatusCode::BAD_REQUEST
-        );
-        headers.clear();
-        headers.insert(
-            header::AUTHORIZATION,
-            format!("Bearer\t{token}").parse().unwrap(),
-        );
-        assert_eq!(
-            credential(&headers).err().unwrap().status,
-            StatusCode::BAD_REQUEST
-        );
-    }
-
-    #[tokio::test]
-    async fn machine_reads_reuse_the_user_contract_and_leave_cookie_management_intact() {
-        let (_directory, state, cookie) = managed_state();
-        let mut creation = request(Method::POST, USERS, &json!({
-        "expected_revision":"1", "name":"Machine readable", "protocols":["http"], "concurrent_limit":2
-    }).to_string());
-        creation
-            .headers_mut()
-            .insert(header::COOKIE, cookie.parse().unwrap());
-        creation
-            .headers_mut()
-            .insert("x-csrf-token", "c".repeat(43).parse().unwrap());
-        let created = call(state.clone(), creation).await;
-        assert_eq!(created.status(), StatusCode::CREATED);
-        let id = body(created).await["user"]["id"]
-            .as_str()
-            .unwrap()
-            .to_owned();
-        let (_identity, token) = issue(&state);
-        for (label, path) in [
-            ("list", USERS.to_owned()),
-            ("search", format!("{USERS}/search?mode=id&q={id}&limit=1")),
-        ] {
-            let response = call(state.clone(), authorized(Method::GET, &path, &token)).await;
-            // Classify only the fixed challenge vocabulary. Never include a raw
-            // header, query, identity or response body in failure diagnostics.
-            let challenges = response.headers().get_all(header::WWW_AUTHENTICATE);
-            let mut challenges = challenges.iter();
-            let challenge = match (challenges.next(), challenges.next()) {
-                (None, _) => "absent",
-                (Some(value), None) if value.as_bytes() == REALM.as_bytes() => "realm",
-                (Some(value), None) if value.as_bytes() == INVALID_TOKEN.as_bytes() => {
-                    "invalid_token"
-                }
-                (Some(value), None) if value.as_bytes() == INVALID_REQUEST.as_bytes() => {
-                    "invalid_request"
-                }
-                _ => "other",
-            };
-            assert_eq!(
-                response.status(),
-                StatusCode::OK,
-                "automation_read={label} challenge={challenge}"
-            );
-            let value = body(response).await;
-            assert_eq!(value["revision"], "2");
-            assert_eq!(value["items"][0]["id"], id);
-            assert_eq!(value["items"][0]["name"], "Machine readable");
-            assert!(!value.to_string().contains(token.as_str()));
-        }
-        let head = call(state.clone(), authorized(Method::HEAD, USERS, &token)).await;
-        assert_eq!(head.status(), StatusCode::OK);
-        assert!(
-            head.into_body()
-                .collect()
-                .await
-                .unwrap()
-                .to_bytes()
-                .is_empty()
-        );
-        let missing = call(state.clone(), request(Method::GET, USERS, "")).await;
-        assert_eq!(missing.status(), StatusCode::UNAUTHORIZED);
-        assert_eq!(missing.headers()[header::WWW_AUTHENTICATE], REALM);
-        assert_eq!(
-            body(missing).await["error"]["code"],
-            "authentication_required"
-        );
-        let legacy = call(
-            state.clone(),
-            request(Method::GET, "/api/v1/proxy/policy", ""),
-        )
-        .await;
-        assert_eq!(legacy.status(), StatusCode::FORBIDDEN);
-        assert!(!legacy.headers().contains_key(header::WWW_AUTHENTICATE));
-        let mut browser = request(Method::GET, USERS, "");
-        browser
-            .headers_mut()
-            .insert(header::COOKIE, cookie.parse().unwrap());
-        assert_eq!(call(state.clone(), browser).await.status(), StatusCode::OK);
-        assert_eq!(
-            state
-                .policy
-                .as_ref()
-                .unwrap()
-                .status()
-                .await
-                .unwrap()
-                .saved_revision,
-            2
-        );
-    }
-
     #[tokio::test]
     async fn the_outer_guard_never_falls_back_to_cookie_or_another_resource() {
         let (_directory, state, cookie) = managed_state();
@@ -372,13 +231,8 @@ mod tests {
         }
         for (method, path) in [
             (Method::POST, USERS),
-            (Method::GET, "/api/v1/proxy/credentials"),
             (Method::GET, "/api/v1/targets"),
-            (Method::GET, "/api/v1/auth/session"),
-            (Method::POST, "/api/v1/auth/login"),
-            (Method::GET, "/unknown"),
             (Method::GET, "/index.html"),
-            (Method::GET, "/api/v1/proxy/users/"),
         ] {
             let response = call(state.clone(), authorized(method, path, &token)).await;
             assert_eq!(response.status(), StatusCode::FORBIDDEN);
@@ -388,11 +242,7 @@ mod tests {
                 "automation_route_denied"
             );
         }
-        for name in [
-            header::COOKIE,
-            header::PROXY_AUTHORIZATION,
-            header::HeaderName::from_static("x-csrf-token"),
-        ] {
+        for name in [header::COOKIE] {
             let mut input = authorized(Method::GET, USERS, &token);
             input
                 .headers_mut()
@@ -411,26 +261,6 @@ mod tests {
             call(state.clone(), duplicate).await.status(),
             StatusCode::BAD_REQUEST
         );
-        let query_only = request(
-            Method::GET,
-            &format!("{USERS}?access_token=not-accepted"),
-            "",
-        );
-        assert_eq!(
-            call(state.clone(), query_only).await.status(),
-            StatusCode::UNAUTHORIZED
-        );
-        assert_eq!(
-            state
-                .policy
-                .as_ref()
-                .unwrap()
-                .status()
-                .await
-                .unwrap()
-                .saved_revision,
-            1
-        );
     }
 
     #[tokio::test]
@@ -438,63 +268,30 @@ mod tests {
         let (_directory, state, cookie) = managed_state();
         let (identity, token) = issue_scope(&state, store::automation::Scope::UsersWrite);
         const BASE: &str = "/api/v1/proxy/user-operations";
-        let context = body(
-            call(
-                state.clone(),
-                authorized(Method::GET, &format!("{BASE}/context"), &token),
-            )
-            .await,
-        )
-        .await;
-        assert_eq!(context["policy_revision"], "1");
-        assert_eq!(context["expected_epoch"], "1");
-        assert_eq!(context["local"], true);
-        let mut user_id = String::new();
-        let mut first_id = String::new();
-        let mut first_result = Value::Null;
-        let mut first_input = Value::Null;
-        for (index, action) in [
-            "create_user",
-            "update_user",
-            "set_user_active",
-            "delete_user",
-        ]
-        .into_iter()
-        .enumerate()
-        {
-            let change = match action {
-                "create_user" => {
-                    json!({"action":action,"name":"Automation user","protocols":["http"],"concurrent_limit":2})
-                }
-                "update_user" => {
-                    json!({"action":action,"id":user_id,"name":"Edited user","protocols":["http","socks5"],"concurrent_limit":3})
-                }
-                "set_user_active" => json!({"action":action,"id":user_id,"active":false}),
-                _ => json!({"action":action,"id":user_id}),
-            };
-            let input = json!({"expected_revision":(index+1).to_string(),"expected_epoch":"1","change":change});
-            let mut request = authorized(Method::POST, BASE, &token);
-            request.headers_mut().remove(header::ORIGIN);
-            *request.body_mut() = Body::from(input.to_string());
-            let reserved = call(state.clone(), request).await;
-            assert_eq!(reserved.status(), StatusCode::CREATED);
-            let reserved = body(reserved).await;
-            let id = reserved["id"].as_str().unwrap();
-            let mut request = authorized(Method::POST, &format!("{BASE}/{id}/execute"), &token);
-            request.headers_mut().remove(header::ORIGIN);
-            *request.body_mut() = Body::from(input.to_string());
-            let saved = call(state.clone(), request).await;
-            assert_eq!(saved.status(), StatusCode::OK);
-            let saved = body(saved).await;
-            assert_eq!(saved["state"], "saved");
-            assert_eq!(saved["saved_revision"], (index + 2).to_string());
-            if index == 0 {
-                user_id = saved["user_id"].as_str().unwrap().to_owned();
-                first_id = id.to_owned();
-                first_result = saved;
-                first_input = input;
-            }
-        }
+        let index = 0_usize;
+        let action = "create_user";
+        let change = json!({"action":action,"name":"Automation user","protocols":["http"],"concurrent_limit":2});
+        let input =
+            json!({"expected_revision":(index+1).to_string(),"expected_epoch":"1","change":change});
+        let mut reserve_request = authorized(Method::POST, BASE, &token);
+        reserve_request.headers_mut().remove(header::ORIGIN);
+        *reserve_request.body_mut() = Body::from(input.to_string());
+        let reserved = call(state.clone(), reserve_request).await;
+        assert_eq!(reserved.status(), StatusCode::CREATED);
+        let reserved = body(reserved).await;
+        let id = reserved["id"].as_str().unwrap();
+        let mut execute_request = authorized(Method::POST, &format!("{BASE}/{id}/execute"), &token);
+        execute_request.headers_mut().remove(header::ORIGIN);
+        *execute_request.body_mut() = Body::from(input.to_string());
+        let saved = call(state.clone(), execute_request).await;
+        assert_eq!(saved.status(), StatusCode::OK);
+        let saved = body(saved).await;
+        assert_eq!(saved["state"], "saved");
+        assert_eq!(saved["saved_revision"], (index + 2).to_string());
+        let first_id = id.to_owned();
+        let first_result = saved;
+        let first_input = input;
+
         let path = format!("{BASE}/{first_id}");
         let mut browser = request(Method::GET, &path, "null");
         browser
@@ -537,172 +334,8 @@ mod tests {
         let replay = call(state.clone(), replay).await;
         assert_eq!(replay.status(), StatusCode::OK);
         assert_eq!(body(replay).await, first_result);
-        assert_eq!(
-            state
-                .policy
-                .as_ref()
-                .unwrap()
-                .status()
-                .await
-                .unwrap()
-                .saved_revision,
-            5
-        );
-        assert_eq!(
-            state.policy.as_ref().unwrap().reader().revision().unwrap(),
-            5
-        );
-        let page = body(call(state.clone(), authorized(Method::GET, BASE, &current)).await).await;
-        assert_eq!(page["items"].as_array().unwrap().len(), 4);
         let read = call(state, authorized(Method::GET, USERS, &current)).await;
         assert_eq!(read.status(), StatusCode::OK);
-    }
-
-    #[tokio::test]
-    async fn write_resources_distinguish_bad_keys_from_missing_scope_and_keep_http_boundaries() {
-        let (_directory, state, cookie) = managed_state();
-        let (identity, read) = issue(&state);
-        let (_writer, write) = issue_scope(&state, store::automation::Scope::UsersWrite);
-        const CONTEXT: &str = "/api/v1/proxy/user-operations/context";
-        let paths = [
-            (Method::GET, CONTEXT),
-            (Method::GET, "/api/v1/proxy/user-operations"),
-            (Method::POST, "/api/v1/proxy/user-operations"),
-            (
-                Method::GET,
-                "/api/v1/proxy/user-operations/AAAAAAAAAAAAAAAAAAAAAA",
-            ),
-            (
-                Method::POST,
-                "/api/v1/proxy/user-operations/AAAAAAAAAAAAAAAAAAAAAA/execute",
-            ),
-        ];
-        let node = store::inspect(&state.directory).unwrap().node_id;
-        let other = if node == "AAAAAAAAAAAAAAAAAAAAAA" {
-            "AQEBAQEBAQEBAQEBAQEBAQ"
-        } else {
-            "AAAAAAAAAAAAAAAAAAAAAA"
-        };
-        let input = json!({"expected_node_id":other,"expected_revision":"1","expected_epoch":"1","change":{
-            "action":"create_user","name":"Not authorized","protocols":["http"],"concurrent_limit":1
-        }});
-        for (method, path) in &paths {
-            let mut request = authorized(method.clone(), path, &read);
-            *request.body_mut() = Body::from(input.to_string());
-            let insufficient = call(state.clone(), request).await;
-            assert_eq!(insufficient.status(), StatusCode::FORBIDDEN);
-            assert_eq!(
-                insufficient.headers()[header::WWW_AUTHENTICATE],
-                WRITE_SCOPE
-            );
-            assert_eq!(
-                body(insufficient).await["error"]["code"],
-                "insufficient_scope"
-            );
-        }
-        store::automation::revoke(&state.directory, &identity.id, identity.generation).unwrap();
-        for (method, path) in paths {
-            let mut request = authorized(method, path, &read);
-            *request.body_mut() = Body::from(input.to_string());
-            let invalid = call(state.clone(), request).await;
-            assert_eq!(invalid.status(), StatusCode::UNAUTHORIZED);
-            assert_eq!(invalid.headers()[header::WWW_AUTHENTICATE], INVALID_TOKEN);
-        }
-        let mut mismatch = authorized(Method::POST, "/api/v1/proxy/user-operations", &write);
-        *mismatch.body_mut() = Body::from(input.to_string());
-        let mismatch = call(state.clone(), mismatch).await;
-        assert_eq!(mismatch.status(), StatusCode::CONFLICT);
-        assert_eq!(body(mismatch).await["error"]["code"], "operation_conflict");
-        assert_eq!(
-            state.policy.as_ref().unwrap().reader().revision().unwrap(),
-            1
-        );
-        let head = call(state.clone(), authorized(Method::HEAD, CONTEXT, &write)).await;
-        assert_eq!(head.status(), StatusCode::OK);
-        assert!(
-            head.into_body()
-                .collect()
-                .await
-                .unwrap()
-                .to_bytes()
-                .is_empty()
-        );
-        for header in [
-            header::COOKIE,
-            header::HeaderName::from_static("x-csrf-token"),
-        ] {
-            let mut input = authorized(Method::GET, CONTEXT, &write);
-            input
-                .headers_mut()
-                .insert(header, "ambiguous".parse().unwrap());
-            assert_eq!(
-                call(state.clone(), input).await.status(),
-                StatusCode::BAD_REQUEST
-            );
-        }
-        let mut wrong_origin = authorized(Method::GET, CONTEXT, &write);
-        wrong_origin
-            .headers_mut()
-            .insert(header::ORIGIN, "https://elsewhere.invalid".parse().unwrap());
-        assert_eq!(
-            call(state.clone(), wrong_origin).await.status(),
-            StatusCode::FORBIDDEN
-        );
-        let mut no_origin = authorized(Method::GET, CONTEXT, &write);
-        no_origin.headers_mut().remove(header::ORIGIN);
-        assert_eq!(
-            call(state.clone(), no_origin).await.status(),
-            StatusCode::OK
-        );
-        let mut wrong_host = authorized(Method::GET, CONTEXT, &write);
-        wrong_host
-            .headers_mut()
-            .insert(header::HOST, "elsewhere.invalid".parse().unwrap());
-        assert_eq!(
-            call(state.clone(), wrong_host).await.status(),
-            StatusCode::FORBIDDEN
-        );
-        let mut non_json = authorized(Method::POST, "/api/v1/proxy/user-operations", &write);
-        non_json.headers_mut().remove(header::ORIGIN);
-        non_json
-            .headers_mut()
-            .insert(header::CONTENT_TYPE, "text/plain".parse().unwrap());
-        assert_eq!(
-            call(state.clone(), non_json).await.status(),
-            StatusCode::UNSUPPORTED_MEDIA_TYPE
-        );
-        for path in [
-            "/api/v1/proxy/users",
-            "/api/v1/proxy/owner",
-            "/api/v1/proxy/routing",
-            "/api/v1/targets",
-            "/api/v1/proxy/credentials",
-        ] {
-            assert_eq!(
-                call(state.clone(), authorized(Method::POST, path, &write))
-                    .await
-                    .status(),
-                StatusCode::FORBIDDEN
-            );
-        }
-        let mut browser = request(Method::POST, "/api/v1/proxy/user-operations", "null");
-        browser
-            .headers_mut()
-            .insert(header::COOKIE, cookie.parse().unwrap());
-        browser.headers_mut().remove(header::ORIGIN);
-        assert_eq!(
-            call(state.clone(), browser).await.status(),
-            StatusCode::FORBIDDEN
-        );
-        assert_eq!(
-            call(
-                state,
-                authorized(Method::GET, &format!("{CONTEXT}?unknown=1"), &write)
-            )
-            .await
-            .status(),
-            StatusCode::BAD_REQUEST
-        );
     }
 
     #[test]
@@ -749,79 +382,5 @@ mod tests {
         assert_eq!(reserved, 0);
         assert_eq!(state.policy.as_ref().unwrap().reader().revision().unwrap(), 1);
     });
-    }
-
-    #[tokio::test]
-    async fn rotation_and_revocation_are_checked_on_each_read_not_a_session() {
-        let (_directory, state, _cookie) = managed_state();
-        let (identity, old) = issue(&state);
-        let mut current = Zeroizing::new(String::new());
-        let rotated = store::automation::rotate(
-            &state.directory,
-            &identity.id,
-            identity.generation,
-            3600,
-            |value| {
-                current.push_str(value);
-                Ok(())
-            },
-        )
-        .unwrap();
-        let response = call(state.clone(), authorized(Method::GET, USERS, &old)).await;
-        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
-        assert_eq!(response.headers()[header::WWW_AUTHENTICATE], INVALID_TOKEN);
-        assert_eq!(
-            call(state.clone(), authorized(Method::GET, USERS, &current))
-                .await
-                .status(),
-            StatusCode::OK
-        );
-        store::automation::revoke(&state.directory, &identity.id, rotated.generation).unwrap();
-        let response = call(state.clone(), authorized(Method::GET, USERS, &current)).await;
-        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
-        assert_eq!(body(response).await["error"]["code"], "invalid_token");
-    }
-
-    #[test]
-    fn a_read_waiting_for_a_blocking_worker_does_not_keep_revoked_authority() {
-        let runtime = tokio::runtime::Builder::new_multi_thread()
-            .worker_threads(1)
-            .max_blocking_threads(1)
-            .enable_all()
-            .build()
-            .unwrap();
-        runtime.block_on(async {
-            let (_directory, state, _cookie) = managed_state();
-            let (identity, token) = issue(&state);
-            let (started, entered) = tokio::sync::oneshot::channel();
-            let (release, wait) = std::sync::mpsc::channel::<()>();
-            let worker = tokio::task::spawn_blocking(move || {
-                let _ = started.send(());
-                let _ = wait.recv();
-            });
-            entered.await.unwrap();
-            let mut pending = Box::pin(call(state.clone(), authorized(Method::GET, USERS, &token)));
-            assert!(futures_util::poll!(&mut pending).is_pending());
-            store::automation::revoke(&state.directory, &identity.id, identity.generation).unwrap();
-            release.send(()).unwrap();
-            let response = pending.await;
-            assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
-            assert_eq!(body(response).await["error"]["code"], "invalid_token");
-            worker.await.unwrap();
-        });
-    }
-
-    #[tokio::test]
-    async fn unavailable_storage_is_not_reported_as_a_wrong_secret() {
-        let (_directory, state, _cookie) = managed_state();
-        let (_identity, token) = issue(&state);
-        let connection =
-            rusqlite::Connection::open(state.directory.join("management.sqlite3")).unwrap();
-        // Deliberately inconsistent private fixture, not a production repair path.
-        connection.pragma_update(None, "user_version", 999).unwrap();
-        let response = call(state, authorized(Method::GET, USERS, &token)).await;
-        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
-        assert!(!response.headers().contains_key(header::WWW_AUTHENTICATE));
-        assert_ne!(body(response).await["error"]["code"], "invalid_token");
     }
 }

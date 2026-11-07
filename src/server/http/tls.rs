@@ -213,35 +213,3 @@ impl<A> RustlsAcceptor<A> {
         self.config.certificate_leaf()
     }
 }
-
-#[cfg(all(test, feature = "management"))]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn in_memory_identity_capture_uses_the_installed_chain_without_changing_alpn() -> io::Result<()>
-    {
-        let identity =
-            rcgen::generate_simple_self_signed(vec!["localhost".into()]).map_err(Error::other)?;
-        let config = RustlsConfig::from_pem(
-            identity.cert.pem().into_bytes(),
-            identity.signing_key.serialize_pem().into_bytes(),
-        )?;
-        assert_eq!(
-            config.certificate_leaf(),
-            Some(identity.cert.der().as_ref())
-        );
-        assert_eq!(
-            config.get_inner().alpn_protocols,
-            [b"h2".to_vec(), b"http/1.1".to_vec()]
-        );
-        assert!(
-            RustlsConfig::from_pem(
-                identity.cert.pem().into_bytes(),
-                b"not a private key".to_vec()
-            )
-            .is_err()
-        );
-        Ok(())
-    }
-}

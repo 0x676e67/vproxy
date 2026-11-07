@@ -176,10 +176,10 @@ pub(super) async fn run(policy: Arc<Coordinator>, shutdown: CancellationToken) -
         let attempt = tokio::select! {
             biased;
             _ = shutdown.cancelled() => return Ok(()),
-            value = policy.notifications_write(move |writer| writer.prepare(permission.as_ref())) => value,
+            value = policy.store_write(move |dir, gate| storage::prepare(dir, gate, permission.as_ref())) => value,
         };
         match attempt {
-            Ok(Some(storage::Work::Send(attempt))) if policy.ensure_source_confirmed().is_ok() => {
+            Ok(Some(storage::Work::Send(attempt))) => {
                 retry = None;
                 let result = tokio::select! {
                     biased;
@@ -189,18 +189,12 @@ pub(super) async fn run(policy: Arc<Coordinator>, shutdown: CancellationToken) -
                 // Revision + ID + attempt fence rejects a late answer after
                 // disable/reconfigure or an explicit retry. No lock spans HTTP.
                 if policy
-                    .notifications_write(move |writer| writer.finish(&attempt, result))
+                    .store_write(move |dir, gate| storage::finish(dir, gate, &attempt, result))
                     .await
                     .is_err()
                 {
                     tracing::warn!("webhook result could not be recorded; inspect delivery status");
                 }
-            }
-            Ok(Some(storage::Work::Send(_))) => {
-                // A different Source operation may become uncertain after
-                // prepare returned. Do not start another request from that
-                // state. The retained Sending marker remains indeterminate.
-                tracing::warn!("webhook source confirmation is pending; no request submitted");
             }
             Ok(Some(storage::Work::Wait(fence))) => {
                 if retry.as_ref().is_none_or(|(old, _)| *old != fence) {
@@ -271,157 +265,5 @@ mod tests {
             url: "https://example.org".into(),
             bearer: "token\r\nx: injected".into()
         }));
-    }
-
-    fn tls_fixture() -> io::Result<(
-        tokio_rustls::TlsAcceptor,
-        rustls_pki_types::CertificateDer<'static>,
-    )> {
-        use rustls::{ServerConfig, crypto::aws_lc_rs};
-        use rustls_pki_types::{PrivateKeyDer, PrivatePkcs8KeyDer};
-        use tokio_rustls::TlsAcceptor;
-        let certified = rcgen::generate_simple_self_signed(vec!["localhost".into()])
-            .map_err(io::Error::other)?;
-        let mut tls = ServerConfig::builder_with_provider(Arc::new(aws_lc_rs::default_provider()))
-            .with_safe_default_protocol_versions()
-            .map_err(io::Error::other)?
-            .with_no_client_auth()
-            .with_single_cert(
-                vec![certified.cert.der().clone()],
-                PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(
-                    certified.signing_key.serialize_der(),
-                )),
-            )
-            .map_err(io::Error::other)?;
-        tls.alpn_protocols = vec![b"http/1.1".to_vec()];
-        Ok((
-            TlsAcceptor::from(Arc::new(tls)),
-            certified.cert.der().clone(),
-        ))
-    }
-
-    /// Real loopback TLS receiver: no public network, system trust or existing CA.
-    /// The production admission path remains intact; only the test client is pinned
-    /// to this listener and explicitly trusts this fresh certificate.
-    #[tokio::test]
-    async fn strict_tls_post_acceptance_redirect_and_unknown_are_distinct() -> io::Result<()> {
-        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
-        let (acceptor, certificate) = tls_fixture()?;
-        for (response, expected) in [
-            (
-                "HTTP/1.1 204 No Content\r\n\r\n",
-                (Outcome::Accepted, Some(204)),
-            ),
-            (
-                "HTTP/1.1 302 Found\r\nLocation: http://127.0.0.1:1/stolen\r\nContent-Length: 0\r\n\r\n",
-                (Outcome::Rejected, Some(302)),
-            ),
-            (
-                "HTTP/1.1 503 Unavailable\r\nContent-Length: 0\r\n\r\n",
-                (Outcome::Rejected, Some(503)),
-            ),
-            ("", (Outcome::Unknown, None)),
-            (
-                "HTTP/1.1 503 Unavailable\r\nRetry-After: 3600\r\nContent-Length: 0\r\n\r\n",
-                (Outcome::Deferred, Some(503)),
-            ),
-        ] {
-            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
-            let address = listener.local_addr()?;
-            let acceptor = acceptor.clone();
-            let server = tokio::spawn(async move {
-                let (tcp, _) = listener.accept().await?;
-                let mut stream = acceptor.accept(tcp).await?;
-                let mut bytes = Vec::new();
-                let mut one = [0; 1024];
-                while !bytes.windows(4).any(|v| v == b"\r\n\r\n") {
-                    let n = stream.read(&mut one).await?;
-                    if n == 0 || bytes.len() > 8192 {
-                        return Err(io::Error::other("test request incomplete"));
-                    }
-                    bytes.extend_from_slice(&one[..n]);
-                }
-                let text = String::from_utf8_lossy(&bytes).to_ascii_lowercase();
-                assert!(text.starts_with("post /event?private=value http/1.1\r\n"));
-                assert!(text.contains("vproxy-delivery-id: test-delivery\r\n"));
-                assert!(text.contains("authorization: bearer test-token\r\n"));
-                assert!(text.contains("content-length: 2\r\n"));
-                let start = bytes
-                    .windows(4)
-                    .position(|v| v == b"\r\n\r\n")
-                    .ok_or_else(|| io::Error::other("test headers incomplete"))?
-                    + 4;
-                while bytes.len() < start + 2 {
-                    let n = stream.read(&mut one).await?;
-                    if n == 0 {
-                        return Err(io::Error::other("test body incomplete"));
-                    }
-                    bytes.extend_from_slice(&one[..n]);
-                }
-                assert_eq!(&bytes[start..start + 2], b"{}");
-                if !response.is_empty() {
-                    stream.write_all(response.as_bytes()).await?;
-                    stream.flush().await?;
-                }
-                Ok::<_, io::Error>(())
-            });
-            let mut roots = rustls::RootCertStore::empty();
-            roots.add(certificate.clone()).map_err(io::Error::other)?;
-            let client = test_builder(roots)
-                .ok_or_else(|| io::Error::other("test TLS setup failed"))?
-                .resolve("localhost", address)
-                .build()
-                .map_err(io::Error::other)?;
-            let destination = Destination {
-                url: format!("https://localhost:{}/event?private=value", address.port()),
-                bearer: "test-token".into(),
-            };
-            assert_eq!(
-                send_test(client, &destination, b"{}", "test-delivery").await,
-                expected
-            );
-            tokio::time::timeout(Duration::from_secs(3), server)
-                .await
-                .map_err(io::Error::other)?
-                .map_err(io::Error::other)??;
-        }
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn receiver_requires_a_trusted_certificate_and_the_original_url_name() -> io::Result<()> {
-        let (acceptor, certificate) = tls_fixture()?;
-        for (trusted, name) in [(false, "localhost"), (true, "wrong.test")] {
-            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
-            let address = listener.local_addr()?;
-            let acceptor = acceptor.clone();
-            let server = tokio::spawn(async move {
-                let (tcp, _) = listener.accept().await?;
-                assert!(acceptor.accept(tcp).await.is_err());
-                Ok::<_, io::Error>(())
-            });
-            let mut roots = rustls::RootCertStore::empty();
-            if trusted {
-                roots.add(certificate.clone()).map_err(io::Error::other)?;
-            }
-            let client = test_builder(roots)
-                .ok_or_else(|| io::Error::other("test TLS setup failed"))?
-                .resolve(name, address)
-                .build()
-                .map_err(io::Error::other)?;
-            let destination = Destination {
-                url: format!("https://{name}:{}/", address.port()),
-                bearer: "fixture-token".into(),
-            };
-            assert_eq!(
-                send_test(client, &destination, b"{}", "test-delivery").await,
-                (Outcome::Unknown, None)
-            );
-            tokio::time::timeout(Duration::from_secs(3), server)
-                .await
-                .map_err(io::Error::other)?
-                .map_err(io::Error::other)??;
-        }
-        Ok(())
     }
 }

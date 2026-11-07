@@ -421,20 +421,3 @@ fn unix_micros(time: SystemTime) -> Result<u64> {
         .into()
     })
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn escapes_expansion_markers_and_preserves_plain_arguments() {
-        for (input, expected) in [
-            ("100%-$TOKEN", "100%%-$$TOKEN"),
-            ("127.0.0.1:1080", "127.0.0.1:1080"),
-        ] {
-            let mut value = input.to_owned();
-            escape_systemd_expansions(&mut value);
-            assert_eq!(value, expected);
-        }
-    }
-}

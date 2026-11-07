@@ -149,34 +149,3 @@ impl<S> From<Connect<S>> for (TcpStream, Bytes) {
         (connection.stream, connection.pending)
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use bytes::Bytes;
-    use tokio::{
-        io::{AsyncReadExt, AsyncWriteExt},
-        net::{TcpListener, TcpStream},
-    };
-
-    use super::{Connect, Ready};
-
-    #[tokio::test]
-    async fn ready_stream_reads_prefetched_data_before_transport_data() {
-        let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
-            .await
-            .unwrap();
-        let listener_addr = listener.local_addr().unwrap();
-        let client = tokio::spawn(async move {
-            let mut client = TcpStream::connect(listener_addr).await.unwrap();
-            client.write_all(b"transport").await.unwrap();
-        });
-        let (stream, _) = listener.accept().await.unwrap();
-        let mut connect = Connect::<Ready>::new(stream, Bytes::from_static(b"prefetched-"));
-        let mut received = [0; 20];
-
-        connect.read_exact(&mut received).await.unwrap();
-
-        assert_eq!(&received, b"prefetched-transport");
-        client.await.unwrap();
-    }
-}

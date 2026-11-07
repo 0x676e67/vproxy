@@ -11,11 +11,26 @@ use std::{
 
 use serde::{Deserialize, Serialize};
 
-use super::{health, store};
+use super::{contract, health, store};
 use crate::access::{
     Protocol,
     routing::{self, AddressFamily, ResourceState},
 };
+
+#[derive(utoipa::OpenApi)]
+#[openapi(components(schemas(
+    Prefix,
+    Address,
+    AddressView,
+    Pool,
+    Permission,
+    PermissionView,
+    HealthPage,
+    RevisionInput,
+    StateInput,
+    JobInput
+)))]
+pub(super) struct Contract;
 
 /// Public user metadata only, shared without browser sessions, node transport
 /// identities or proxy credential verifiers. Deleted IDs remain historical.
@@ -45,22 +60,52 @@ impl From<store::UserView> for User {
     }
 }
 
+/// Public login and lifecycle metadata shared by browser and node responses.
+/// Identity survives rotations; only verifier_revision advances with the secret.
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct Credential {
+    pub(super) id: String,
+    pub(super) user_id: String,
+    pub(super) login: String,
+    pub(super) syntax_version: u8,
+    pub(super) active: bool,
+    pub(super) revoked: bool,
+    pub(super) verifier_revision: String,
+}
+
+impl From<store::CredentialView> for Credential {
+    fn from(value: store::CredentialView) -> Self {
+        Self {
+            id: value.id,
+            user_id: value.user_id,
+            login: value.login,
+            syntax_version: value.syntax_version,
+            active: value.active,
+            revoked: value.revoked,
+            verifier_revision: value.verifier_revision.to_string(),
+        }
+    }
+}
+
 /// Parse a canonical positive SQLite revision, not a signed number or an
 /// arbitrary JSON integer. Invalid remote values return fixed, non-secret errors.
 pub(super) fn revision(value: &str) -> io::Result<u64> {
-    let invalid = || io::Error::new(io::ErrorKind::InvalidData, "invalid management revision");
+    number(value)
+        .filter(|value| *value != 0 && *value <= i64::MAX as u64)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "invalid management revision"))
+}
+
+/// Parse an unsigned canonical wire decimal; callers supply domain limits.
+pub(super) fn number(value: &str) -> Option<u64> {
     if value.is_empty()
-        || value.len() > 19
-        || value.starts_with('0')
+        || value.len() > 20
+        || value.len() > 1 && value.starts_with('0')
         || !value.bytes().all(|byte| byte.is_ascii_digit())
     {
-        return Err(invalid());
+        return None;
     }
-    value
-        .parse::<u64>()
-        .ok()
-        .filter(|value| *value <= i64::MAX as u64)
-        .ok_or_else(invalid)
+    value.parse().ok()
 }
 
 /// Validate one bounded user projection. A page decoder must additionally
@@ -98,13 +143,17 @@ pub(super) fn validate_user(user: &User) -> io::Result<()> {
     Ok(())
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(deny_unknown_fields)]
 pub(super) struct Prefix {
+    #[schema(schema_with = contract::id)]
     pub(super) id: String,
+    #[schema(schema_with = contract::name)]
     pub(super) name: String,
+    #[schema(schema_with = contract::routing_cidr)]
     pub(super) cidr: String,
     pub(super) retired: bool,
+    #[schema(schema_with = contract::revision)]
     pub(super) revision: String,
 }
 impl From<routing::PrefixRecord> for Prefix {
@@ -119,14 +168,20 @@ impl From<routing::PrefixRecord> for Prefix {
     }
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(deny_unknown_fields)]
 pub(super) struct Address {
+    #[schema(schema_with = contract::id)]
     pub(super) id: String,
+    #[schema(schema_with = contract::name)]
     pub(super) name: String,
+    #[schema(schema_with = contract::routing_ip)]
     pub(super) ip: IpAddr,
+    #[schema(schema_with = contract::nullable_id, required)]
     pub(super) prefix_id: Option<String>,
+    #[schema(schema_with = contract::resource_state)]
     pub(super) state: ResourceState,
+    #[schema(schema_with = contract::revision)]
     pub(super) revision: String,
 }
 impl From<routing::AddressRecord> for Address {
@@ -144,22 +199,33 @@ impl From<routing::AddressRecord> for Address {
 
 /// One exact address and its catalog revision from the same read snapshot.
 /// Retired addresses retain their identity and remain readable.
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(deny_unknown_fields)]
+#[schema(
+    description = "The global policy revision and exact requested address come from the same snapshot. The address revision cannot exceed the policy revision. Retired addresses remain readable by ID."
+)]
 pub(super) struct AddressView {
+    #[schema(schema_with = contract::revision)]
     pub(super) revision: String,
     pub(super) address: Address,
 }
 
 /// Pool pages never inline an arbitrarily large membership list.
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(deny_unknown_fields)]
+#[schema(description = "")]
 pub(super) struct Pool {
+    #[schema(schema_with = contract::id)]
     pub(super) id: String,
+    #[schema(schema_with = contract::name)]
     pub(super) name: String,
+    #[schema(schema_with = contract::address_family)]
     pub(super) family: AddressFamily,
+    #[schema(schema_with = contract::resource_state)]
     pub(super) state: ResourceState,
+    #[schema(minimum = 0, maximum = 1024)]
     pub(super) member_count: usize,
+    #[schema(schema_with = contract::revision)]
     pub(super) revision: String,
 }
 impl From<routing::PoolRecord> for Pool {
@@ -175,12 +241,16 @@ impl From<routing::PoolRecord> for Pool {
     }
 }
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(deny_unknown_fields)]
+#[schema(as = RoutePermission, description = "Explicit existing exit/pool IDs; empty lists are not wildcard grants. Legacy routing is an independent boolean permission.")]
 pub(super) struct Permission {
+    #[schema(schema_with = contract::id)]
     pub(super) user_id: String,
     pub(super) legacy_allowed: bool,
+    #[schema(schema_with = contract::route_ids)]
     pub(super) exits: Vec<String>,
+    #[schema(schema_with = contract::route_ids)]
     pub(super) pools: Vec<String>,
 }
 impl From<routing::RoutePermission> for Permission {
@@ -204,9 +274,11 @@ pub(super) struct Page<T> {
     pub(super) next_cursor: Option<String>,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(deny_unknown_fields)]
+#[schema(as = RoutePermissionView)]
 pub(super) struct PermissionView {
+    #[schema(schema_with = contract::revision)]
     pub(super) revision: String,
     pub(super) permission: Permission,
 }
@@ -262,12 +334,16 @@ impl From<health::CheckView> for HealthCheck {
     }
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(deny_unknown_fields)]
 pub(super) struct HealthEntry {
+    #[schema(schema_with = contract::id)]
     pub(super) address_id: String,
+    #[schema(schema_with = contract::revision)]
     pub(super) address_revision: String,
+    #[schema(schema_with = routing_ip)]
     pub(super) ip: IpAddr,
+    #[schema(schema_with = health_checks)]
     pub(super) checks: Vec<HealthCheck>,
 }
 impl From<health::Entry> for HealthEntry {
@@ -283,20 +359,60 @@ impl From<health::Entry> for HealthEntry {
 
 /// Health is a timed observation, not a routing policy or global IP verdict.
 /// String integers preserve the runtime's full counter precision on the wire.
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(deny_unknown_fields)]
+#[schema(
+    description = "Each page observes a process boot and bounded health catalog. An absent/expired result is unknown; binding and TCP checks do not establish global health, routing permission or prefix-wide reachability."
+)]
 pub(super) struct HealthPage {
+    #[schema(schema_with = contract::id)]
     pub(super) boot_id: String,
+    #[schema(schema_with = contract::counter)]
     pub(super) sequence: String,
+    #[schema(schema_with = contract::nullable_revision, required)]
     pub(super) catalog_revision: Option<String>,
     pub(super) catalog_loaded: bool,
+    #[schema(schema_with = catalog_error, required)]
     pub(super) catalog_error: Option<String>,
+    #[schema(schema_with = observation_time, required)]
     pub(super) catalog_observed_at_unix_ms: Option<u64>,
+    #[schema(schema_with = observation_age, required)]
     pub(super) catalog_age_millis: Option<u64>,
+    #[schema(minimum = 0, maximum = 4)]
     pub(super) in_flight: usize,
+    #[schema(max_items = 16)]
     pub(super) entries: Vec<HealthEntry>,
+    #[schema(schema_with = contract::nullable_id, required)]
     pub(super) next_cursor: Option<String>,
 }
+fn routing_ip() -> utoipa::openapi::Ref {
+    utoipa::openapi::Ref::from_schema_name("RoutingIpAddress")
+}
+
+fn health_checks() -> utoipa::openapi::schema::ArrayBuilder {
+    utoipa::openapi::schema::ArrayBuilder::new()
+        .items(utoipa::openapi::Ref::from_schema_name("HealthCheck"))
+        .min_items(Some(1))
+        .max_items(Some(5))
+}
+
+fn observation_time() -> utoipa::openapi::Ref {
+    utoipa::openapi::Ref::from_schema_name("ObservationUnixMillis")
+}
+
+fn observation_age() -> utoipa::openapi::Ref {
+    utoipa::openapi::Ref::from_schema_name("ObservationAgeMillis")
+}
+
+fn catalog_error() -> utoipa::openapi::schema::ObjectBuilder {
+    utoipa::openapi::schema::ObjectBuilder::new()
+        .schema_type(utoipa::openapi::schema::SchemaType::AnyValue)
+        .enum_values(Some([
+            serde_json::json!("catalog_unavailable"),
+            serde_json::Value::Null,
+        ]))
+}
+
 impl HealthPage {
     /// Inputs are already paginated by the authenticated transport. Keep the
     /// existing local field order and representation, including null fields.
@@ -416,4 +532,30 @@ fn operation_response_error() -> io::Error {
         io::ErrorKind::InvalidData,
         "inconsistent management operation response",
     )
+}
+
+// These requests carry no authority; each adapter checks its current actor/CAS.
+#[derive(Deserialize, utoipa::ToSchema)]
+#[serde(deny_unknown_fields)]
+#[schema(as = UserRevisionInput)]
+pub(super) struct RevisionInput {
+    #[schema(schema_with = contract::revision)]
+    pub(super) expected_revision: String,
+}
+
+#[derive(Deserialize, utoipa::ToSchema)]
+#[serde(deny_unknown_fields)]
+#[schema(as = UserStateInput)]
+pub(super) struct StateInput {
+    #[schema(schema_with = contract::revision)]
+    pub(super) expected_revision: String,
+    pub(super) active: bool,
+}
+
+#[derive(Deserialize, utoipa::ToSchema)]
+#[serde(deny_unknown_fields)]
+#[schema(as = TargetJobInput)]
+pub(super) struct JobInput {
+    #[schema(schema_with = contract::id)]
+    pub(super) job_id: String,
 }

@@ -205,15 +205,17 @@ async fn pull(
         };
         let value = *value;
         policy
-            .traffic_write(move |writer| {
-                writer.import(
+            .store_write(move |dir, gate| {
+                crate::manage::store::remote_traffic::import(
+                    dir,
+                    gate,
                     &value.authorization,
                     revision,
                     value.value,
                     super::traffic::now(),
                 )
             })
-            .await??;
+            .await?;
         Ok::<_, io::Error>(())
     }
     .await;
@@ -226,7 +228,9 @@ async fn pull(
         }
         let failure = classify(&error);
         let _ = policy
-            .traffic_write(move |writer| writer.failed(&peer, revision, failure))
+            .store_write(move |dir, gate| {
+                crate::manage::store::remote_traffic::failed(dir, gate, &peer, revision, failure)
+            })
             .await;
     }
 }

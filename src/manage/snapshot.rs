@@ -4,17 +4,6 @@
 
 pub(super) mod config;
 pub(in crate::manage) mod inputs;
-#[cfg(feature = "witness-journal")]
-#[cfg_attr(
-    not(test),
-    allow(
-        dead_code,
-        reason = "Fixed Source runtime admission remains fenced until writer, dependency and fencing gates are complete"
-    )
-)]
-mod source;
-#[cfg(feature = "witness-journal")]
-pub(in crate::manage) use source::Registered;
 
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -65,14 +54,6 @@ pub enum Command {
     },
     /// Check private package integrity and archived static identities; never activates it
     Verify {
-        #[arg(long)]
-        input: PathBuf,
-    },
-    /// Finish or reconcile the original witnessed seal of this prepared package
-    Seal {
-        #[arg(long)]
-        data_dir: Option<PathBuf>,
-        /// Existing private package; no source request or snapshot is recreated
         #[arg(long)]
         input: PathBuf,
     },
@@ -201,7 +182,6 @@ pub(super) fn run(command: Command) -> io::Result<()> {
             output,
         } => create(&super::directory(data_dir)?, &config, &output)?,
         Command::Verify { input } => verify(&input)?,
-        Command::Seal { data_dir, input } => seal(&super::directory(data_dir)?, &input)?,
     };
     print_report(&report)
 }
@@ -249,8 +229,7 @@ pub(super) fn configure(
 
 /// Capture once under the original source author/update guards. Read only the
 /// explicitly declared assets and the selected ACME namespace; no wildcard
-/// source traversal, service stop or permission repair occurs. Source mode
-/// contacts only its declared original witness and advances a floor-only seal.
+/// source traversal, service stop, permission repair or network request occurs.
 pub(super) fn create(
     directory: &Path,
     configuration_path: &Path,
@@ -303,20 +282,8 @@ fn create_from_configuration(
         configuration,
         capture,
         acme_cache,
-        node,
-        #[cfg(feature = "witness-journal")]
-            node_listener: _,
         node_key_sha256,
-        proxy,
-        management,
-        health,
-    } = inputs::capture(
-        &source,
-        author.clone(),
-        base,
-        configuration,
-        inputs::Mode::Archive,
-    )?;
+    } = inputs::capture(&source, author.clone(), base, configuration)?;
     if status
         .recovery
         .as_ref()
@@ -326,49 +293,22 @@ fn create_from_configuration(
             "captured node identity differs from its recovery pin",
         ));
     }
-    #[cfg(feature = "witness-journal")]
-    let witness = if let Some(binding) = &configuration.source {
-        Some(self::source::Witness::new(
-            &source,
-            author.clone(),
-            binding,
-            node,
-        )?)
-    } else {
-        None
-    };
-    #[cfg(not(feature = "witness-journal"))]
-    drop(node);
-    // Export does not admit these real prepared objects to a runtime. The fixed
-    // configuration path can instead retain them without any input reread.
-    drop((proxy, management, health));
     // The marker is persisted before copying SQL. Retained credentials and all
     // private TLS material become a complete package only behind the SQL fence.
     files::create_directory(&output)?;
-    let native = || {
-        store::create_identity_snapshot(
-            &source,
-            &output.join("database"),
-            &author,
-            &update,
-            node_key_sha256,
-        )
-    };
-    #[cfg(feature = "witness-journal")]
-    let database = match &witness {
-        Some(witness) => {
-            witness.capture_database(&update, &output.join("database"), node_key_sha256)?
-        }
-        None => native()?,
-    };
-    #[cfg(not(feature = "witness-journal"))]
-    let database = native()?;
+    let database = store::create_identity_snapshot(
+        &source,
+        &output.join("database"),
+        &author,
+        &update,
+        node_key_sha256,
+    )?;
     let record = store::recovery::status(&output.join("database"))?
         .recovery
         .ok_or_else(|| invalid("snapshot SQL fence is missing"))?;
     let assets = capture.write(&output.join("files"))?;
     let manifest = Manifest {
-        format_version: if configuration.source.is_some() { 2 } else { 1 },
+        format_version: 1,
         platform: std::env::consts::OS.into(),
         snapshot_id: record.id,
         configuration_source: "operator_declared".into(),
@@ -384,10 +324,6 @@ fn create_from_configuration(
         return Err(invalid("snapshot manifest exceeds its limit"));
     }
     files::write(&output, MANIFEST, &bytes)?;
-    #[cfg(feature = "witness-journal")]
-    if let Some(witness) = &witness {
-        witness.seal(&update, &output, &manifest, &bytes, false)?;
-    }
     verify(&output)
 }
 
@@ -400,19 +336,6 @@ pub(super) fn verify(input: &Path) -> io::Result<Report> {
     let manifest: Manifest =
         serde_json::from_slice(&bytes).map_err(|_| invalid("invalid snapshot manifest"))?;
     check_contents(input, &manifest, Stage::Complete)?;
-    #[cfg(feature = "witness-journal")]
-    let source_sequence = if manifest.configuration.source.is_some() {
-        Some(
-            self::source::evidence(input, &manifest, &bytes)?
-                .transition()
-                .sequence
-                .clone(),
-        )
-    } else {
-        None
-    };
-    #[cfg(not(feature = "witness-journal"))]
-    let source_sequence = None;
     if files::read(&input.join(MANIFEST), MAX_MANIFEST, true)?.as_slice() != bytes.as_slice() {
         return Err(invalid("snapshot manifest changed while being verified"));
     }
@@ -423,41 +346,19 @@ pub(super) fn verify(input: &Path) -> io::Result<Report> {
         database_content_sha256: manifest.database.database_content_sha256,
         assets: manifest.assets.len(),
         quarantined: true,
-        validation: if manifest.configuration.source.is_some() {
-            "integrity_and_sealed_binding_not_current_witness_or_activation"
-        } else {
-            "integrity_and_archived_static_configuration_not_activation"
-        },
+        validation: "integrity_and_archived_static_configuration_not_activation",
         acme_cache_semantics: if manifest.acme_cache.is_some() {
             "preserved_for_separate_recovery_review"
         } else {
             "not_selected"
         },
-        source_sequence,
+        source_sequence: None,
     })
-}
-
-/// Continue only an existing prepared Source package. Native descriptions and
-/// builds without journaling cannot silently fall back to an unwitnessed seal.
-pub(super) fn seal(directory: &Path, input: &Path) -> io::Result<Report> {
-    #[cfg(feature = "witness-journal")]
-    {
-        source::seal(directory, input)
-    }
-    #[cfg(not(feature = "witness-journal"))]
-    {
-        let _ = (directory, input);
-        Err(io::Error::new(
-            io::ErrorKind::Unsupported,
-            "witnessed snapshot sealing requires witness-journal",
-        ))
-    }
 }
 
 #[derive(Clone, Copy, Eq, PartialEq)]
 enum Stage {
     Preparing,
-    Sealing,
     Complete,
 }
 
@@ -496,17 +397,11 @@ fn check_contents(input: &Path, manifest: &Manifest, stage: Stage) -> io::Result
     {
         return Err(invalid("identity snapshot is not quarantined"));
     }
-    let mut expected_root = if stage != Stage::Preparing {
+    let expected_root = if stage != Stage::Preparing {
         BTreeSet::from(["database", "files", MANIFEST])
     } else {
         BTreeSet::from(["database", "files"])
     };
-    if manifest.configuration.source.is_some()
-        && (stage == Stage::Complete
-            || (stage == Stage::Sealing && input.join("source").try_exists()?))
-    {
-        expected_root.insert("source");
-    }
     let mut root = BTreeSet::new();
     for (index, entry) in fs::read_dir(input)?.enumerate() {
         if index >= expected_root.len() {
@@ -634,95 +529,7 @@ fn check_contents(input: &Path, manifest: &Manifest, stage: Stage) -> io::Result
             "snapshot configuration does not exactly cover its assets",
         ));
     }
-    #[cfg(feature = "witness-journal")]
-    if let Some(binding) = &manifest.configuration.source {
-        let sha256 = configuration_sha256(manifest)?;
-        store::read_backup_verified(&input.join("database"), |connection, database| {
-            if *database != manifest.database {
-                return Err(invalid(
-                    "snapshot database changed during configuration check",
-                ));
-            }
-            store::journal::snapshot::check_configuration(connection, &binding.enrollment, sha256)
-        })?;
-    }
     Ok(())
-}
-
-/// Bind portable typed choices and the exact captured static-file inventory,
-/// not source paths or SQL state. ACME's automatically renewed cache is not a
-/// runtime choice; its issuance options remain included in Configuration, and
-/// the complete cache is still covered separately by the package seal.
-#[cfg(feature = "witness-journal")]
-fn configuration_sha256(manifest: &Manifest) -> io::Result<[u8; 32]> {
-    static_configuration_sha256(
-        &manifest.platform,
-        &manifest.configuration,
-        manifest.assets.iter(),
-    )
-}
-
-#[cfg(feature = "witness-journal")]
-fn static_configuration_sha256<'a>(
-    platform: &str,
-    configuration: &Configuration,
-    assets: impl Iterator<Item = &'a Asset>,
-) -> io::Result<[u8; 32]> {
-    let mut assets = assets
-        .filter(|asset| {
-            !matches!(configuration.management.tls, Tls::Acme { .. })
-                || !asset.name.starts_with("acme-")
-        })
-        .collect::<Vec<_>>();
-    assets.sort_unstable_by(|a, b| a.name.cmp(&b.name));
-    let mut hash = Sha256::new();
-    hash.update(b"vproxy.source.runtime-configuration.v1\0");
-    for bytes in [
-        serde_json::to_vec(platform),
-        serde_json::to_vec(configuration),
-        serde_json::to_vec(&assets),
-    ] {
-        let bytes = bytes.map_err(|_| invalid("cannot encode configuration binding"))?;
-        hash.update(
-            u64::try_from(bytes.len())
-                .map_err(|_| invalid("configuration size overflow"))?
-                .to_be_bytes(),
-        );
-        hash.update(bytes);
-    }
-    Ok(hash.finalize().into())
-}
-
-/// Internal fixed-input registration, not public Source setup/startup. Current
-/// CLI/serve refusal gates remain; callers keep no result until confirmation.
-/// Run synchronously on a CLI thread or an owned blocking worker, never directly
-/// on an async executor: the offline witness owns its bounded local runtime.
-#[cfg(feature = "witness-journal")]
-#[cfg_attr(
-    not(test),
-    allow(
-        dead_code,
-        reason = "Source setup is not exposed before full activation gates"
-    )
-)]
-pub(in crate::manage) fn register_configuration(
-    directory: &Path,
-    configuration: &Path,
-    expected_revision: u64,
-    resume: bool,
-) -> io::Result<Registered> {
-    source::register_configuration(directory, configuration, expected_revision, resume)
-}
-
-/// Test/owning exporter access uses an already validated private package; no
-/// arbitrary JSON or asset hashes are accepted as an observation of a runtime.
-#[cfg(all(test, feature = "witness-journal"))]
-pub(in crate::manage) fn archived_configuration_sha256(input: &Path) -> io::Result<[u8; 32]> {
-    verify(input)?;
-    let bytes = files::read(&input.join(MANIFEST), MAX_MANIFEST, true)?;
-    let manifest: Manifest =
-        serde_json::from_slice(&bytes).map_err(|_| invalid("invalid snapshot manifest"))?;
-    configuration_sha256(&manifest)
 }
 
 fn check_reference(path: &Path, name: &str) -> io::Result<()> {
@@ -782,99 +589,4 @@ fn hex(bytes: &[u8]) -> String {
 }
 fn invalid(message: &'static str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, message)
-}
-
-#[cfg(all(test, feature = "witness-journal"))]
-mod binding_tests {
-    //! Pure commitment projections only. Actual private files, TLS, SQL and
-    //! witness exchanges are covered by the Source export integration tests.
-    use super::*;
-
-    fn manifest(automatic: bool) -> io::Result<Manifest> {
-        let tls = if automatic {
-            serde_json::json!({"mode":"acme","options":{
-                "enabled":true,"accept_terms":true,"production":false,
-                "contacts":["oncall@example.net"],"challenge":"http-01",
-                "http_bind":"127.0.0.1:2080"
-            }})
-        } else {
-            serde_json::json!({"mode":"manual","certificate":"files/admin.pem","private_key":"files/admin.key"})
-        };
-        serde_json::from_value(serde_json::json!({
-        "format_version":2,"platform":"linux","snapshot_id":"AAAAAAAAAAAAAAAAAAAAAA",
-        "configuration_source":"operator_declared",
-        "database":{"format_version":1,"application_id":0,"schema_version":26,
-            "node_id":"AAAAAAAAAAAAAAAAAAAAAA","database_bytes":1,
-            "database_sha256":"0".repeat(64),"created_at_unix_ms":0},
-        "configuration":{"format_version":2,"expected_node_id":"AAAAAAAAAAAAAAAAAAAAAA",
-            "management":{"bind":"127.0.0.1:24443","origin":"https://admin.example:24443",
-                "surface":"api_only","tls":tls},
-            "node":{"bind":"127.0.0.1:24444","origin":"https://client.example:24444",
-                "ca":"files/node-ca.pem","certificate":"files/node.pem","private_key":"files/node.key"},
-            "proxy_config":null,"health_config":null,"observe_target_alerts":false,"egress":null,
-            "source":{"endpoint":"https://witness.example:24444","enrollment":{
-                "witness_node_id":"AQEBAQEBAQEBAQEBAQEBAQ","peer_node_id":"AAAAAAAAAAAAAAAAAAAAAA",
-                "binding_id":"AgICAgICAgICAgICAgICAg","writer_id":"AwMDAwMDAwMDAwMDAwMDAw","baseline":"0".repeat(64)
-            }}},
-        "acme_cache":null,"assets":[
-            {"name":"node.pem","bytes":3,"sha256":"1".repeat(64)},
-            {"name":"node.key","bytes":4,"sha256":"2".repeat(64)}
-        ]
-    })).map_err(io::Error::other)
-    }
-
-    #[test]
-    fn configuration_digest_binds_choices_static_assets_and_platform_not_package_identity()
-    -> io::Result<()> {
-        let mut m = manifest(false)?;
-        m.configuration.validate()?;
-        let original = configuration_sha256(&m)?;
-        m.assets.reverse();
-        m.snapshot_id = "BAQEBAQEBAQEBAQEBAQEBA".into();
-        m.database.created_at_unix_ms = 1;
-        assert_eq!(configuration_sha256(&m)?, original);
-        m.assets[0].sha256 = "3".repeat(64);
-        assert_ne!(configuration_sha256(&m)?, original);
-        m.assets[0].sha256 = "2".repeat(64);
-        m.configuration.observe_target_alerts = true;
-        assert_ne!(configuration_sha256(&m)?, original);
-        m.configuration.observe_target_alerts = false;
-        m.platform = "windows".into();
-        assert_ne!(configuration_sha256(&m)?, original);
-        m.platform = "linux".into();
-        m.configuration
-            .source
-            .as_mut()
-            .ok_or_else(|| invalid("test binding absent"))?
-            .endpoint = "https://another.example:24444".into();
-        assert_ne!(configuration_sha256(&m)?, original);
-        Ok(())
-    }
-
-    #[test]
-    fn acme_cache_rotation_is_excluded_but_issuance_choices_and_static_files_are_bound()
-    -> io::Result<()> {
-        let mut m = manifest(true)?;
-        m.configuration.validate()?;
-        let original = configuration_sha256(&m)?;
-        m.assets.push(Asset {
-            name: "acme-certificate.pem".into(),
-            bytes: 100,
-            sha256: "3".repeat(64),
-        });
-        assert_eq!(configuration_sha256(&m)?, original);
-        m.assets
-            .last_mut()
-            .ok_or_else(|| invalid("test asset absent"))?
-            .sha256 = "4".repeat(64);
-        assert_eq!(configuration_sha256(&m)?, original);
-        m.assets[0].sha256 = "5".repeat(64);
-        assert_ne!(configuration_sha256(&m)?, original);
-        m.assets[0].sha256 = "1".repeat(64);
-        let mut options = serde_json::to_value(&m.configuration).map_err(io::Error::other)?;
-        options["management"]["tls"]["options"]["production"] = true.into();
-        m.configuration = serde_json::from_value(options).map_err(io::Error::other)?;
-        assert_ne!(configuration_sha256(&m)?, original);
-        Ok(())
-    }
 }

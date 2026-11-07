@@ -13,9 +13,7 @@ cargo +nightly fmt --all --check
 ```
 
 Web tests and builds need a current frontend bundle. See [Installation](installation.md)
-for the build commands. The experimental `witness-journal` feature additionally
-requires the SQLite Session build and bindgen's libclang headers; test that feature
-when changing its gated code. Use native Windows tests for Windows-specific behavior.
+for the build commands. Use native Windows tests for Windows-specific behavior.
 
 ## Frontend
 

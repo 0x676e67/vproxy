@@ -18,6 +18,18 @@ const ZERO: Snapshot = Snapshot {
 
 const MAX_TIME: u64 = 9_007_199_254_740_991;
 
+serde_with::serde_conv!(
+    CounterTuple,
+    Snapshot,
+    |value: &Snapshot| (value.upload, value.download, value.saturated),
+    |(upload, download, saturated): (u64, u64, bool)| Ok::<_, std::convert::Infallible>(Snapshot {
+        upload,
+        download,
+        saturated
+    })
+);
+
+#[serde_with::serde_as]
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Stored {
@@ -32,28 +44,19 @@ struct Stored {
     uncertain: bool,
     checkpoint: Option<u64>,
     started: Option<u64>,
-    totals: Vec<Value>,
+    #[serde_as(as = "Vec<CounterTuple>")]
+    totals: Vec<Snapshot>,
     minute: Vec<StoredWindow>,
     hour: Vec<StoredWindow>,
     day: Vec<StoredWindow>,
     floors: [Option<u64>; 3],
 }
+#[serde_with::serde_as]
 #[derive(Serialize, Deserialize)]
-struct Value(u64, u64, bool);
-#[derive(Serialize, Deserialize)]
-struct StoredWindow(u64, Vec<Option<Value>>);
-impl Value {
-    fn new(value: Snapshot) -> Self {
-        Self(value.upload, value.download, value.saturated)
-    }
-    fn value(self) -> Snapshot {
-        Snapshot {
-            upload: self.0,
-            download: self.1,
-            saturated: self.2,
-        }
-    }
-}
+struct StoredWindow(
+    u64,
+    #[serde_as(as = "Vec<Option<CounterTuple>>")] Vec<Option<Snapshot>>,
+);
 
 pub(super) fn validate(snapshot: &NodeSnapshot) -> io::Result<()> {
     if !snapshot.status.http_split
@@ -147,6 +150,11 @@ pub(super) fn validate(snapshot: &NodeSnapshot) -> io::Result<()> {
 
 pub(super) fn encode(snapshot: &NodeSnapshot) -> io::Result<Vec<u8>> {
     validate(snapshot)?;
+    let protocols = if snapshot.status.http_split {
+        PROTOCOL_COUNT
+    } else {
+        3
+    };
     let stored = Stored {
         version: if snapshot.status.http_split { 2 } else { 1 },
         node: snapshot.status.node_id.clone(),
@@ -159,17 +167,10 @@ pub(super) fn encode(snapshot: &NodeSnapshot) -> io::Result<Vec<u8>> {
         uncertain: snapshot.status.time_uncertain,
         checkpoint: snapshot.status.last_checkpoint_at,
         started: snapshot.status.meter_started_at,
-        totals: if snapshot.status.http_split {
-            snapshot.totals.into_iter().map(Value::new).collect()
-        } else {
-            legacy_values(snapshot.totals)
-                .into_iter()
-                .map(Value::new)
-                .collect()
-        },
-        minute: windows(&snapshot.minute, snapshot.status.http_split),
-        hour: windows(&snapshot.hour, snapshot.status.http_split),
-        day: windows(&snapshot.day, snapshot.status.http_split),
+        totals: snapshot.totals.into_iter().take(protocols).collect(),
+        minute: windows(&snapshot.minute, protocols),
+        hour: windows(&snapshot.hour, protocols),
+        day: windows(&snapshot.day, protocols),
         floors: snapshot.floors,
     };
     let bytes = serde_json::to_vec(&stored)
@@ -181,24 +182,13 @@ pub(super) fn encode(snapshot: &NodeSnapshot) -> io::Result<Vec<u8>> {
     }
     Ok(bytes)
 }
-fn windows(values: &[Window], split: bool) -> Vec<StoredWindow> {
+fn windows(values: &[Window], protocols: usize) -> Vec<StoredWindow> {
     values
         .iter()
         .map(|window| {
             StoredWindow(
                 window.window_id,
-                if split {
-                    window
-                        .values
-                        .into_iter()
-                        .map(|value| value.map(Value::new))
-                        .collect()
-                } else {
-                    legacy_window(window.values)
-                        .into_iter()
-                        .map(|value| value.map(Value::new))
-                        .collect()
-                },
+                window.values.into_iter().take(protocols).collect(),
             )
         })
         .collect()
@@ -216,7 +206,7 @@ fn restore(values: Vec<StoredWindow>, split: bool) -> io::Result<Vec<Window>> {
                     }
                     let mut restored = [None; PROTOCOL_COUNT];
                     for (slot, value) in restored.iter_mut().zip(window.1) {
-                        *slot = value.map(Value::value);
+                        *slot = value;
                     }
                     restored
                 },
@@ -242,7 +232,7 @@ pub(super) fn decode(bytes: &[u8]) -> io::Result<NodeSnapshot> {
     }
     let mut totals = [ZERO; PROTOCOL_COUNT];
     for (slot, value) in totals.iter_mut().zip(stored.totals) {
-        *slot = value.value();
+        *slot = value;
     }
     let snapshot = NodeSnapshot {
         status: Status {

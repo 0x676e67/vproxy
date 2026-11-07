@@ -6,6 +6,8 @@ use std::io;
 
 use serde::{Deserialize, Serialize};
 
+use super::views::{number, required_nullable};
+
 /// A retained non-secret command intent, not a claim that it was applied.
 #[derive(Clone, Copy, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -54,21 +56,14 @@ pub(super) struct Status {
     pub(super) active_operations: Option<String>,
 }
 
-fn required_nullable<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-    T: Deserialize<'de>,
-{
-    Option::<T>::deserialize(deserializer)
-}
-
 impl Status {
     /// Check the entire response against the already-selected node. This does
     /// not authenticate that node; transport registration and current owner
     /// authorization are separate mandatory checks around the request.
     pub(super) fn validate(&self, expected: &str) -> io::Result<()> {
         let invalid = || io::Error::new(io::ErrorKind::InvalidData, "invalid maintenance status");
-        let positive = |value: &str| number(value, false).filter(|value| *value <= i64::MAX as u64);
+        let positive =
+            |value: &str| number(value).filter(|value| *value != 0 && *value <= i64::MAX as u64);
         let saved = positive(&self.saved_revision).ok_or_else(invalid)?;
         if self.node_id != expected
             || !super::store::valid_id(expected)
@@ -78,7 +73,7 @@ impl Status {
                 .as_deref()
                 .is_some_and(|id| !super::store::valid_id(id) || id == expected)
             || positive(&self.ownership.epoch).is_none()
-            || number(&self.ownership.last_terminal_command, true)
+            || number(&self.ownership.last_terminal_command)
                 .is_none_or(|value| value > i64::MAX as u64)
             || self
                 .durable_applied_revision
@@ -97,22 +92,11 @@ impl Status {
                 if self.running
                     && positive(revision) == Some(saved)
                     && accepting == self.saved_accepting
-                    && number(active, true).is_some() =>
+                    && number(active).is_some() =>
             {
                 Ok(())
             }
             _ => Err(invalid()),
         }
     }
-}
-
-fn number(value: &str, zero: bool) -> Option<u64> {
-    if value.is_empty()
-        || value.len() > 20
-        || value.len() > 1 && value.starts_with('0')
-        || !value.bytes().all(|byte| byte.is_ascii_digit())
-    {
-        return None;
-    }
-    value.parse().ok().filter(|value| zero || *value != 0)
 }

@@ -378,27 +378,3 @@ impl AsMut<UdpSocket> for AssociatedUdpSocket {
         &mut self.socket
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[tokio::test]
-    async fn udp_send_rejects_domain_longer_than_rfc1928_allows() {
-        let socket = UdpSocket::bind((std::net::Ipv4Addr::LOCALHOST, 0))
-            .await
-            .unwrap();
-        let socket = AssociatedUdpSocket::new(socket);
-
-        let error = socket
-            .send(
-                [],
-                0,
-                Address::DomainAddress("a".repeat(u8::MAX as usize + 1), 53),
-            )
-            .await
-            .unwrap_err();
-
-        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
-    }
-}

@@ -13,7 +13,9 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params, types::ValueRef};
+use rusqlite::{
+    Connection, OptionalExtension, Transaction, TransactionBehavior, params, types::ValueRef,
+};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
 use super::super::{
@@ -25,21 +27,6 @@ use crate::manage::{
 };
 
 mod encoding;
-mod write;
-pub(in crate::manage) use write::Writer;
-
-/// Ends a bounded history capture without committing its SQL transaction. A
-/// Source writer supplies this hook so long batches release Session preimages;
-/// Native writers use no hook. Failure aborts the entire original operation.
-pub(in crate::manage) trait Checkpoints {
-    fn checkpoint(&mut self) -> io::Result<()>;
-}
-fn checkpoint(checkpoints: &mut Option<&mut dyn Checkpoints>) -> io::Result<()> {
-    if let Some(checkpoints) = checkpoints {
-        checkpoints.checkpoint()?;
-    }
-    Ok(())
-}
 
 pub(in crate::manage) const MAX_ACTIVE: usize = 12_288;
 const MAX_LOCAL: usize = 6_144;
@@ -209,8 +196,6 @@ pub(in crate::manage) struct Summary {
     pub(in crate::manage) unacknowledged_count: u32,
     pub(in crate::manage) oldest_event_sequence: Option<u64>,
     pub(in crate::manage) trimmed: u64,
-    #[cfg(test)]
-    pub(in crate::manage) last_event_sequence: u64,
 }
 pub(in crate::manage) struct Ack {
     pub(in crate::manage) expected_node_id: String,
@@ -573,15 +558,7 @@ pub(in crate::manage) fn start(
 
 /// Stage a monitor generation in the held transaction. The bool distinguishes
 /// an actual restart from a read-only same-boot result; it is not commit proof.
-fn start_in(tx: &Connection, boot_id: &str) -> io::Result<(Commit, bool)> {
-    start_in_with(tx, boot_id, None)
-}
-fn start_in_with(
-    tx: &Connection,
-    boot_id: &str,
-    mut checkpoints: Option<&mut dyn Checkpoints>,
-) -> io::Result<(Commit, bool)> {
-    require_transaction(tx)?;
+fn start_in(tx: &Transaction<'_>, boot_id: &str) -> io::Result<(Commit, bool)> {
     let node = require(tx)?;
     let mut s = state(tx)?;
     if s.boot.as_deref() == Some(boot_id) {
@@ -604,7 +581,7 @@ fn start_in_with(
         .checked_add(1)
         .ok_or_else(|| Error::Capacity.error())?;
     let at = now();
-    for (index, mut episode) in episodes.into_iter().enumerate() {
+    for mut episode in episodes {
         if episode.observer_node_id != node
             || s.boot.as_deref() != Some(episode.boot_id.as_str())
             || episode.last_transition_sequence > s.last
@@ -633,9 +610,6 @@ fn start_in_with(
         };
         save_event(tx, &event)?;
         save_episode(tx, &episode)?;
-        if index % 256 == 255 {
-            checkpoint(&mut checkpoints)?;
-        }
     }
     s.boot = Some(boot_id.to_owned());
     s.batch = 0;
@@ -643,7 +617,7 @@ fn start_in_with(
     s.incident = 0;
     s.first = (s.last >= first).then_some(first);
     s.end = s.first.map(|_| s.last);
-    trim_with(tx, &mut s, &mut checkpoints)?;
+    trim(tx, &mut s)?;
     s.save(tx)?;
     let answer = s.commit()?;
     Ok((answer, true))
@@ -714,8 +688,7 @@ pub(in crate::manage) fn receipt(directory: &Path, batch: &Batch) -> io::Result<
 }
 
 /// Observe only the original boot/sequence/digest in a coherent SQL snapshot.
-fn receipt_from(tx: &Connection, batch: &Batch) -> io::Result<Option<Commit>> {
-    require_transaction(tx)?;
+fn receipt_from(tx: &Transaction<'_>, batch: &Batch) -> io::Result<Option<Commit>> {
     require(tx)?;
     let hash = digest(batch, batch_limit(tx)?)?;
     let answer = receipt_in(&state(tx)?, batch, &hash)?;
@@ -767,19 +740,10 @@ fn record_in(
 /// Stage the exact batch and its source proofs together. Terminal replay does
 /// not write, allocate a sequence or independently authorize fresh evidence.
 fn record_transaction(
-    tx: &Connection,
+    tx: &Transaction<'_>,
     batch: &Batch,
     proofs: Option<(&[Arc<crate::manage::observations::Proof>], &[Binding])>,
 ) -> io::Result<(Commit, bool)> {
-    record_transaction_with(tx, batch, proofs, None)
-}
-fn record_transaction_with(
-    tx: &Connection,
-    batch: &Batch,
-    proofs: Option<(&[Arc<crate::manage::observations::Proof>], &[Binding])>,
-    mut checkpoints: Option<&mut dyn Checkpoints>,
-) -> io::Result<(Commit, bool)> {
-    require_transaction(tx)?;
     let node = require(tx)?;
     let hash = digest(batch, batch_limit(tx)?)?;
     let mut s = state(tx)?;
@@ -809,7 +773,7 @@ fn record_transaction_with(
         .checked_add(1)
         .ok_or_else(|| Error::Capacity.error())?;
     let previous_incident = s.incident;
-    for (index, transition) in batch.transitions.iter().enumerate() {
+    for transition in &batch.transitions {
         let observation = &transition.observation;
         let existing = find_source_episode(tx, &batch.boot_id, observation.incident_id)?;
         if existing.as_ref().is_some_and(|episode| {
@@ -904,15 +868,12 @@ fn record_transaction_with(
         };
         save_event(tx, &event)?;
         save_episode(tx, &episode)?;
-        if index % 256 == 255 {
-            checkpoint(&mut checkpoints)?;
-        }
     }
     s.batch = batch.sequence;
     s.digest = Some(hash.to_vec());
     s.first = Some(first);
     s.end = Some(s.last);
-    trim_with(tx, &mut s, &mut checkpoints)?;
+    trim(tx, &mut s)?;
     s.save(tx)?;
     let answer = s.commit()?;
     Ok((answer, true))
@@ -1042,11 +1003,10 @@ pub(in crate::manage) fn publish_guarded<T>(
 /// Guard only current evidence. An old committed receipt remains historical
 /// proof even if this check now refuses to publish that evidence as fresh.
 fn validate_current(
-    tx: &Connection,
+    tx: &Transaction<'_>,
     proofs: &[Arc<crate::manage::observations::Proof>],
     bindings: &[Binding],
 ) -> io::Result<()> {
-    require_transaction(tx)?;
     validate_bindings(tx, bindings)?;
     validate_proofs(tx, proofs)
 }
@@ -1181,13 +1141,7 @@ fn episodes(connection: &Connection, filter: Option<&str>) -> io::Result<Vec<Epi
     Ok(answer)
 }
 
-fn trim_with(
-    connection: &Connection,
-    s: &mut State,
-    checkpoints: &mut Option<&mut dyn Checkpoints>,
-) -> io::Result<()> {
-    // Source Sessions retain deleted preimages too. Chunk deletion under the
-    // same transaction; Native keeps its original single-statement fast path.
+fn trim(connection: &Connection, s: &mut State) -> io::Result<()> {
     let active: i64 = connection
         .query_row(
             "SELECT count(*) FROM alert_episodes WHERE status='active'",
@@ -1213,31 +1167,8 @@ fn trim_with(
     if counts[0] > MAX_LOCAL || counts[1] > MAX_REMOTE || counts[2] > MAX_SOURCES {
         return Err(Error::Capacity.error());
     }
-    if checkpoints.is_none() {
-        connection.execute("DELETE FROM alert_episodes WHERE id IN(SELECT id FROM alert_episodes WHERE status<>'active' ORDER BY transition_sequence DESC LIMIT -1 OFFSET ?1)",[MAX_CLOSED as i64]).map_err(|e|sql_error("cannot retain alert episodes",e))?;
-    } else {
-        loop {
-            let removed = connection.execute("DELETE FROM alert_episodes WHERE id IN(SELECT id FROM (SELECT id FROM alert_episodes WHERE status<>'active' ORDER BY transition_sequence DESC LIMIT -1 OFFSET ?1) LIMIT 256)",[MAX_CLOSED as i64]).map_err(|e|sql_error("cannot retain alert episodes",e))?;
-            if removed == 0 {
-                break;
-            }
-            checkpoint(checkpoints)?;
-        }
-    }
-    let removed = if checkpoints.is_none() {
-        connection.execute("DELETE FROM alert_events WHERE sequence IN(SELECT sequence FROM alert_events ORDER BY sequence DESC LIMIT -1 OFFSET ?1)",[MAX_EVENTS as i64]).map_err(|e|sql_error("cannot retain alert events",e))?
-    } else {
-        let mut total = 0usize;
-        loop {
-            let removed = connection.execute("DELETE FROM alert_events WHERE sequence IN(SELECT sequence FROM (SELECT sequence FROM alert_events ORDER BY sequence DESC LIMIT -1 OFFSET ?1) LIMIT 256)",[MAX_EVENTS as i64]).map_err(|e|sql_error("cannot retain alert events",e))?;
-            if removed == 0 {
-                break;
-            }
-            total = total.checked_add(removed).ok_or_else(corrupt)?;
-            checkpoint(checkpoints)?;
-        }
-        total
-    };
+    connection.execute("DELETE FROM alert_episodes WHERE id IN(SELECT id FROM alert_episodes WHERE status<>'active' ORDER BY transition_sequence DESC LIMIT -1 OFFSET ?1)",[MAX_CLOSED as i64]).map_err(|e|sql_error("cannot retain alert episodes",e))?;
+    let removed = connection.execute("DELETE FROM alert_events WHERE sequence IN(SELECT sequence FROM alert_events ORDER BY sequence DESC LIMIT -1 OFFSET ?1)",[MAX_EVENTS as i64]).map_err(|e|sql_error("cannot retain alert events",e))?;
     s.trimmed = s
         .trimmed
         .checked_add(removed as u64)
@@ -1271,35 +1202,26 @@ pub(in crate::manage) fn acknowledge(
 /// Bind the acknowledgement to the current administrator and exact original
 /// transition. A duplicate acknowledgement is a read-only result.
 fn acknowledge_in(
-    tx: &Connection,
+    tx: &Transaction<'_>,
     administrator_id: &str,
     input: &Ack,
-) -> io::Result<(Episode, bool)> {
-    acknowledge_in_with(tx, administrator_id, input, None)
-}
-fn acknowledge_in_with(
-    tx: &Connection,
-    administrator_id: &str,
-    input: &Ack,
-    mut checkpoints: Option<&mut dyn Checkpoints>,
 ) -> io::Result<(Episode, bool)> {
     let result = acknowledge_transition(tx, administrator_id, input)?;
     if result.1 {
         let mut s = state(tx)?;
-        trim_with(tx, &mut s, &mut checkpoints)?;
+        trim(tx, &mut s)?;
         s.save(tx)?;
     }
     Ok(result)
 }
 
-// Batches share one retention/checkpoint pass, rather than rescanning the full
+// Batches share one retention pass, rather than rescanning the full
 // active catalog for each of their at most 32 transitions.
 fn acknowledge_transition(
-    tx: &Connection,
+    tx: &Transaction<'_>,
     administrator_id: &str,
     input: &Ack,
 ) -> io::Result<(Episode, bool)> {
-    require_transaction(tx)?;
     let node = require(tx)?;
     administrator(tx, administrator_id)?;
     if node != input.expected_node_id {
@@ -1351,13 +1273,6 @@ fn acknowledge_transition(
     Ok((episode, true))
 }
 
-fn require_transaction(connection: &Connection) -> io::Result<()> {
-    if connection.is_autocommit() {
-        return Err(Error::Invalid.error());
-    }
-    Ok(())
-}
-
 fn validate_boot(boot: &str) -> io::Result<()> {
     if !valid_id(boot) {
         return Err(Error::Invalid.error());
@@ -1391,7 +1306,7 @@ fn validate_ack_batch(inputs: &[Ack]) -> io::Result<()> {
 
 /// A small explicit set of original transitions commits atomically. A changed
 /// row rejects the entire batch; duplicate confirmed transitions stay read-only.
-fn acknowledge_batch(
+pub(in crate::manage) fn acknowledge_batch(
     directory: &Path,
     gate: &UpdateGuard,
     administrator_id: &str,
@@ -1403,17 +1318,16 @@ fn acknowledge_batch(
     let tx = connection
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(|e| sql_error("cannot begin alert acknowledgement batch", e))?;
-    let values = acknowledge_batch_in(&tx, administrator_id, inputs, None)?;
+    let values = acknowledge_batch_in(&tx, administrator_id, inputs)?;
     tx.commit()
         .map_err(|e| sql_error("cannot commit alert acknowledgement batch", e))?;
     Ok(values)
 }
 
 fn acknowledge_batch_in(
-    tx: &Connection,
+    tx: &Transaction<'_>,
     actor: &str,
     inputs: &[Ack],
-    mut checkpoints: Option<&mut dyn Checkpoints>,
 ) -> io::Result<Vec<Episode>> {
     let mut values = Vec::with_capacity(inputs.len());
     let mut changed = false;
@@ -1424,7 +1338,7 @@ fn acknowledge_batch_in(
     }
     if changed {
         let mut s = state(tx)?;
-        trim_with(tx, &mut s, &mut checkpoints)?;
+        trim(tx, &mut s)?;
         s.save(tx)?;
     }
     Ok(values)
@@ -1705,8 +1619,6 @@ pub(in crate::manage) fn summary(directory: &Path, administrator_id: &str) -> io
             unacknowledged_count: unack,
             oldest_event_sequence: oldest(connection)?,
             trimmed: s.trimmed,
-            #[cfg(test)]
-            last_event_sequence: s.last,
         })
     })
 }
@@ -2162,898 +2074,8 @@ pub(in crate::manage) fn require_empty(connection: &Connection) -> io::Result<()
     }
     Ok(())
 }
-#[cfg(test)]
-pub(in crate::manage) fn ensure_unused_for_test(connection: &Connection) -> io::Result<()> {
-    let count:i64=connection.query_row("SELECT count(*) FROM sqlite_schema WHERE name IN('alert_history_state','alert_episodes','alert_events')",[],|r|r.get(0)).map_err(|e|sql_error("cannot inspect legacy alert fixture",e))?;
-    if count == 0 {
-        return Ok(());
-    }
-    if count != 3 {
-        return Err(corrupt());
-    }
-    require_empty(connection)
-}
+
 #[cfg(test)]
 pub(in crate::manage) fn remove_schema_for_test(connection: &Connection) -> io::Result<()> {
-    ensure_unused_for_test(connection)?;
     connection.execute_batch("DROP TABLE IF EXISTS alert_events; DROP TABLE IF EXISTS alert_episodes; DROP TABLE IF EXISTS alert_history_state;").map_err(|e|sql_error("cannot reconstruct pre-event fixture",e))
-}
-
-#[cfg(test)]
-pub(in crate::manage) fn require_legacy_for_test(connection: &Connection) -> io::Result<()> {
-    validate_snapshot(connection)?;
-    let node = require(connection)?;
-    let s = state(connection)?;
-    if s.first
-        .zip(s.end)
-        .is_some_and(|(first, last)| last - first + 1 > (MAX_LOCAL * 2) as u64)
-    {
-        return Err(corrupt());
-    }
-    let episodes = episodes(connection, None)?;
-    if episodes
-        .iter()
-        .filter(|episode| episode.status == Status::Active)
-        .count()
-        > MAX_LOCAL
-    {
-        return Err(corrupt());
-    }
-    for episode in episodes {
-        check_version(21, &episode.observation, &node)?;
-    }
-    let mut statement=connection.prepare("SELECT sequence,episode_id,origin_node_id,administrator_id,payload FROM alert_events ORDER BY sequence LIMIT ?1").map_err(|error|sql_error("cannot inspect legacy event compatibility",error))?;
-    let rows = statement
-        .query_map([MAX_EVENTS as i64], event_row)
-        .map_err(|error| sql_error("cannot read legacy event compatibility", error))?;
-    for row in rows {
-        let event = event_value(
-            row.map_err(|error| sql_error("cannot decode legacy event compatibility", error))?,
-        )?;
-        check_version(21, &event.observation, &node)?;
-    }
-    Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::manage::store::{self, random_id, update_lock};
-    use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
-
-    mod guarded {
-        use super::*;
-        use crate::manage::observations::Proof;
-
-        fn peer(f: &Fixture) -> io::Result<(String, Arc<Proof>, Binding)> {
-            let id = random_id()?;
-            let certificate = rcgen::generate_simple_self_signed(vec!["localhost".into()])
-                .map_err(io::Error::other)?;
-            let leaf: Arc<[u8]> = Arc::from(certificate.cert.der().as_ref());
-            store::register_peer(&f.directory, &id, "source", &leaf, "localhost", None)?;
-            store::targets::configure(
-                &f.directory,
-                &f.administrator,
-                &id,
-                None,
-                "https://localhost:9443",
-                true,
-                None,
-            )?;
-            let proof = Arc::new(Proof {
-                target_revision: 1,
-                authorization: store::RemoteAuthorization {
-                    node_id: id.clone(),
-                    authorization_revision: 1,
-                    leaf,
-                },
-            });
-            let binding = Binding {
-                peer_id: id.clone(),
-                target_revision: 1,
-                authorization_revision: 1,
-                active: true,
-                retired: false,
-                rollback: false,
-                peer_active: true,
-            };
-            Ok((id, proof, binding))
-        }
-
-        #[test]
-        fn foreign_record_and_no_event_publication_revalidate_the_same_directory_binding()
-        -> io::Result<()> {
-            let f = Fixture::new()?;
-            let (peer, proof, binding) = peer(&f)?;
-            f.start()?;
-            let remote_boot = random_id()?;
-            let mut observation = f.observation(1);
-            observation.origin_node_id = peer.clone();
-            observation.slot = format!("source:{remote_boot}:1");
-            let batch = f.batch(1, TransitionKind::Opened, observation.clone());
-            assert_eq!(source_boot(&observation.slot), Some(remote_boot.as_str()));
-            assert!(
-                f.record(&batch).is_err(),
-                "plain local record cannot import a peer"
-            );
-            {
-                let gate = update_lock(&f.directory)?;
-                record_guarded(
-                    &f.directory,
-                    &gate,
-                    &batch,
-                    std::slice::from_ref(&proof),
-                    std::slice::from_ref(&binding),
-                )?;
-                let called = std::cell::Cell::new(false);
-                publish_guarded(
-                    &f.directory,
-                    &gate,
-                    std::slice::from_ref(&proof),
-                    std::slice::from_ref(&binding),
-                    || {
-                        called.set(true);
-                        Ok(())
-                    },
-                )?;
-                assert!(called.get());
-            }
-            let mut ids = HashSet::new();
-            collect_source_ids(&f.connection()?, &mut ids)?;
-            assert!(ids.contains(&remote_boot));
-            assert_eq!(f.episode(1)?.observation.origin_node_id, peer);
-            let before = summary(&f.directory, &f.administrator)?.last_event_sequence;
-            store::set_peer_active(&f.directory, &peer, 1, false)?;
-            let called = std::cell::Cell::new(false);
-            {
-                let gate = update_lock(&f.directory)?;
-                let rejected = publish_guarded(
-                    &f.directory,
-                    &gate,
-                    std::slice::from_ref(&proof),
-                    std::slice::from_ref(&binding),
-                    || {
-                        called.set(true);
-                        Ok(())
-                    },
-                )
-                .unwrap_err();
-                assert_eq!(
-                    rejected.get_ref().and_then(|e| e.downcast_ref::<Error>()),
-                    Some(&Error::Denied)
-                );
-                let recovery = f.batch(2, TransitionKind::Recovered, observation.clone());
-                assert!(
-                    record_guarded(
-                        &f.directory,
-                        &gate,
-                        &recovery,
-                        std::slice::from_ref(&proof),
-                        std::slice::from_ref(&binding)
-                    )
-                    .is_err()
-                );
-            }
-            assert!(!called.get());
-            assert_eq!(
-                summary(&f.directory, &f.administrator)?.last_event_sequence,
-                before
-            );
-            let retired = Binding {
-                authorization_revision: 2,
-                peer_active: false,
-                ..binding
-            };
-            let terminal = f.batch(2, TransitionKind::Unmonitored, observation);
-            record_guarded(
-                &f.directory,
-                &update_lock(&f.directory)?,
-                &terminal,
-                &[],
-                &[retired],
-            )?;
-            assert_eq!(f.episode(1)?.status, Status::Unmonitored);
-            validate_snapshot(&f.connection()?)?;
-            Ok(())
-        }
-
-        #[test]
-        fn real_twenty_one_keeps_original_event_ack_and_batch_limit_through_upgrade()
-        -> io::Result<()> {
-            for collision in [false, true] {
-                let f = Fixture::new()?;
-                f.start()?;
-                f.record(&f.batch(1, TransitionKind::Opened, f.observation(1)))?;
-                f.ack(1, 1)?;
-                let connection = f.connection()?;
-                store::recovery::restore_schema_twenty_one_for_test(&connection)?;
-                assert_eq!(store::inspect(&f.directory)?.schema_version, 21);
-                let rows = |connection: &Connection| -> io::Result<(Vec<u8>, Vec<u8>, Vec<u8>)> {
-                    connection.query_row("SELECT (SELECT payload FROM alert_events WHERE sequence=1),(SELECT payload FROM alert_events WHERE sequence=2),(SELECT payload FROM alert_episodes WHERE id=1)",[],|row|Ok((row.get(0)?,row.get(1)?,row.get(2)?))).map_err(io::Error::other)
-                };
-                let original = rows(&connection)?;
-                let original_state = state(&connection)?;
-                let mut too_large = f.batch(2, TransitionKind::ReasonChanged, f.observation(1));
-                too_large.transitions = vec![too_large.transitions[0].clone(); MAX_LOCAL * 2 + 1];
-                assert!(receipt(&f.directory, &too_large).is_err());
-                assert!(f.record(&too_large).is_err());
-                assert_eq!(state(&connection)?.last, original_state.last);
-                if collision {
-                    connection.execute_batch("CREATE TABLE recovery_state_v22(sentinel TEXT); INSERT INTO recovery_state_v22 VALUES('operator material');").map_err(io::Error::other)?;
-                }
-                let copied = f.directory.join("before22.sqlite3");
-                let migrated = store::migrate(&f.directory, &copied);
-                assert_eq!(rows(&connection)?, original);
-                let copied = Connection::open(copied).map_err(io::Error::other)?;
-                assert_eq!(store::read_overview(&copied)?.schema_version, 21);
-                assert_eq!(rows(&copied)?, original);
-                if collision {
-                    assert!(migrated.is_err());
-                    assert_eq!(store::inspect(&f.directory)?.schema_version, 21);
-                    let sentinel: String = connection
-                        .query_row("SELECT sentinel FROM recovery_state_v22", [], |row| {
-                            row.get(0)
-                        })
-                        .map_err(io::Error::other)?;
-                    assert_eq!(sentinel, "operator material");
-                } else {
-                    assert_eq!(migrated?.schema_version, store::SCHEMA_VERSION);
-                    let current = state(&connection)?;
-                    assert_eq!(
-                        (current.last, current.batch, current.digest),
-                        (
-                            original_state.last,
-                            original_state.batch,
-                            original_state.digest
-                        )
-                    );
-                    assert!(f.episode(1)?.is_acknowledged);
-                    validate_snapshot(&connection)?;
-                }
-            }
-            Ok(())
-        }
-    }
-
-    struct Fixture {
-        directory: std::path::PathBuf,
-        administrator: String,
-        node: String,
-        boot: String,
-    }
-    impl Fixture {
-        fn new() -> io::Result<Self> {
-            let directory =
-                std::env::temp_dir().join(format!("vproxy-alert-history-{}", random_id()?));
-            let overview =
-                store::initialize(&directory, "event fixture", "admin", "fixture PHC bytes")?;
-            let connection = open_existing(&directory, false)?;
-            let administrator = connection
-                .query_row("SELECT id FROM administrators", [], |r| r.get(0))
-                .map_err(io::Error::other)?;
-            Ok(Self {
-                directory,
-                administrator,
-                node: overview.node_id,
-                boot: random_id()?,
-            })
-        }
-        fn connection(&self) -> io::Result<Connection> {
-            open_existing(&self.directory, true)
-        }
-        fn start(&self) -> io::Result<Commit> {
-            start(&self.directory, &update_lock(&self.directory)?, &self.boot)
-        }
-        fn record(&self, batch: &Batch) -> io::Result<Commit> {
-            record(&self.directory, &update_lock(&self.directory)?, batch)
-        }
-        fn observation(&self, id: u64) -> Observation {
-            Observation {
-                incident_id: id,
-                kind: Kind::Policy,
-                origin_node_id: self.node.clone(),
-                resource_id: None,
-                slot: "policy".into(),
-                check: None,
-                target: None,
-                code: "proxy_not_running".into(),
-                first_observed_at_unix_ms: Some(20),
-                last_observed_at_unix_ms: Some(20),
-                evidence_sequence: Some(u64::MAX),
-            }
-        }
-        fn batch(&self, sequence: u64, kind: TransitionKind, observation: Observation) -> Batch {
-            Batch {
-                boot_id: self.boot.clone(),
-                sequence,
-                transitions: vec![Transition {
-                    kind,
-                    observation,
-                    observed_at_unix_ms: Some(30),
-                    ended_reason: (kind == TransitionKind::Unmonitored)
-                        .then_some(EndReason::SourceUnmonitored),
-                }],
-            }
-        }
-        fn episode(&self, id: u64) -> io::Result<Episode> {
-            episode(&self.directory, &self.administrator, id)?.ok_or_else(corrupt)
-        }
-        fn ack(&self, id: u64, transition: u64) -> io::Result<Episode> {
-            acknowledge(
-                &self.directory,
-                &update_lock(&self.directory)?,
-                &self.administrator,
-                &Ack {
-                    expected_node_id: self.node.clone(),
-                    episode_id: id,
-                    expected_transition_sequence: transition,
-                },
-            )
-        }
-    }
-    impl Drop for Fixture {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.directory);
-        }
-    }
-
-    #[test]
-    fn unread_pages_and_bulk_acknowledgements_keep_a_finite_original_scope() -> io::Result<()> {
-        let f = Fixture::new()?;
-        f.start()?;
-        let mut batch = f.batch(1, TransitionKind::Opened, f.observation(1));
-        batch.transitions.clear();
-        for id in 1..=33 {
-            for kind in [TransitionKind::Opened, TransitionKind::Recovered] {
-                batch.transitions.push(Transition {
-                    kind,
-                    observation: f.observation(id),
-                    observed_at_unix_ms: Some(30),
-                    ended_reason: None,
-                });
-            }
-        }
-        f.record(&batch)?;
-        let first = unread(
-            &f.directory,
-            &f.administrator,
-            &UnreadQuery {
-                before: None,
-                through: None,
-            },
-        )?;
-        assert_eq!(first.items.len(), MAX_ACK_BATCH);
-        assert_eq!(first.items[0].id, 65);
-        assert_eq!(first.next_cursor, Some(3));
-        assert_eq!(first.through_sequence, 66);
-        f.record(&f.batch(2, TransitionKind::Opened, f.observation(34)))?;
-        let inputs: Vec<_> = first
-            .items
-            .iter()
-            .map(|value| Ack {
-                expected_node_id: f.node.clone(),
-                episode_id: value.id,
-                expected_transition_sequence: value.last_transition_sequence,
-            })
-            .collect();
-        let values = acknowledge_batch(
-            &f.directory,
-            &update_lock(&f.directory)?,
-            &f.administrator,
-            &inputs,
-        )?;
-        assert_eq!(values.len(), 32);
-        assert!(
-            values
-                .iter()
-                .all(|value| value.is_acknowledged && value.status == Status::Recovered)
-        );
-        let before = summary(&f.directory, &f.administrator)?;
-        acknowledge_batch(
-            &f.directory,
-            &update_lock(&f.directory)?,
-            &f.administrator,
-            &inputs,
-        )?;
-        assert_eq!(
-            summary(&f.directory, &f.administrator)?.last_event_sequence,
-            before.last_event_sequence
-        );
-        let older = unread(
-            &f.directory,
-            &f.administrator,
-            &UnreadQuery {
-                before: first.next_cursor,
-                through: Some(66),
-            },
-        )?;
-        assert_eq!(older.items.len(), 1);
-        assert_eq!(older.items[0].id, 1);
-        assert!(older.next_cursor.is_none());
-        let fresh = unread(
-            &f.directory,
-            &f.administrator,
-            &UnreadQuery {
-                before: None,
-                through: None,
-            },
-        )?;
-        assert_eq!(
-            fresh.items.iter().map(|value| value.id).collect::<Vec<_>>(),
-            [67, 1]
-        );
-        validate_snapshot(&f.connection()?)?;
-        Ok(())
-    }
-
-    #[cfg(feature = "witness-journal")]
-    #[test]
-    fn source_ack_batch_keeps_partial_changes_inside_the_held_transaction() -> io::Result<()> {
-        struct Budget;
-        impl Checkpoints for Budget {
-            fn checkpoint(&mut self) -> io::Result<()> {
-                Ok(())
-            }
-        }
-        let f = Fixture::new()?;
-        f.start()?;
-        f.record(&f.batch(1, TransitionKind::Opened, f.observation(1)))?;
-        let input = |id| Ack {
-            expected_node_id: f.node.clone(),
-            episode_id: id,
-            expected_transition_sequence: id,
-        };
-        let mut connection = f.connection()?;
-        {
-            let tx = connection
-                .transaction_with_behavior(TransactionBehavior::Immediate)
-                .map_err(io::Error::other)?;
-            let mut budget = Budget;
-            let failed = Writer::Source {
-                tx: &tx,
-                checkpoints: &mut budget,
-            }
-            .acknowledge_batch(&f.administrator, &[input(1), input(99)]);
-            assert_eq!(failed.unwrap_err().kind(), io::ErrorKind::NotFound);
-            // The Source coordinator discards this entire held transaction on
-            // failure, rather than confirming a partial acknowledgement intent.
-        }
-        assert!(!f.episode(1)?.is_acknowledged);
-        assert_eq!(
-            summary(&f.directory, &f.administrator)?.last_event_sequence,
-            1
-        );
-        {
-            let tx = connection
-                .transaction_with_behavior(TransactionBehavior::Immediate)
-                .map_err(io::Error::other)?;
-            let mut budget = Budget;
-            let values = Writer::Source {
-                tx: &tx,
-                checkpoints: &mut budget,
-            }
-            .acknowledge_batch(&f.administrator, &[input(1)])?;
-            assert!(values[0].is_acknowledged);
-            tx.commit().map_err(io::Error::other)?;
-        }
-        assert_eq!(f.episode(1)?.status, Status::Active);
-        validate_snapshot(&connection)?;
-        Ok(())
-    }
-
-    #[test]
-    fn exact_batches_acknowledgements_and_restart_keep_distinct_evidence() -> io::Result<()> {
-        let f = Fixture::new()?;
-        assert_eq!(f.start()?.batch_sequence, 0);
-        let mut observation = f.observation(u64::MAX);
-        let first = f.batch(1, TransitionKind::Opened, observation.clone());
-        assert!(receipt(&f.directory, &first)?.is_none());
-        let committed = f.record(&first)?;
-        assert_eq!(
-            (
-                committed.first_event_sequence,
-                committed.last_event_sequence
-            ),
-            (Some(1), Some(1))
-        );
-        assert_eq!(f.record(&first)?, committed);
-        assert_eq!(receipt(&f.directory, &first)?, Some(committed));
-        assert!(f.ack(1, 1)?.is_acknowledged);
-        assert_eq!(f.ack(1, 1)?.acknowledgement.unwrap().event_sequence, 2);
-        observation.code = "policy_not_applied".into();
-        observation.last_observed_at_unix_ms = Some(10); // clock rollback is informational
-        let second = f.batch(2, TransitionKind::ReasonChanged, observation.clone());
-        f.record(&second)?;
-        let changed = f.episode(1)?;
-        assert!(!changed.is_acknowledged);
-        assert_eq!(changed.acknowledgement.unwrap().transition_sequence, 1);
-        assert!(f.ack(1, 1).is_err());
-        assert!(f.ack(1, 3)?.is_acknowledged);
-        let mut substitution = second.clone();
-        substitution.transitions[0].observation.code = "policy_publication_unavailable".into();
-        assert!(f.record(&substitution).is_err());
-        f.record(&f.batch(3, TransitionKind::Recovered, observation))?;
-        assert_eq!(f.episode(1)?.status, Status::Recovered);
-        assert!(!f.episode(1)?.is_acknowledged);
-        let next_boot = random_id()?;
-        start(&f.directory, &update_lock(&f.directory)?, &next_boot)?;
-        let mut active = f.batch(1, TransitionKind::Opened, f.observation(1));
-        active.boot_id = next_boot;
-        let created = f.record(&active)?;
-        let id = created.first_event_sequence.unwrap();
-        start(&f.directory, &update_lock(&f.directory)?, &random_id()?)?;
-        let ended = f.episode(id)?;
-        assert_eq!(ended.status, Status::Unmonitored);
-        assert_eq!(ended.ended_reason, Some(EndReason::MonitorRestarted));
-        assert_eq!(ended.observation.last_observed_at_unix_ms, Some(20));
-        assert!(receipt(&f.directory, &active).is_err());
-        assert_eq!(f.episode(1)?.status, Status::Recovered);
-        validate_snapshot(&f.connection()?)?;
-        Ok(())
-    }
-
-    #[test]
-    fn maximum_public_egress_metadata_fits_and_round_trips_with_acknowledgement() -> io::Result<()>
-    {
-        let f = Fixture::new()?;
-        f.start()?;
-        let target: SocketAddr = "[7fff:ffff:ffff:ffff:ffff:ffff:ffff:ffff]:65535"
-            .parse()
-            .map_err(io::Error::other)?;
-        let observation = Observation {
-            kind: Kind::EgressCheck,
-            resource_id: Some(random_id()?),
-            slot: format!("tcp:{target}"),
-            check: Some(CheckKind::Tcp),
-            target: Some(target),
-            code: "egress_address_unavailable".into(),
-            first_observed_at_unix_ms: Some(u64::MAX),
-            last_observed_at_unix_ms: Some(u64::MAX),
-            ..f.observation(u64::MAX)
-        };
-        let high = i64::MAX as u64;
-        let event = Event {
-            sequence: high,
-            observer_node_id: f.node.clone(),
-            episode_id: high - 2,
-            boot_id: f.boot.clone(),
-            kind: EventKind::Acknowledged,
-            observation: observation.clone(),
-            observed_at_unix_ms: Some(u64::MAX),
-            recorded_at_unix_ms: Some(u64::MAX),
-            ended_reason: None,
-            administrator_id: Some(f.administrator.clone()),
-            transition_sequence: high - 1,
-        };
-        validate_event(&event)?;
-        assert!(encode(&event)?.len() <= MAX_PAYLOAD);
-        let projection = Episode {
-            id: high - 2,
-            observer_node_id: f.node.clone(),
-            boot_id: f.boot.clone(),
-            observation: observation.clone(),
-            status: Status::Unmonitored,
-            last_transition_sequence: high - 1,
-            ended_at_unix_ms: Some(u64::MAX),
-            ended_reason: Some(EndReason::SourceUnmonitored),
-            acknowledgement: Some(Acknowledgement {
-                transition_sequence: high - 1,
-                administrator_id: f.administrator.clone(),
-                observed_at_unix_ms: Some(u64::MAX),
-                event_sequence: high,
-            }),
-            is_acknowledged: true,
-        };
-        validate_episode(&projection)?;
-        assert!(encode(&projection)?.len() <= MAX_PAYLOAD);
-        let remote_boot = random_id()?;
-        let remote_peer = random_id()?;
-        let mut imported_event = event.clone();
-        imported_event.observation.origin_node_id = remote_peer.clone();
-        imported_event.observation.slot = format!("source:{remote_boot}:{}", u64::MAX);
-        validate_event(&imported_event)?;
-        assert!(encode(&imported_event)?.len() <= MAX_PAYLOAD);
-        let mut imported_projection = projection.clone();
-        imported_projection.observation.origin_node_id = remote_peer;
-        imported_projection.observation.slot = imported_event.observation.slot;
-        validate_episode(&imported_projection)?;
-        assert!(encode(&imported_projection)?.len() <= MAX_PAYLOAD);
-        let mut batch = f.batch(1, TransitionKind::Opened, observation.clone());
-        batch.transitions[0].observed_at_unix_ms = Some(u64::MAX);
-        f.record(&batch)?;
-        let acknowledged = f.ack(1, 1)?;
-        assert!(acknowledged.is_acknowledged);
-        assert_eq!(acknowledged.observation, observation);
-        assert_eq!(
-            get(&f.directory, &f.administrator, 2)?.unwrap().observation,
-            observation
-        );
-        validate_snapshot(&f.connection()?)?;
-        Ok(())
-    }
-
-    #[test]
-    fn rejected_writes_and_statement_or_commit_failures_leave_no_partial_events() -> io::Result<()>
-    {
-        let f = Fixture::new()?;
-        f.start()?;
-        let mut batch = f.batch(1, TransitionKind::Opened, f.observation(2));
-        batch.transitions.push(
-            f.batch(1, TransitionKind::Opened, f.observation(1))
-                .transitions
-                .remove(0),
-        );
-        let connection = f.connection()?;
-        connection.execute_batch("CREATE TRIGGER event_statement_failure BEFORE INSERT ON alert_events WHEN NEW.sequence=2 BEGIN SELECT RAISE(ABORT,'fixture'); END;").map_err(io::Error::other)?;
-        assert!(f.record(&batch).is_err());
-        assert!(receipt(&f.directory, &batch)?.is_none());
-        assert_eq!(
-            summary(&f.directory, &f.administrator)?.last_event_sequence,
-            0
-        );
-        connection.execute_batch("DROP TRIGGER event_statement_failure; CREATE TABLE event_commit_failure(administrator_id TEXT REFERENCES administrators(id) DEFERRABLE INITIALLY DEFERRED); CREATE TRIGGER event_deferred_failure AFTER INSERT ON alert_events BEGIN INSERT INTO event_commit_failure VALUES('AAAAAAAAAAAAAAAAAAAAAA'); END;").map_err(io::Error::other)?;
-        assert!(f.record(&batch).is_err());
-        assert!(receipt(&f.directory, &batch)?.is_none());
-        let counts = summary(&f.directory, &f.administrator)?;
-        assert_eq!(
-            (counts.active_count, counts.closed_count, counts.event_count),
-            (0, 0, 0)
-        );
-        connection
-            .execute_batch("DROP TRIGGER event_deferred_failure; DROP TABLE event_commit_failure;")
-            .map_err(io::Error::other)?;
-        f.record(&batch)?;
-        let id = 1;
-        let input = Ack {
-            expected_node_id: random_id()?,
-            episode_id: id,
-            expected_transition_sequence: 1,
-        };
-        assert!(
-            acknowledge(
-                &f.directory,
-                &update_lock(&f.directory)?,
-                &f.administrator,
-                &input
-            )
-            .is_err()
-        );
-        let valid = Ack {
-            expected_node_id: f.node.clone(),
-            ..input
-        };
-        assert!(
-            acknowledge(
-                &f.directory,
-                &update_lock(&f.directory)?,
-                &random_id()?,
-                &valid
-            )
-            .is_err()
-        );
-        assert_eq!(
-            summary(&f.directory, &f.administrator)?.last_event_sequence,
-            2
-        );
-        assert!(store::recovery::restore_schema_twenty_for_test(&connection).is_err());
-        let mut changes = f.batch(2, TransitionKind::ReasonChanged, f.observation(2));
-        changes.transitions[0].observation.code = "policy_not_applied".into();
-        let mut other = changes.transitions[0].clone();
-        other.observation.incident_id = 1;
-        changes.transitions.push(other);
-        f.record(&changes)?;
-        let first = f.ack(1, 3)?;
-        let second = f.ack(2, 4)?;
-        // Both attacks keep canonical payload bytes and every indexed SQL column
-        // coherent. The target event itself is valid, but belongs to episode B.
-        let mut crossed = first.clone();
-        crossed.last_transition_sequence = second.last_transition_sequence;
-        crossed.is_acknowledged = false;
-        save_episode(&connection, &crossed)?;
-        assert!(validate_snapshot(&connection).is_err());
-        save_episode(&connection, &first)?;
-        let mut crossed = first.clone();
-        let original_ack = crossed.acknowledgement.as_mut().unwrap();
-        let other_ack = second.acknowledgement.as_ref().unwrap();
-        original_ack.event_sequence = other_ack.event_sequence;
-        original_ack.observed_at_unix_ms = other_ack.observed_at_unix_ms;
-        save_episode(&connection, &crossed)?;
-        assert!(validate_snapshot(&connection).is_err());
-        save_episode(&connection, &first)?;
-        let mut next = f.batch(3, TransitionKind::ReasonChanged, f.observation(2));
-        next.transitions[0].observation.code = "policy_publication_unavailable".into();
-        // Canonical but future references cannot be returned by an already-acked
-        // shortcut or silently repaired when the next producer advances its counter.
-        let mut future = first.clone();
-        future.acknowledgement.as_mut().unwrap().event_sequence = 7;
-        save_episode(&connection, &future)?;
-        assert!(episode(&f.directory, &f.administrator, 1).is_err());
-        assert!(f.ack(1, 3).is_err());
-        assert!(f.record(&next).is_err());
-        assert_eq!(find_episode(&connection, 1)?, Some(future));
-        save_episode(&connection, &first)?;
-        let mut future = first.clone();
-        future.last_transition_sequence = 7;
-        future.is_acknowledged = false;
-        save_episode(&connection, &future)?;
-        assert!(episode(&f.directory, &f.administrator, 1).is_err());
-        assert!(f.record(&next).is_err());
-        assert_eq!(find_episode(&connection, 1)?, Some(future));
-        save_episode(&connection, &first)?;
-        let mut future = find_event(&connection, 6)?.unwrap();
-        future.sequence = 7;
-        save_event(&connection, &future)?;
-        assert!(get(&f.directory, &f.administrator, 7).is_err());
-        connection
-            .execute("DELETE FROM alert_events WHERE sequence=7", [])
-            .map_err(io::Error::other)?;
-        assert_eq!(state(&connection)?.last, 6);
-        validate_snapshot(&connection)?;
-        Ok(())
-    }
-
-    #[test]
-    fn retention_is_bounded_and_never_reuses_pruned_sequence_or_incident_ids() -> io::Result<()> {
-        let f = Fixture::new()?;
-        f.start()?;
-        // Synthetic distinct historical resources exercise the store's global
-        // bound, not a claim that the live IPAM permits this many addresses.
-        let observation = |id| Observation {
-            kind: Kind::EgressCheck,
-            resource_id: Some(URL_SAFE_NO_PAD.encode(u128::from(id).to_be_bytes())),
-            slot: "bind".into(),
-            check: Some(CheckKind::Bind),
-            code: "egress_address_unavailable".into(),
-            ..f.observation(id)
-        };
-        let mut batch = Batch {
-            boot_id: f.boot.clone(),
-            sequence: 1,
-            transitions: Vec::with_capacity(MAX_BATCH),
-        };
-        for id in 1..=MAX_LOCAL as u64 {
-            batch.transitions.push(Transition {
-                kind: TransitionKind::Opened,
-                observation: observation(id),
-                observed_at_unix_ms: None,
-                ended_reason: None,
-            });
-        }
-        for id in 1..=MAX_LOCAL as u64 {
-            batch.transitions.push(Transition {
-                kind: TransitionKind::Unmonitored,
-                observation: observation(id),
-                observed_at_unix_ms: None,
-                ended_reason: Some(EndReason::SourceUnmonitored),
-            });
-        }
-        f.record(&batch)?;
-        batch.sequence = 2;
-        batch.transitions.clear();
-        for id in MAX_LOCAL as u64 + 1..=(MAX_LOCAL * 2) as u64 {
-            batch.transitions.push(Transition {
-                kind: TransitionKind::Opened,
-                observation: observation(id),
-                observed_at_unix_ms: None,
-                ended_reason: None,
-            });
-        }
-        f.record(&batch)?;
-        let counts = summary(&f.directory, &f.administrator)?;
-        assert_eq!(
-            (counts.active_count, counts.closed_count, counts.event_count),
-            (6144, 4096, 16384)
-        );
-        assert_eq!(
-            (
-                counts.trimmed,
-                counts.oldest_event_sequence,
-                counts.last_event_sequence
-            ),
-            (2048, Some(2049), 18432)
-        );
-        let page = list(
-            &f.directory,
-            &f.administrator,
-            &Query {
-                before: None,
-                limit: 2,
-                origin_node_id: Some(f.node.clone()),
-                episode_id: None,
-            },
-        )?;
-        assert_eq!(
-            page.items.iter().map(|e| e.sequence).collect::<Vec<_>>(),
-            vec![18432, 18431]
-        );
-        assert_eq!(page.next_cursor, Some(18431));
-        assert!(get(&f.directory, &f.administrator, 1)?.is_none());
-        assert!(episode(&f.directory, &f.administrator, 1)?.is_none());
-        assert!(
-            f.record(&f.batch(3, TransitionKind::Opened, observation(1)))
-                .is_err()
-        );
-        assert_eq!(
-            summary(&f.directory, &f.administrator)?.last_event_sequence,
-            18432
-        );
-        validate_snapshot(&f.connection()?)?;
-        Ok(())
-    }
-
-    #[test]
-    fn real_twenty_upgrade_preserves_issued_controller_history_and_rolls_back_conflicts()
-    -> io::Result<()> {
-        for collision in [false, true] {
-            let f = Fixture::new()?;
-            let connection = f.connection()?;
-            store::recovery::restore_schema_twenty_for_test(&connection)?;
-            let peer = random_id()?;
-            store::register_peer(
-                &f.directory,
-                &peer,
-                "legacy child",
-                b"public event migration fixture",
-                "child.example",
-                None,
-            )?;
-            store::targets::configure(
-                &f.directory,
-                &f.administrator,
-                &peer,
-                None,
-                "https://child.example",
-                true,
-                None,
-            )?;
-            store::targets::observe(&f.directory, &peer, 1, 2, 0, 1)?;
-            let job = store::targets::enqueue(
-                &f.directory,
-                &f.administrator,
-                1,
-                store::Command {
-                    target_node_id: peer.clone(),
-                    epoch: 2,
-                    command_id: 1,
-                    expected_policy_revision: 1,
-                    source_administrator_id: f.administrator.clone(),
-                    change: store::PolicyChange::CreateUser {
-                        name: "legacy intent".into(),
-                        protocols: vec![],
-                        concurrent_limit: 1,
-                    },
-                },
-            )?;
-            let before:(Vec<u8>,Vec<u8>,i64)=connection.query_row("SELECT (SELECT command FROM control_outbox),(SELECT snapshot FROM controller_history),(SELECT last_sequence FROM controller_history_state)",[],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).map_err(io::Error::other)?;
-            if collision {
-                connection.execute_batch("CREATE TABLE recovery_state_v21(sentinel TEXT); INSERT INTO recovery_state_v21 VALUES('operator material');").map_err(io::Error::other)?;
-            }
-            let backup = f.directory.join("schema20-before-events.sqlite3");
-            let migrated = store::migrate(&f.directory, &backup);
-            let after:(Vec<u8>,Vec<u8>,i64)=connection.query_row("SELECT (SELECT command FROM control_outbox),(SELECT snapshot FROM controller_history),(SELECT last_sequence FROM controller_history_state)",[],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).map_err(io::Error::other)?;
-            assert_eq!(after, before);
-            assert_eq!(
-                store::targets::history::get(&f.directory, &f.administrator, &peer, &job.job_id)?
-                    .unwrap()
-                    .sequence,
-                1
-            );
-            if collision {
-                assert!(migrated.is_err());
-                assert_eq!(store::inspect(&f.directory)?.schema_version, 20);
-                let s: String = connection
-                    .query_row("SELECT sentinel FROM recovery_state_v21", [], |r| r.get(0))
-                    .map_err(io::Error::other)?;
-                assert_eq!(s, "operator material");
-            } else {
-                assert_eq!(migrated?.schema_version, store::SCHEMA_VERSION);
-                require_empty(&connection)?;
-                validate_snapshot(&connection)?;
-            }
-            let copied = Connection::open(backup).map_err(io::Error::other)?;
-            assert_eq!(store::read_overview(&copied)?.schema_version, 20);
-            assert!(copied.prepare("SELECT * FROM alert_events").is_err());
-        }
-        Ok(())
-    }
 }

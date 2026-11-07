@@ -1,26 +1,18 @@
-//! A single explicit HTTPS request, without redirects, proxies or background tasks.
+//! A single explicit HTTPS request, without redirects, proxies or retries.
 //!
 //! Bearer secrets are sent only after normal CA/SAN verification, TLS 1.3 and
-//! HTTP/1.1 negotiation. RFC 6750 sections 2.1 and 5.2 require protecting the
+//! HTTP/1.1. RFC 6750 sections 2.1 and 5.2 require protecting the
 //! credential in transport: <https://www.rfc-editor.org/rfc/rfc6750.html#section-5.2>.
 
-use bytes::Bytes;
-use futures_util::FutureExt as _;
 use http::{StatusCode, header as http_header};
-use http_body_util::{BodyExt as _, Full};
-use hyper_util::rt::TokioIo;
-use rustls::ProtocolVersion;
 use serde::Deserialize;
-use tokio::{net::TcpStream, time::timeout};
-use tokio_rustls::TlsConnector;
+use tokio::time::timeout;
 use zeroize::Zeroizing;
 
 mod header;
 
 use super::{api::PublicOrigin, tls};
-use rustls::ClientConfig;
-use rustls_pki_types::ServerName;
-use std::{io, path::PathBuf, sync::Arc, time::Duration};
+use std::{io, path::PathBuf, time::Duration};
 
 const MAX_RESPONSE_BYTES: usize = 32 * 1024;
 
@@ -41,10 +33,7 @@ pub(super) struct ConnectionArgs {
 /// Prepared only after validating all of the command's non-secret input.
 pub(super) struct Connection {
     origin: PublicOrigin,
-    host: String,
-    port: u16,
-    server_name: ServerName<'static>,
-    tls: Arc<ClientConfig>,
+    http: reqwest::Client,
     authorization: header::Authorization,
 }
 
@@ -53,28 +42,21 @@ impl Connection {
     /// No socket opens until all synchronous input checks have succeeded.
     pub(super) fn prepare(args: ConnectionArgs) -> io::Result<Self> {
         let origin = PublicOrigin::parse(&args.origin)?;
-        let url = url::Url::parse(origin.value()).map_err(|_| input("invalid query origin"))?;
-        let (host, server_name) = match url.host() {
-            Some(url::Host::Domain(host)) => (
-                host.to_owned(),
-                ServerName::try_from(host.to_owned())
-                    .map_err(|_| input("invalid query hostname"))?,
-            ),
-            Some(url::Host::Ipv4(ip)) => (ip.to_string(), ServerName::IpAddress(ip.into())),
-            Some(url::Host::Ipv6(ip)) => (ip.to_string(), ServerName::IpAddress(ip.into())),
-            None => return Err(input("query origin has no host")),
-        };
-        let port = url
-            .port_or_known_default()
-            .ok_or_else(|| input("query origin has no port"))?;
-        let tls = tls::admin_client_config(&args.ca)?;
+        let http = reqwest::Client::builder()
+            .use_preconfigured_tls((*tls::admin_client_config(&args.ca)?).clone())
+            .https_only(true)
+            .http1_only()
+            .no_proxy()
+            .redirect(reqwest::redirect::Policy::none())
+            .retry(reqwest::retry::never())
+            .referer(false)
+            .pool_max_idle_per_host(0)
+            .build()
+            .map_err(|_| input("cannot configure management query client"))?;
         let authorization = header::Authorization::read(&args.header_file)?;
         Ok(Self {
             origin,
-            host,
-            port,
-            server_name,
-            tls,
+            http,
             authorization,
         })
     }
@@ -124,12 +106,12 @@ impl Request {
 
 /// Only locally chosen stage labels survive transport errors. HTTP libraries
 /// and peers may put arbitrary header/body values in their own error messages.
-fn transport(error: io::Error, label: &'static str, stage: &'static str) -> io::Error {
-    io::Error::new(error.kind(), format!("{label} failed ({stage})"))
+fn transport(label: &'static str, stage: &'static str) -> io::Error {
+    io::Error::other(format!("{label} failed ({stage})"))
 }
 
 /// All DNS/connect/TLS/HTTP/body waits share one budget. Dropping this future
-/// drops both the exchange and its driver; it never detaches a spawned task.
+/// cancels the exchange; the client retains no idle connection or retry work.
 pub(super) async fn request(
     connection: Connection,
     request: Request,
@@ -142,130 +124,75 @@ pub(super) async fn request(
 }
 
 async fn once(connection: Connection, request: Request) -> io::Result<Zeroizing<Vec<u8>>> {
-    let Connection {
-        origin,
-        host,
-        port,
-        server_name,
-        tls,
-        authorization,
-    } = connection;
     let (method, path, json, expected_status, label) = request.parts();
     let post = method == http::Method::POST;
-    // Direct transport deliberately does not consult HTTP(S)_PROXY or NO_PROXY.
-    let stream = TcpStream::connect((host.as_str(), port))
-        .await
-        .map_err(|error| transport(error, label, "connect"))?;
-    let stream = TlsConnector::from(tls)
-        .connect(server_name, stream)
-        .await
-        .map_err(|error| transport(error, label, "tls"))?;
-    if stream.get_ref().1.alpn_protocol() != Some(&b"http/1.1"[..])
-        || stream.get_ref().1.protocol_version() != Some(ProtocolVersion::TLSv1_3)
-    {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "management TLS negotiation is unsupported",
-        ));
-    }
-    let mut builder = hyper::client::conn::http1::Builder::new();
-    builder.max_buf_size(16 * 1024).max_headers(64);
-    let (mut sender, connection) = builder
-        .handshake(TokioIo::new(stream))
-        .await
-        .map_err(|error| transport(io::Error::other(error), label, "http"))?;
-    let mut request = http::Request::builder()
-        .method(method)
-        .uri(path)
-        .header(http_header::HOST, origin.authority())
+    let mut request = connection
+        .http
+        .request(method, format!("{}{path}", connection.origin.value()))
         .header(http_header::ACCEPT, "application/json")
-        .header(http_header::AUTHORIZATION, authorization.into_value());
+        .header(
+            http_header::AUTHORIZATION,
+            connection.authorization.into_value(),
+        );
     if post {
         request = request.header(http_header::CONTENT_TYPE, "application/json");
     }
-    let request = request
-        .body(Full::new(Bytes::from(json)))
-        .map_err(|_| input("cannot construct management query"))?;
-    let exchange = async {
-        let response = sender
-            .send_request(request)
-            .await
-            .map_err(|error| transport(io::Error::other(error), label, "http"))?;
-        let status = response.status();
-        // This is a one-origin credential. Never follow Location, even to HTTPS.
-        // RFC 9110 section 15.4 leaves automatic redirection a client decision:
-        // <https://www.rfc-editor.org/rfc/rfc9110.html#section-15.4>.
-        if status.is_redirection() {
-            let code = if matches!(status.as_u16(), 300 | 301 | 302 | 303 | 305 | 307 | 308) {
-                "redirect_refused"
-            } else {
-                // 304 is a conditional-cache result, not a redirect. This CLI
-                // sends no conditional request and accepts neither response.
-                "request_rejected"
-            };
-            return Err(rejection(status, code, label));
-        }
-        let mut types = response.headers().get_all(http_header::CONTENT_TYPE).iter();
-        let json = types
-            .next()
-            .and_then(|value| value.to_str().ok())
-            .and_then(|value| value.split(';').next())
-            .is_some_and(|value| value.trim().eq_ignore_ascii_case("application/json"));
-        if !json
-            || types.next().is_some()
-            || response
-                .headers()
-                .contains_key(http_header::CONTENT_ENCODING)
-        {
-            return Err(if status == expected_status {
-                response_error()
-            } else {
-                rejection(status, "request_rejected", label)
-            });
-        }
-        let mut body = response.into_body();
-        // Keep arbitrary response bytes in one zeroizing bounded owner. Only a
-        // typed, validated public response may be re-encoded to stdout afterwards.
-        let mut bytes = Zeroizing::new(Vec::with_capacity(MAX_RESPONSE_BYTES));
-        while let Some(frame) = body.frame().await {
-            let frame = frame.map_err(|error| transport(io::Error::other(error), label, "body"))?;
-            let Ok(data) = frame.into_data() else {
-                continue;
-            };
-            bytes
-                .len()
-                .checked_add(data.len())
-                .filter(|length| *length <= MAX_RESPONSE_BYTES)
-                .ok_or_else(response_error)?;
-            bytes.extend_from_slice(&data);
-        }
-        if status != expected_status {
-            return Err(rejection(status, rejection_code(status, &bytes), label));
-        }
-        Ok(bytes)
-    };
-    tokio::pin!(exchange, connection);
-    tokio::select! {
-        biased;
-        result = &mut exchange => result,
-        result = &mut connection => {
-            // A clean Connection: close may finish the driver after placing the
-            // complete response in its channel. Consume that buffered response;
-            // do not call it a protocol error or wait for keepalive EOF.
-            match result {
-                Ok(()) => exchange.await,
-                Err(error) => {
-                    // Hyper can retain a complete framed response even if the
-                    // connection later fails. Preserve a buffered final result;
-                    // otherwise report this driver failure without waiting for
-                    // the outer deadline. A Pending exchange is dropped here.
-                    exchange.as_mut().now_or_never().unwrap_or_else(|| {
-                        Err(transport(io::Error::other(error), label, "http"))
-                    })
-                }
-            }
-        }
+    let mut response = request
+        .body(json)
+        .send()
+        .await
+        .map_err(|_| transport(label, "http"))?;
+    let status = response.status();
+    // This is a one-origin credential. Never follow Location, even to HTTPS.
+    // RFC 9110 section 15.4 leaves automatic redirection a client decision:
+    // <https://www.rfc-editor.org/rfc/rfc9110.html#section-15.4>.
+    if status.is_redirection() {
+        let code = if matches!(status.as_u16(), 300 | 301 | 302 | 303 | 305 | 307 | 308) {
+            "redirect_refused"
+        } else {
+            // 304 is a conditional-cache result, not a redirect. This CLI
+            // sends no conditional request and accepts neither response.
+            "request_rejected"
+        };
+        return Err(rejection(status, code, label));
     }
+    let mut types = response.headers().get_all(http_header::CONTENT_TYPE).iter();
+    let json = types
+        .next()
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.split(';').next())
+        .is_some_and(|value| value.trim().eq_ignore_ascii_case("application/json"));
+    if !json
+        || types.next().is_some()
+        || response
+            .headers()
+            .contains_key(http_header::CONTENT_ENCODING)
+    {
+        return Err(if status == expected_status {
+            response_error()
+        } else {
+            rejection(status, "request_rejected", label)
+        });
+    }
+    // Keep arbitrary response bytes in one zeroizing bounded owner. Only a
+    // typed, validated public response may be re-encoded to stdout afterwards.
+    let mut bytes = Zeroizing::new(Vec::with_capacity(MAX_RESPONSE_BYTES));
+    while let Some(data) = response
+        .chunk()
+        .await
+        .map_err(|_| transport(label, "body"))?
+    {
+        bytes
+            .len()
+            .checked_add(data.len())
+            .filter(|length| *length <= MAX_RESPONSE_BYTES)
+            .ok_or_else(response_error)?;
+        bytes.extend_from_slice(&data);
+    }
+    if status != expected_status {
+        return Err(rejection(status, rejection_code(status, &bytes), label));
+    }
+    Ok(bytes)
 }
 
 /// Borrow the code from the bounded body instead of copying arbitrary remote

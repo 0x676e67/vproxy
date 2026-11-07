@@ -164,8 +164,6 @@ pub(super) struct Coordinator {
     /// adding another owner requires reviewing this budget and its lifecycle.
     read_pending: Arc<Semaphore>,
     running: AtomicBool,
-    #[cfg(feature = "witness-journal")]
-    source: Option<store::journal::worker::Worker>,
     _author: Arc<store::Guard>,
 }
 
@@ -276,141 +274,8 @@ impl Coordinator {
             read_work: Arc::new(Semaphore::new(2)),
             read_pending: Arc::new(Semaphore::new(MAX_PENDING_READERS)),
             running: AtomicBool::new(false),
-            #[cfg(feature = "witness-journal")]
-            source: None,
             _author: author,
         }
-    }
-
-    /// Unbound kernel fixtures only. Production construction requires the
-    /// complete captured inputs and accepted reference, not independent args.
-    #[cfg(all(test, feature = "witness-journal"))]
-    pub(in crate::manage) async fn new_source(
-        directory: PathBuf,
-        author: Arc<store::Guard>,
-        enrollment: super::witness::Enrollment,
-        endpoint: String,
-        identity: super::tls::NodeIdentity,
-    ) -> io::Result<Arc<Self>> {
-        let (worker, ready) = store::journal::worker::Worker::start(
-            directory.clone(),
-            author.clone(),
-            enrollment,
-            endpoint,
-            identity,
-        )
-        .await?;
-        let mut coordinator = Self::from_reader(directory, ready.reader, ready.restoration, author);
-        coordinator.source = Some(worker);
-        Ok(Arc::new(coordinator))
-    }
-
-    /// Consume this directory's registered capture, then compare its exact SQL
-    /// reference under the worker's author/update guards before loading policy.
-    /// The original identity, witness selection and returned runtime inputs are
-    /// used without reopening source paths. No reference is accepted by hash
-    /// alone: current witness confirmation is still required on that worker.
-    ///
-    /// This is an internal preparation step, not public Source admission or an
-    /// activation/fencing proof. The caller retains all returned inputs and
-    /// completes binary/host/issuer/egress gates before any listener can start.
-    /// Cancelled startup retains its author through real blocking/thread cleanup.
-    #[cfg(feature = "witness-journal")]
-    #[cfg_attr(
-        not(test),
-        allow(
-            dead_code,
-            reason = "Public Source startup awaits complete activation gates"
-        )
-    )]
-    pub(in crate::manage) async fn new_registered_source(
-        directory: PathBuf,
-        author: Arc<store::Guard>,
-        registered: super::snapshot::Registered,
-    ) -> io::Result<(Arc<Self>, super::snapshot::inputs::Prepared)> {
-        let (worker, ready, inputs) = store::journal::worker::Worker::start_registered(
-            directory.clone(),
-            author.clone(),
-            registered,
-        )
-        .await?;
-        let mut coordinator = Self::from_reader(directory, ready.reader, ready.restoration, author);
-        coordinator.source = Some(worker);
-        Ok((Arc::new(coordinator), inputs))
-    }
-
-    /// Read metadata only for this capture and actual node identity. A fresh Source turn
-    /// checks original guards/floors without an intent or sequence advance;
-    /// cancellation retains its writer permit and author until real completion.
-    /// An unmatched coordinator/directory/key/reference never falls back to
-    /// Native. This permits no pending recovery, migration or proxy activation.
-    #[cfg(feature = "witness-journal")]
-    pub(in crate::manage) async fn source_startup(
-        self: &Arc<Self>,
-        directory: PathBuf,
-        reference: store::journal::configuration::Reference,
-        key_sha256: [u8; 32],
-    ) -> io::Result<store::Overview> {
-        let denied = || {
-            io::Error::new(
-                io::ErrorKind::PermissionDenied,
-                "matching registered node coordinator required",
-            )
-        };
-        let source = self
-            .source
-            .as_ref()
-            .filter(|s| s.configured_for(reference, key_sha256))
-            .ok_or_else(denied)?;
-        let permit = self.writer().await?;
-        let author = self._author.clone();
-        source
-            .write(
-                permit,
-                move |_| {
-                    author.ensure(&directory)?;
-                    if store::recovery::diagnostic_startup(&directory)?
-                        .is_some_and(|expected| expected != key_sha256)
-                    {
-                        return Err(denied());
-                    }
-                    store::inspect(&directory)
-                },
-                || false,
-            )
-            .await
-            .map(|(overview, _)| overview)
-    }
-
-    /// Explicitly resolve only the retained source operation. This recovers no
-    /// one-time result. A native Coordinator cannot use this operation.
-    #[cfg(feature = "witness-journal")]
-    #[cfg_attr(
-        not(test),
-        allow(
-            dead_code,
-            reason = "Source reconciliation has no operator route until startup admission is complete"
-        )
-    )]
-    pub(in crate::manage) async fn reconcile_source(self: &Arc<Self>) -> io::Result<()> {
-        let source = self.source.as_ref().ok_or_else(worker_unavailable)?;
-        let permit = self.writer().await?;
-        let coordinator = self.clone();
-        source
-            .reconcile(permit, move || coordinator.running.load(Ordering::Acquire))
-            .await
-    }
-
-    /// Close source handoff after listeners/collectors stop, then keep Tokio
-    /// alive until accepted writes release their SQL and guards. Native nodes
-    /// have no persistent source thread. Repeated/cancelled waits are safe.
-    pub(in crate::manage) async fn shutdown_writer(&self) -> io::Result<()> {
-        #[cfg(feature = "witness-journal")]
-        if let Some(source) = &self.source {
-            self.write_work.close();
-            return source.shutdown().await;
-        }
-        Ok(())
     }
 
     pub(super) fn reader(&self) -> Reader {
@@ -493,25 +358,14 @@ impl Coordinator {
         })
     }
 
-    /// Persist the supplied startup digest before publishing it in RAM. The
-    /// source path uses its held transaction; an unchanged digest is read-only.
+    /// Persist the supplied startup digest before publishing it in RAM.
+    /// An unchanged digest is read-only.
     async fn sync_endpoint_inventory(
         self: &Arc<Self>,
         inventory: store::endpoints::Inventory,
     ) -> io::Result<()> {
         let permit = self.writer().await?;
         let coordinator = self.clone();
-        #[cfg(feature = "witness-journal")]
-        if let Some(source) = &self.source {
-            return source
-                .write(
-                    permit,
-                    move |tx| store::endpoints::sync_inventory(tx, &inventory),
-                    move || coordinator.running.load(Ordering::Acquire),
-                )
-                .await
-                .map(|_| ());
-        }
         tokio::task::spawn_blocking(move || {
             let _permit = permit;
             if store::inspect(&coordinator.directory)?.schema_version >= 15 {
@@ -574,8 +428,6 @@ impl Coordinator {
 
     /// Metadata work owns the ordinary writer/author/update gates through commit
     /// even if HTTP is cancelled. It does not publish another policy revision.
-    /// A witnessed source conservatively suspends admission on an unknown
-    /// witness outcome until explicit reconciliation of that original mutation.
     pub(super) async fn endpoint_change(
         self: &Arc<Self>,
         administrator: String,
@@ -586,26 +438,6 @@ impl Coordinator {
         let inventory = self.endpoint_inventory()?;
         let permit = self.writer().await?;
         let coordinator = self.clone();
-        #[cfg(feature = "witness-journal")]
-        if let Some(source) = &self.source {
-            return source
-                .write(
-                    permit,
-                    move |tx| {
-                        store::endpoints::change_local_in(
-                            tx,
-                            &administrator,
-                            expected_revision,
-                            &generation,
-                            &inventory,
-                            &change,
-                        )
-                    },
-                    move || coordinator.running.load(Ordering::Acquire),
-                )
-                .await
-                .map(|(state, _)| state);
-        }
         tokio::task::spawn_blocking(move || {
             let _permit = permit;
             let gate = store::update_lock(&coordinator.directory)?;
@@ -631,19 +463,6 @@ impl Coordinator {
         let inventory = self.endpoint_inventory()?;
         let permit = self.writer().await?;
         let coordinator = self.clone();
-        #[cfg(feature = "witness-journal")]
-        if let Some(source) = &self.source {
-            return source
-                .write(
-                    permit,
-                    move |tx| {
-                        store::endpoint_control::apply_in(tx, &authorization, &inventory, command)
-                    },
-                    move || coordinator.running.load(Ordering::Acquire),
-                )
-                .await
-                .map(|(outcome, _)| outcome);
-        }
         tokio::task::spawn_blocking(move || {
             let _permit = permit;
             let gate = store::update_lock(&coordinator.directory)?;
@@ -685,14 +504,13 @@ impl Coordinator {
         Ok(permit)
     }
 
-    /// Native fault/replay fixtures retain the original admitted transaction
-    /// boundary. Production journals use their typed Native/Source writer.
-    #[cfg(test)]
-    pub(super) async fn observations_write<T: Send + 'static>(
+    /// Run accepted metadata work under the writer permit and update guard.
+    /// The blocking worker owns both guards if its async waiter is cancelled.
+    pub(in crate::manage) async fn store_write<T: Send + 'static>(
         self: &Arc<Self>,
         operation: impl FnOnce(&Path, &store::UpdateGuard) -> io::Result<T> + Send + 'static,
     ) -> io::Result<T> {
-        self.native_write_staged(operation)
+        self.store_write_staged(operation)
             .await
             .map_err(|failure| failure.error)
     }
@@ -703,14 +521,6 @@ impl Coordinator {
     pub(super) async fn activate(self: &Arc<Self>) -> io::Result<()> {
         let permit = self.writer().await?;
         let coordinator = self.clone();
-        #[cfg(feature = "witness-journal")]
-        if let Some(source) = &self.source {
-            return source
-                .activate(permit, move || {
-                    coordinator.running.store(true, Ordering::Release);
-                })
-                .await;
-        }
         tokio::task::spawn_blocking(move || {
             let _permit = permit;
             let _gate = store::update_lock(&coordinator.directory)?;
@@ -779,46 +589,6 @@ impl Coordinator {
         })
         .await
         .map_err(|_| worker_unavailable())?
-    }
-
-    #[cfg(feature = "witness-journal")]
-    pub(super) fn has_source_writer(&self) -> bool {
-        self.source.is_some()
-    }
-
-    /// Revalidate the caller's login fence immediately before the source SQL
-    /// comparison. Rejected authority is a read-only result. Once accepted, the
-    /// original worker owns writer admission through confirmation; success is
-    /// never inferred from local SQL alone. The API retains its password-work
-    /// permit and completes its separate session fence after this returns.
-    #[cfg(feature = "witness-journal")]
-    pub(super) async fn source_password_change<E: Send + 'static>(
-        self: &Arc<Self>,
-        change: store::administrators::PasswordChange,
-        begin: impl FnOnce() -> Result<(), E> + Send + 'static,
-    ) -> io::Result<Result<store::administrators::PasswordChangeOutcome, E>> {
-        let source = self.source.as_ref().ok_or_else(worker_unavailable)?;
-        let permit = self.writer().await?;
-        let coordinator = self.clone();
-        let (result, _) = source
-            .write(
-                permit,
-                move |tx| {
-                    if let Err(error) = begin() {
-                        return Ok(Err(error));
-                    }
-                    store::administrators::apply_password_change_in(tx, &change).map(Ok)
-                },
-                move || coordinator.running.load(Ordering::Acquire),
-            )
-            .await?;
-        Ok(result.map(|changed| {
-            if changed {
-                store::administrators::PasswordChangeOutcome::Committed
-            } else {
-                store::administrators::PasswordChangeOutcome::Conflict
-            }
-        }))
     }
 
     pub(super) async fn status(self: &Arc<Self>) -> io::Result<Status> {
@@ -966,53 +736,6 @@ impl Coordinator {
     ) -> io::Result<Change> {
         let permit = self.writer().await?;
         let coordinator = self.clone();
-        #[cfg(feature = "witness-journal")]
-        if let Some(source) = &self.source {
-            let restart_required =
-                matches!(&change, PolicyChange::SetAdmission { accepting: true })
-                    && !self.runtime_can_resume()?;
-            let directory = self.directory.clone();
-            let (result, running) = source
-                .write(
-                    permit,
-                    move |tx| {
-                        if restart_required {
-                            store::admission::local_runtime_snapshot(
-                                &directory,
-                                &administrator,
-                                assertion.as_ref(),
-                            )?;
-                            return Err(super::drain::Error::RestartRequired.error());
-                        }
-                        store::apply_local_policy_in(
-                            tx,
-                            &administrator,
-                            expected_revision,
-                            change,
-                            assertion.as_ref(),
-                        )
-                    },
-                    move || coordinator.running.load(Ordering::Acquire),
-                )
-                .await?;
-            let store::ChangeResult {
-                policy,
-                user,
-                credential,
-                secret,
-                routing,
-                presets,
-            } = result;
-            return Ok(Change {
-                revision: policy.revision,
-                running,
-                user,
-                credential,
-                secret,
-                routing,
-                presets,
-            });
-        }
         tokio::task::spawn_blocking(move || {
             let _permit = permit;
             let gate = store::update_lock(&coordinator.directory)?;
@@ -1099,24 +822,6 @@ impl Coordinator {
     ) -> io::Result<store::Ownership> {
         let permit = self.writer().await?;
         let coordinator = self.clone();
-        #[cfg(feature = "witness-journal")]
-        if let Some(source) = &self.source {
-            return source
-                .write(
-                    permit,
-                    move |tx| {
-                        store::set_owner_in(
-                            tx,
-                            &administrator,
-                            expected_epoch,
-                            controller.as_deref(),
-                        )
-                    },
-                    move || coordinator.running.load(Ordering::Acquire),
-                )
-                .await
-                .map(|(owner, _)| owner);
-        }
         tokio::task::spawn_blocking(move || {
             let _permit = permit;
             let gate = store::update_lock(&coordinator.directory)?;
@@ -1155,62 +860,6 @@ impl Coordinator {
     ) -> io::Result<CommandResult> {
         let permit = self.writer().await?;
         let coordinator = self.clone();
-        #[cfg(feature = "witness-journal")]
-        if let Some(source) = &self.source {
-            let can_resume = self.runtime_can_resume()?;
-            let (outcome, running) = source
-                .write(
-                    permit,
-                    move |tx| store::apply_command_in(tx, &authorization, command, can_resume),
-                    move || coordinator.running.load(Ordering::Acquire),
-                )
-                .await?;
-            return Ok(match outcome {
-                store::CommandOutcome::Accepted {
-                    change,
-                    mut receipt,
-                } => {
-                    let store::ChangeResult {
-                        user,
-                        credential,
-                        secret,
-                        routing,
-                        presets,
-                        ..
-                    } = *change;
-                    if running {
-                        receipt.status = store::ReceiptStatus::Applied;
-                    }
-                    CommandResult {
-                        receipt,
-                        user,
-                        credential,
-                        secret,
-                        routing,
-                        presets,
-                        replayed: false,
-                    }
-                }
-                store::CommandOutcome::Replayed(receipt) => CommandResult {
-                    receipt,
-                    user: None,
-                    credential: None,
-                    secret: None,
-                    routing: None,
-                    presets: None,
-                    replayed: true,
-                },
-                store::CommandOutcome::Rejected(receipt) => CommandResult {
-                    receipt,
-                    user: None,
-                    credential: None,
-                    secret: None,
-                    routing: None,
-                    presets: None,
-                    replayed: false,
-                },
-            });
-        }
         tokio::task::spawn_blocking(move || {
             let _permit = permit;
             let gate = store::update_lock(&coordinator.directory)?;
@@ -1300,11 +949,6 @@ impl Coordinator {
         })
         .await
         .map_err(|_| worker_unavailable())?
-    }
-
-    #[cfg(test)]
-    pub(super) fn write_work(&self) -> Arc<Semaphore> {
-        self.write_work.clone()
     }
 
     /// Install only the actual ready runtime, once. The synchronous runner keeps
@@ -1572,22 +1216,14 @@ impl Coordinator {
         &self.directory
     }
 
-    /// Native-only gate. Source socket settings have no witnessed activation
-    /// contract and are also refused by their changeset classifier.
+    /// Share writer admission with socket configuration changes.
     pub(in crate::manage) async fn service_writer(
         self: &Arc<Self>,
     ) -> io::Result<OwnedSemaphorePermit> {
-        #[cfg(feature = "witness-journal")]
-        if self.source.is_some() {
-            return Err(io::Error::new(
-                io::ErrorKind::PermissionDenied,
-                "managed service is unavailable for witnessed sources",
-            ));
-        }
         self.writer().await
     }
 
-    /// Caller owns the Native writer permit and directory-bound update guard,
+    /// Caller owns the writer permit and directory-bound update guard,
     /// and has already observed actual bind readiness. On uncertain publication
     /// the Reader fails closed, as in ordinary startup activation.
     pub(in crate::manage) fn service_activate(&self, gate: &store::UpdateGuard) -> io::Result<()> {
@@ -1680,17 +1316,6 @@ impl Coordinator {
     ) -> io::Result<Operation> {
         let permit = self.writer().await?;
         let coordinator = self.clone();
-        #[cfg(feature = "witness-journal")]
-        if let Some(source) = &self.source {
-            return source
-                .write(
-                    permit,
-                    move |tx| operations::reserve_in(tx, &caller, &input),
-                    move || coordinator.running.load(Ordering::Acquire),
-                )
-                .await
-                .map(|(operation, _)| operation);
-        }
         tokio::task::spawn_blocking(move || {
             let _permit = permit;
             let gate = store::update_lock(&coordinator.directory)?;
@@ -1719,29 +1344,6 @@ impl Coordinator {
     ) -> io::Result<Operation> {
         let permit = self.writer().await?;
         let coordinator = self.clone();
-        #[cfg(feature = "witness-journal")]
-        if let Some(source) = &self.source {
-            let (outcome, _) = source
-                .write(
-                    permit,
-                    move |tx| {
-                        operations::execute_in(tx, &caller, &id, input).map_err(|error| {
-                            if error.policy_uncertain() {
-                                io::Error::other(error)
-                            } else {
-                                error.into_error()
-                            }
-                        })
-                    },
-                    move || coordinator.running.load(Ordering::Acquire),
-                )
-                .await?;
-            return Ok(match outcome {
-                Outcome::Accepted { operation, .. }
-                | Outcome::Replayed(operation)
-                | Outcome::Rejected(operation) => operation,
-            });
-        }
         tokio::task::spawn_blocking(move || {
             let _permit = permit;
             let gate = store::update_lock(&coordinator.directory)?;
@@ -1788,174 +1390,50 @@ impl Coordinator {
         .map_err(|_| worker_unavailable())?
     }
 
-    /// Ordinary node I/O must not act on outbox/authority rows that are locally
-    /// committed but not witness-confirmed. The dedicated Offline witness
-    /// transport bypasses this gate so original reconciliation can progress.
-    pub(in crate::manage) fn ensure_source_confirmed(&self) -> io::Result<()> {
-        #[cfg(feature = "witness-journal")]
-        if self.source.is_some() && self.reader.revision().is_err() {
-            return Err(io::Error::new(
-                io::ErrorKind::WouldBlock,
-                "source confirmation is pending",
-            ));
-        }
-        Ok(())
-    }
-
     pub(in crate::manage) async fn targets_write<T: Send + 'static>(
         self: &Arc<Self>,
-        operation: impl FnOnce(&mut store::targets::Writer<'_>) -> io::Result<T> + Send + 'static,
+        operation: impl FnOnce(&Path) -> io::Result<T> + Send + 'static,
     ) -> io::Result<T> {
         self.targets_write_guarded((), operation).await
     }
 
     /// An accepted operation owns its external peer/delivery guard through the
-    /// actual writer, not its cancellable waiter or short SQL callback. Native
-    /// retains each original store commit boundary; Source returns only after
-    /// exact witness confirmation. No network delivery belongs in this closure.
+    /// actual writer, not its cancellable waiter or short SQL callback.
+    /// Each store keeps its commit boundary; no network delivery belongs here.
     pub(in crate::manage) async fn targets_write_guarded<G: Send + 'static, T: Send + 'static>(
         self: &Arc<Self>,
         guard: G,
-        operation: impl FnOnce(&mut store::targets::Writer<'_>) -> io::Result<T> + Send + 'static,
+        operation: impl FnOnce(&Path) -> io::Result<T> + Send + 'static,
     ) -> io::Result<T> {
         let permit = self.writer().await?;
         let coordinator = self.clone();
-        #[cfg(feature = "witness-journal")]
-        if let Some(source) = &self.source {
-            return source
-                .write_guarded(
-                    permit,
-                    guard,
-                    move |tx| operation(&mut store::targets::Writer::Source(tx)),
-                    move || coordinator.running.load(Ordering::Acquire),
-                )
-                .await
-                .map(|(value, _)| value);
-        }
         tokio::task::spawn_blocking(move || {
             let (_permit, _guard) = (permit, guard);
-            operation(&mut store::targets::Writer::Native(&coordinator.directory))
+            operation(&coordinator.directory)
         })
         .await
         .map_err(|_| worker_unavailable())?
     }
 
-    pub(in crate::manage) async fn history_write<T: Send + 'static>(
-        self: &Arc<Self>,
-        operation: impl FnOnce(&mut store::alerts::history::Writer<'_>) -> io::Result<T>
-        + Send
-        + 'static,
-    ) -> io::Result<T> {
-        self.history_write_then(operation, |value| Ok(value)).await
-    }
-
-    /// Accepted work retains the original writer admission through transaction,
-    /// Source confirmation and RAM publication. A cancelled waiter cannot skip
-    /// the continuation; it runs with no borrowed SQL or network work.
+    /// Accepted work retains writer admission through commit and RAM
+    /// publication. A cancelled waiter cannot skip the continuation; it runs
+    /// with no borrowed SQL or network work.
     pub(in crate::manage) async fn history_write_then<T: Send + 'static, R: Send + 'static>(
         self: &Arc<Self>,
-        operation: impl FnOnce(&mut store::alerts::history::Writer<'_>) -> io::Result<T>
-        + Send
-        + 'static,
+        operation: impl FnOnce(&Path, &store::UpdateGuard) -> io::Result<T> + Send + 'static,
         finish: impl FnOnce(T) -> io::Result<R> + Send + 'static,
     ) -> io::Result<R> {
-        #[cfg(feature = "witness-journal")]
-        if let Some(source) = &self.source {
-            let permit = self.writer().await?;
-            let coordinator = self.clone();
-            return source
-                .history_then(
-                    permit,
-                    move |tx, checkpoints| {
-                        operation(&mut store::alerts::history::Writer::Source { tx, checkpoints })
-                    },
-                    finish,
-                    move || coordinator.running.load(Ordering::Acquire),
-                )
-                .await
-                .map(|(value, _)| value);
-        }
-        self.native_write_staged(move |dir, gate| {
-            let value = operation(&mut store::alerts::history::Writer::Native(dir, gate))?;
+        self.store_write_staged(move |dir, gate| {
+            let value = operation(dir, gate)?;
             finish(value)
         })
         .await
         .map_err(|failure| failure.error)
     }
 
-    /// Return configuration metadata or an owned delivery only after the
-    /// transaction confirms. Cancellation may lose the returned HTTP permit,
-    /// but cannot roll back accepted work or recreate its immutable body.
-    pub(in crate::manage) async fn notifications_write<T: Send + 'static>(
-        self: &Arc<Self>,
-        operation: impl FnOnce(&mut store::notifications::Writer<'_>) -> io::Result<T> + Send + 'static,
-    ) -> io::Result<T> {
-        #[cfg(feature = "witness-journal")]
-        if let Some(source) = &self.source {
-            let permit = self.writer().await?;
-            let coordinator = self.clone();
-            return source
-                .write(
-                    permit,
-                    move |tx| operation(&mut store::notifications::Writer::Source(tx)),
-                    move || coordinator.running.load(Ordering::Acquire),
-                )
-                .await
-                .map(|(value, _)| value);
-        }
-        self.native_write_staged(move |dir, gate| {
-            operation(&mut store::notifications::Writer::Native(dir, gate))
-        })
-        .await
-        .map_err(|failure| failure.error)
-    }
-
-    pub(in crate::manage) async fn traffic_write<T: Send + 'static>(
-        self: &Arc<Self>,
-        operation: impl FnOnce(&mut store::traffic::Writer<'_>) -> io::Result<T> + Send + 'static,
-    ) -> io::Result<T> {
-        self.traffic_write_staged(operation)
-            .await
-            .map_err(|failure| failure.error)
-    }
-
-    /// Absolute checkpoints and imports share the policy writer FIFO. The
-    /// operation stages SQL only; collector RAM watermarks must be updated after
-    /// this returns. Cancellation cannot cancel an accepted Source transaction.
-    /// The Store stage includes witness uncertainty without hiding its source.
-    pub(in crate::manage) async fn traffic_write_staged<T: Send + 'static>(
-        self: &Arc<Self>,
-        operation: impl FnOnce(&mut store::traffic::Writer<'_>) -> io::Result<T> + Send + 'static,
-    ) -> Result<T, TrafficWriteFailure> {
-        #[cfg(feature = "witness-journal")]
-        if let Some(source) = &self.source {
-            let permit = self.writer().await.map_err(|error| TrafficWriteFailure {
-                stage: TrafficWriteStage::Admission,
-                error,
-            })?;
-            let coordinator = self.clone();
-            return source
-                .write(
-                    permit,
-                    move |tx| operation(&mut store::traffic::Writer::Source(tx)),
-                    move || coordinator.running.load(Ordering::Acquire),
-                )
-                .await
-                .map(|(value, _)| value)
-                .map_err(|error| TrafficWriteFailure {
-                    stage: TrafficWriteStage::Store,
-                    error,
-                });
-        }
-        self.native_write_staged(move |dir, gate| {
-            operation(&mut store::traffic::Writer::Native(dir, gate))
-        })
-        .await
-    }
-
-    /// Native cold journals retain their original update gate and per-store
-    /// commit boundary. Unconverted journals do not bypass a Source-held gate.
-    async fn native_write_staged<T: Send + 'static>(
+    /// Report admission, update-lock and store failures separately. The worker
+    /// owns the permit through commit; cancellation cannot interrupt that work.
+    pub(in crate::manage) async fn store_write_staged<T: Send + 'static>(
         self: &Arc<Self>,
         operation: impl FnOnce(&Path, &store::UpdateGuard) -> io::Result<T> + Send + 'static,
     ) -> Result<T, TrafficWriteFailure> {
@@ -1984,24 +1462,18 @@ impl Coordinator {
         })?
     }
 
-    /// Do not expose a locally committed witness row before this node's own
-    /// Source operation is confirmed. Check both sides of the bounded read so a
-    /// concurrent commit cannot turn an earlier readiness check into authority.
+    /// Inspect the external witness record under the caller's peer authority.
     pub(in crate::manage) async fn witness_inspect(
         self: &Arc<Self>,
         authorization: store::RemoteAuthorization,
         binding: String,
     ) -> io::Result<Record> {
-        self.ensure_source_confirmed()?;
-        let result = self
-            .read(move |dir| store::witness::remote_inspect(dir, &authorization, &binding))
-            .await?;
-        self.ensure_source_confirmed()?;
-        Ok(result)
+        self.read(move |dir| store::witness::remote_inspect(dir, &authorization, &binding))
+            .await
     }
 
-    /// Preserve original peer/writer/CAS checks and receipt identity. Accepted
-    /// Source work survives cancellation and returns only after confirmation;
+    /// Preserve peer/writer/CAS checks and receipt identity. Accepted work
+    /// survives cancellation and returns after commit;
     /// failed/unknown replies must be reconciled, never retried as new writes.
     pub(in crate::manage) async fn witness_transition(
         self: &Arc<Self>,
@@ -2011,17 +1483,6 @@ impl Coordinator {
     ) -> io::Result<Record> {
         let permit = self.writer().await?;
         let coordinator = self.clone();
-        #[cfg(feature = "witness-journal")]
-        if let Some(source) = &self.source {
-            return source
-                .write(
-                    permit,
-                    move |tx| store::witness::transition_in(tx, &authorization, &input, confirm),
-                    move || coordinator.running.load(Ordering::Acquire),
-                )
-                .await
-                .map(|(record, _)| record);
-        }
         tokio::task::spawn_blocking(move || {
             let _permit = permit;
             let gate = store::update_lock(&coordinator.directory)?;
@@ -2036,69 +1497,6 @@ impl Coordinator {
         .await
         .map_err(|_| worker_unavailable())?
     }
-
-    #[cfg(feature = "witness-journal")]
-    /// Only a trusted caller holding this exact original process-author guard
-    /// may submit offline identity work. It must own no live API/session state;
-    /// the running check additionally refuses an active managed runtime, but is
-    /// not infrastructure fencing or an authorization substitute. No current
-    /// HTTP route calls this path. Accepted work and output remain owned through
-    /// confirmation even when the waiter is cancelled; output errors cannot undo
-    /// confirmed SQL and must not cause one-time secrets to be recreated.
-    #[cfg_attr(
-        not(test),
-        allow(
-            dead_code,
-            reason = "File-author Source CLI awaits fixed configuration admission"
-        )
-    )]
-    pub(in crate::manage) async fn source_identity_write_then<
-        T: Send + 'static,
-        R: Send + 'static,
-    >(
-        self: &Arc<Self>,
-        author: Arc<store::Guard>,
-        operation: impl FnOnce(&mut store::identities::Writer<'_>) -> io::Result<T> + Send + 'static,
-        finish: impl FnOnce(T) -> io::Result<R> + Send + 'static,
-    ) -> io::Result<R> {
-        if !Arc::ptr_eq(&author, &self._author) || self.running.load(Ordering::Acquire) {
-            return Err(io::Error::new(
-                io::ErrorKind::PermissionDenied,
-                "offline identity author required",
-            ));
-        }
-        author.ensure(&self.directory)?;
-        let source = self.source.as_ref().ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::Unsupported,
-                "source identity writer is not configured",
-            )
-        })?;
-        let permit = self.writer().await?;
-        let coordinator = self.clone();
-        let running = self.clone();
-        source
-            .write_then(
-                permit,
-                author,
-                move |tx| {
-                    if coordinator.running.load(Ordering::Acquire) {
-                        return Err(io::Error::new(
-                            io::ErrorKind::PermissionDenied,
-                            "offline identity author required",
-                        ));
-                    }
-                    operation(&mut store::identities::Writer::new(
-                        &coordinator.directory,
-                        tx,
-                    ))
-                },
-                finish,
-                move || running.running.load(Ordering::Acquire),
-            )
-            .await
-            .map(|(value, _)| value)
-    }
 }
 
 fn busy() -> io::Error {
@@ -2106,784 +1504,4 @@ fn busy() -> io::Error {
 }
 fn worker_unavailable() -> io::Error {
     io::Error::other(Error::WorkerUnavailable)
-}
-
-#[cfg(test)]
-mod tests {
-    use std::task::Poll;
-
-    use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
-
-    use super::*;
-
-    mod maintenance {
-        use super::*;
-
-        #[tokio::test]
-        async fn legacy_maintenance_refusal_keeps_the_active_reader_and_database_unchanged()
-        -> io::Result<()> {
-            let fixture = Fixture::new()?;
-            let database = fixture.directory.join("management.sqlite3");
-            let connection = rusqlite::Connection::open(&database).map_err(io::Error::other)?;
-            store::recovery::restore_schema_eighteen_for_test(&connection)?;
-            drop(connection);
-            let overview = store::inspect(&fixture.directory)?;
-            assert_eq!(overview.schema_version, 18);
-            let coordinator = fixture.coordinator()?;
-            coordinator.activate().await?;
-            let before = std::fs::read(&database)?;
-            let reader = coordinator.reader();
-            let admitted = reader.admission()?;
-            assert_eq!(
-                (
-                    admitted.revision,
-                    admitted.accepting,
-                    admitted.active_operations
-                ),
-                (1, true, 0)
-            );
-
-            let read_error =
-                coordinator.maintenance(None).await.err().ok_or_else(|| {
-                    io::Error::other("legacy maintenance observation was accepted")
-                })?;
-            let write_error = coordinator
-                .change_admission(
-                    fixture.administrator.clone(),
-                    1,
-                    store::admission::Assertion {
-                        node_id: overview.node_id,
-                        epoch: 1,
-                    },
-                    false,
-                )
-                .await
-                .err()
-                .ok_or_else(|| io::Error::other("legacy maintenance write was accepted"))?;
-            for error in [read_error, write_error] {
-                assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
-                assert_eq!(
-                    error
-                        .get_ref()
-                        .and_then(|source| source.downcast_ref::<store::admission::Error>()),
-                    Some(&store::admission::Error::UpgradeRequired)
-                );
-            }
-
-            // A checked pre-mutation refusal must not take the publication guard's
-            // uncertain-commit path and invalidate the still-serving legacy snapshot.
-            assert_eq!(reader.revision()?, 1);
-            let admitted = reader.admission()?;
-            assert_eq!(
-                (
-                    admitted.revision,
-                    admitted.accepting,
-                    admitted.active_operations
-                ),
-                (1, true, 0)
-            );
-            let status = coordinator.status().await?;
-            assert!(status.running);
-            assert_eq!(
-                (
-                    status.saved_revision,
-                    status.applied_revision,
-                    status.durable_applied_revision
-                ),
-                (1, Some(1), Some(1))
-            );
-            assert!(
-                std::fs::read(&database)? == before,
-                "a definitive refusal changed the fixture database"
-            );
-            assert!(store::load_policy(&fixture.directory)?.accepting);
-            Ok(())
-        }
-    }
-    mod read_admission {
-        use std::{
-            sync::{
-                atomic::{AtomicBool, Ordering},
-                mpsc,
-            },
-            thread,
-            time::Instant,
-        };
-
-        use tokio::{sync::oneshot, time::timeout};
-
-        use super::*;
-
-        const WAIT: Duration = Duration::from_secs(10);
-
-        #[tokio::test]
-        async fn internal_read_waiters_are_bounded_cancel_safe_and_fifo() -> io::Result<()> {
-            let fixture = Fixture::new()?;
-            let policy = fixture.coordinator()?;
-            let first = policy.read_permit(ReadAdmission::Immediate).await?;
-            let second = policy.read_permit(ReadAdmission::Immediate).await?;
-            let mut waiters = (0..MAX_PENDING_READERS)
-                .map(|_| Box::pin(policy.read_permit(ReadAdmission::Internal)))
-                .collect::<Vec<_>>();
-            for waiter in &mut waiters {
-                assert!(futures_util::poll!(waiter).is_pending());
-            }
-            assert_eq!(policy.read_pending.available_permits(), 0);
-
-            let called = Arc::new(AtomicBool::new(false));
-            let observed = called.clone();
-            let mut overflow = Box::pin(policy.read_with_admission_staged(
-                ReadAdmission::Internal,
-                move |_| {
-                    observed.store(true, Ordering::Release);
-                    Ok(())
-                },
-            ));
-            let Poll::Ready(Err(failure)) = futures_util::poll!(&mut overflow) else {
-                panic!("a full internal queue must reject without waiting");
-            };
-            assert_eq!(failure.stage, ReadStage::Admission);
-            assert_eq!(failure.error.kind(), io::ErrorKind::WouldBlock);
-            assert!(!called.load(Ordering::Acquire));
-            // Checkpoints use this same pending budget, not a fifth reservation path.
-            let sample = policy.traffic_sample(|| Ok(())).await.unwrap_err();
-            assert_eq!(sample.kind(), io::ErrorKind::WouldBlock);
-            let immediate = policy.read_staged(|_| Ok(())).await.unwrap_err();
-            assert_eq!(immediate.stage, ReadStage::Admission);
-            assert_eq!(immediate.error.kind(), io::ErrorKind::WouldBlock);
-
-            drop(waiters.remove(0));
-            assert_eq!(policy.read_pending.available_permits(), 1);
-            let mut replacement = Box::pin(policy.read_permit(ReadAdmission::Internal));
-            assert!(futures_util::poll!(&mut replacement).is_pending());
-            assert_eq!(policy.read_pending.available_permits(), 0);
-            drop(first);
-
-            // One slot remains occupied throughout: every release must go to the oldest
-            // surviving reservation, not a replacement or a fresh immediate request.
-            for waiter in &mut waiters {
-                assert!(futures_util::poll!(&mut replacement).is_pending());
-                assert!(policy.read_permit(ReadAdmission::Immediate).await.is_err());
-                let Poll::Ready(permit) = futures_util::poll!(waiter) else {
-                    panic!("the oldest read waiter must own the next slot");
-                };
-                let permit = permit?;
-                assert_eq!(policy.read_work.available_permits(), 0);
-                drop(permit);
-            }
-            let permit = replacement.await?;
-            assert_eq!(policy.read_pending.available_permits(), MAX_PENDING_READERS);
-            assert_eq!(policy.read_work.available_permits(), 0);
-            drop(permit);
-            drop(second);
-            assert_eq!(policy.read_work.available_permits(), 2);
-            Ok(())
-        }
-
-        #[tokio::test]
-        async fn internal_read_timeout_returns_original_busy_without_starting_work()
-        -> io::Result<()> {
-            let fixture = Fixture::new()?;
-            let policy = fixture.coordinator()?;
-            let _first = policy.read_permit(ReadAdmission::Immediate).await?;
-            let _second = policy.read_permit(ReadAdmission::Immediate).await?;
-            let called = Arc::new(AtomicBool::new(false));
-            let observed = called.clone();
-            let failure = timeout(
-                WAIT,
-                policy.read_with_admission_staged(ReadAdmission::Internal, move |_| {
-                    observed.store(true, Ordering::Release);
-                    Ok(())
-                }),
-            )
-            .await
-            .map_err(io::Error::other)?
-            .expect_err("the internal admission deadline must expire");
-            assert_eq!(failure.stage, ReadStage::Admission);
-            assert_eq!(failure.error.kind(), io::ErrorKind::WouldBlock);
-            assert_eq!(failure.error.to_string(), "policy coordinator is busy");
-            assert_eq!(policy.read_pending.available_permits(), MAX_PENDING_READERS);
-            assert_eq!(policy.read_work.available_permits(), 0);
-            assert!(!called.load(Ordering::Acquire));
-            Ok(())
-        }
-
-        #[tokio::test]
-        async fn cancelling_a_queued_internal_read_does_not_spawn_its_operation() -> io::Result<()>
-        {
-            let fixture = Fixture::new()?;
-            let policy = fixture.coordinator()?;
-            let first = policy.read_permit(ReadAdmission::Immediate).await?;
-            let second = policy.read_permit(ReadAdmission::Immediate).await?;
-            let called = Arc::new(AtomicBool::new(false));
-            let observed = called.clone();
-            let mut read = Box::pin(policy.read_with_admission(
-                ReadAdmission::Internal,
-                move |_| {
-                    observed.store(true, Ordering::Release);
-                    Ok(())
-                },
-            ));
-            assert!(futures_util::poll!(&mut read).is_pending());
-            assert_eq!(
-                policy.read_pending.available_permits(),
-                MAX_PENDING_READERS - 1
-            );
-            drop(read);
-            assert_eq!(policy.read_pending.available_permits(), MAX_PENDING_READERS);
-            drop(first);
-            drop(second);
-            policy.read(|_| Ok(())).await?;
-            assert_eq!(policy.read_work.available_permits(), 2);
-            assert!(!called.load(Ordering::Acquire));
-            Ok(())
-        }
-
-        /// A cancelled async waiter cannot join its blocking worker. Release and wait
-        /// for that worker before fixture teardown, including after an assertion fails.
-        struct CancelledInternalRead {
-            held: Vec<OwnedSemaphorePermit>,
-            release: Option<mpsc::Sender<()>>,
-            completed: Option<mpsc::Receiver<()>>,
-            policy: Arc<Coordinator>,
-        }
-
-        impl CancelledInternalRead {
-            fn finish(&mut self) -> io::Result<()> {
-                self.held.clear();
-                self.release.take();
-                if let Some(completed) = self.completed.take() {
-                    completed.recv_timeout(WAIT).map_err(io::Error::other)?;
-                    let deadline = Instant::now() + WAIT;
-                    while self.policy.read_work.available_permits() != 2 {
-                        if Instant::now() >= deadline {
-                            return Err(io::Error::other(
-                                "cancelled internal read retained its slot",
-                            ));
-                        }
-                        thread::yield_now();
-                    }
-                }
-                Ok(())
-            }
-        }
-
-        impl Drop for CancelledInternalRead {
-            fn drop(&mut self) {
-                let _ = self.finish();
-            }
-        }
-
-        #[tokio::test]
-        async fn cancelling_an_admitted_internal_read_keeps_its_worker_slot() -> io::Result<()> {
-            let fixture = Fixture::new()?;
-            let policy = fixture.coordinator()?;
-            let first = policy.read_permit(ReadAdmission::Immediate).await?;
-            let second = policy.read_permit(ReadAdmission::Immediate).await?;
-            let (started, waiting) = oneshot::channel();
-            let (release, blocked) = mpsc::channel();
-            let (finished, completed) = mpsc::channel();
-            let mut cleanup = CancelledInternalRead {
-                held: vec![first, second],
-                release: Some(release),
-                completed: Some(completed),
-                policy: policy.clone(),
-            };
-            let mut read = Box::pin(policy.read_with_admission(
-                ReadAdmission::Internal,
-                move |_| {
-                    let _ = started.send(());
-                    let _ = blocked.recv_timeout(WAIT);
-                    let _ = finished.send(());
-                    Ok(())
-                },
-            ));
-            assert!(futures_util::poll!(&mut read).is_pending());
-            assert_eq!(
-                policy.read_pending.available_permits(),
-                MAX_PENDING_READERS - 1
-            );
-            drop(cleanup.held.pop());
-            assert!(futures_util::poll!(&mut read).is_pending());
-            timeout(WAIT, waiting)
-                .await
-                .map_err(io::Error::other)?
-                .map_err(io::Error::other)?;
-            assert_eq!(policy.read_pending.available_permits(), MAX_PENDING_READERS);
-            drop(read);
-            assert_eq!(policy.read_work.available_permits(), 0);
-            let failure = policy.read_staged(|_| Ok(())).await.unwrap_err();
-            assert_eq!(failure.stage, ReadStage::Admission);
-            cleanup.held.clear();
-            policy.read(|_| Ok(())).await?;
-            assert_eq!(policy.read_work.available_permits(), 1);
-            cleanup.finish()?;
-            assert_eq!(policy.read_work.available_permits(), 2);
-
-            Ok(())
-        }
-    }
-    mod read_diagnostics {
-        use std::{
-            sync::{
-                atomic::{AtomicBool, Ordering},
-                mpsc,
-            },
-            thread,
-            time::Instant,
-        };
-
-        use tokio::{sync::oneshot, time::timeout};
-
-        use super::*;
-
-        const WAIT: Duration = Duration::from_secs(10);
-
-        /// Keep the real read worker joinable. Drop releases it even if a later
-        /// assertion fails, so the runtime and fixture do not outlive blocked work.
-        struct HeldRead {
-            release: Option<mpsc::Sender<()>>,
-            thread: Option<thread::JoinHandle<io::Result<()>>>,
-        }
-
-        impl HeldRead {
-            async fn new(policy: Arc<Coordinator>) -> io::Result<Self> {
-                let runtime = tokio::runtime::Handle::current();
-                let (started, waiting) = oneshot::channel();
-                let (release, blocked) = mpsc::channel();
-                let thread = thread::Builder::new()
-                    .name("policy-test-read-holder".into())
-                    .spawn(move || {
-                        runtime.block_on(policy.read(move |_| {
-                            let _ = started.send(());
-                            let _ = blocked.recv_timeout(WAIT);
-                            Ok(())
-                        }))
-                    })?;
-                let holder = Self {
-                    release: Some(release),
-                    thread: Some(thread),
-                };
-                timeout(WAIT, waiting)
-                    .await
-                    .map_err(io::Error::other)?
-                    .map_err(io::Error::other)?;
-                Ok(holder)
-            }
-
-            fn finish(mut self) -> io::Result<()> {
-                self.release.take();
-                self.thread
-                    .take()
-                    .expect("held read worker")
-                    .join()
-                    .map_err(|_| io::Error::other("held read worker panicked"))?
-            }
-        }
-
-        impl Drop for HeldRead {
-            fn drop(&mut self) {
-                self.release.take();
-                if let Some(thread) = self.thread.take() {
-                    let _ = thread.join();
-                }
-            }
-        }
-
-        #[tokio::test]
-        async fn occupied_read_workers_fail_at_admission_without_calling_the_operation()
-        -> io::Result<()> {
-            let fixture = Fixture::new()?;
-            let policy = fixture.coordinator()?;
-            let first = HeldRead::new(policy.clone()).await?;
-            let second = HeldRead::new(policy.clone()).await?;
-            let called = Arc::new(AtomicBool::new(false));
-            let observed = called.clone();
-            let failure = policy
-                .read_staged(move |_| {
-                    observed.store(true, Ordering::Release);
-                    Ok(())
-                })
-                .await
-                .expect_err("two occupied read slots must reject without queueing");
-            assert_eq!(failure.stage, ReadStage::Admission);
-            assert_eq!(failure.error.kind(), io::ErrorKind::WouldBlock);
-            assert!(!called.load(Ordering::Acquire));
-            assert_eq!(policy.read_work.available_permits(), 0);
-            second.finish()?;
-            first.finish()?;
-            assert_eq!(policy.read_work.available_permits(), 2);
-            assert_eq!(
-                policy
-                    .read_staged(|_| Ok(7))
-                    .await
-                    .map_err(|error| error.error)?,
-                7
-            );
-            Ok(())
-        }
-
-        #[tokio::test]
-        async fn an_operation_busy_error_is_not_read_admission() -> io::Result<()> {
-            let fixture = Fixture::new()?;
-            let policy = fixture.coordinator()?;
-            let failure = policy
-                .read_staged(|_| Err::<(), _>(io::Error::from(io::ErrorKind::WouldBlock)))
-                .await
-                .expect_err("operation must retain its own busy error");
-            assert_eq!(failure.stage, ReadStage::Operation);
-            assert_eq!(failure.error.kind(), io::ErrorKind::WouldBlock);
-            assert_eq!(policy.read_work.available_permits(), 2);
-            Ok(())
-        }
-
-        #[tokio::test]
-        async fn read_diagnostics_leave_the_original_immediate_typed_source_intact()
-        -> io::Result<()> {
-            let fixture = Fixture::new()?;
-            let policy = fixture.coordinator()?;
-            let failure = policy
-                .read_staged(|_| Err::<(), _>(io::Error::other(Error::PublicationFailed)))
-                .await
-                .expect_err("operation must fail");
-            assert_eq!(failure.stage, ReadStage::Operation);
-            let legacy = policy
-                .read(|_| Err::<(), _>(io::Error::other(Error::PublicationFailed)))
-                .await
-                .expect_err("legacy read must retain the original error");
-            for error in [failure.error, legacy] {
-                assert_eq!(error.kind(), io::ErrorKind::Other);
-                assert!(matches!(
-                    error
-                        .get_ref()
-                        .and_then(|source| source.downcast_ref::<Error>()),
-                    Some(Error::PublicationFailed)
-                ));
-            }
-            Ok(())
-        }
-
-        /// Dropping the awaiting read intentionally loses its JoinHandle, just as a
-        /// transport cancellation does. Release and wait for its blocking operation
-        /// before fixture teardown, including on assertion failure.
-        struct CancelledRead {
-            release: Option<mpsc::Sender<()>>,
-            completed: Option<mpsc::Receiver<()>>,
-            policy: Arc<Coordinator>,
-        }
-
-        impl CancelledRead {
-            fn finish(&mut self) -> io::Result<()> {
-                self.release.take();
-                if let Some(completed) = self.completed.take() {
-                    completed.recv_timeout(WAIT).map_err(io::Error::other)?;
-                    // The operation reports completion just before the enclosing
-                    // worker drops its permit. No async executor work is needed here.
-                    let deadline = Instant::now() + WAIT;
-                    while self.policy.read_work.available_permits() != 2 {
-                        if Instant::now() >= deadline {
-                            return Err(io::Error::other(
-                                "cancelled read worker retained its slot",
-                            ));
-                        }
-                        thread::yield_now();
-                    }
-                }
-                Ok(())
-            }
-        }
-
-        impl Drop for CancelledRead {
-            fn drop(&mut self) {
-                let _ = self.finish();
-            }
-        }
-
-        #[tokio::test]
-        async fn cancelling_the_waiter_keeps_the_started_worker_read_slot() -> io::Result<()> {
-            let fixture = Fixture::new()?;
-            let policy = fixture.coordinator()?;
-            let (started, waiting) = oneshot::channel();
-            let (release, blocked) = mpsc::channel();
-            let (finished, completed) = mpsc::channel();
-            let mut cleanup = CancelledRead {
-                release: Some(release),
-                completed: Some(completed),
-                policy: policy.clone(),
-            };
-            let mut read = Box::pin(policy.read_staged(move |_| {
-                let _ = started.send(());
-                let _ = blocked.recv_timeout(WAIT);
-                let _ = finished.send(());
-                Ok(())
-            }));
-            assert!(futures_util::poll!(&mut read).is_pending());
-            timeout(WAIT, waiting)
-                .await
-                .map_err(io::Error::other)?
-                .map_err(io::Error::other)?;
-            drop(read);
-            assert_eq!(policy.read_work.available_permits(), 1);
-            policy.read(|_| Ok(())).await?;
-            assert_eq!(policy.read_work.available_permits(), 1);
-            cleanup.finish()?;
-            assert_eq!(policy.read_work.available_permits(), 2);
-            Ok(())
-        }
-
-        #[tokio::test]
-        async fn a_panicking_read_worker_is_not_an_operation_failure() -> io::Result<()> {
-            let fixture = Fixture::new()?;
-            let policy = fixture.coordinator()?;
-            let failure = policy
-                .read_staged(|_| -> io::Result<()> { panic!("read diagnostic worker test") })
-                .await
-                .expect_err("worker panic must be classified");
-            assert_eq!(failure.stage, ReadStage::Worker);
-            assert_eq!(failure.error.kind(), io::ErrorKind::Other);
-            assert!(matches!(
-                failure
-                    .error
-                    .get_ref()
-                    .and_then(|source| source.downcast_ref::<Error>()),
-                Some(Error::WorkerUnavailable)
-            ));
-            assert_eq!(policy.read_work.available_permits(), 2);
-            Ok(())
-        }
-    }
-
-    #[tokio::test]
-    async fn cancelled_metadata_response_keeps_the_actual_writer_and_update_gate() -> io::Result<()>
-    {
-        let fixture = Fixture::new()?;
-        let coordinator = fixture.coordinator()?;
-        let (entered, started) = tokio::sync::oneshot::channel();
-        let (release, released) = std::sync::mpsc::channel::<()>();
-        let (finished, completed) = tokio::sync::oneshot::channel();
-        let mut metadata = Box::pin(coordinator.metadata_write(move |directory| {
-            let gate = store::update_lock(directory)?;
-            let _ = entered.send(());
-            // Bound even a failed assertion's blocking worker independently of the
-            // async runtime. Sender drop also wakes it without keeping the test alive.
-            let _ = released.recv_timeout(Duration::from_secs(2));
-            drop(gate);
-            let _ = finished.send(());
-            Ok(())
-        }));
-        assert!(futures_util::poll!(&mut metadata).is_pending());
-        started.await.map_err(io::Error::other)?;
-        drop(metadata);
-        assert_eq!(coordinator.write_work.available_permits(), 0);
-        assert!(matches!(
-            store::update_lock(&fixture.directory),
-            Err(error) if error.kind() == io::ErrorKind::WouldBlock
-        ));
-        // A policy edit queues behind the detached worker rather than acquiring the
-        // same update gate concurrently and returning a false fast-busy result.
-        let mut change = Box::pin(coordinator.change(
-            fixture.administrator.clone(),
-            1,
-            PolicyChange::CreateUser {
-                name: "after cancelled metadata response".into(),
-                protocols: vec![crate::access::Protocol::Http],
-                concurrent_limit: 1,
-            },
-        ));
-        assert!(futures_util::poll!(&mut change).is_pending());
-        drop(release);
-        completed.await.map_err(io::Error::other)?;
-        assert_eq!(change.await?.revision, 2);
-        assert_eq!(coordinator.reader().revision()?, 2);
-        Ok(())
-    }
-
-    const PHC: &str = "$argon2id$v=19$m=19456,t=2,p=1$c2FsdA$Zml4dHVyZQ";
-
-    struct Fixture {
-        directory: PathBuf,
-        administrator: String,
-    }
-
-    impl Fixture {
-        fn new() -> io::Result<Self> {
-            let mut random = [0; 16];
-            getrandom::fill(&mut random)
-                .map_err(|_| io::Error::other("cannot create policy admission fixture identity"))?;
-            let directory = std::env::temp_dir().join(format!(
-                "vproxy-policy-admission-{}",
-                URL_SAFE_NO_PAD.encode(random)
-            ));
-            store::initialize(&directory, "admission test", "admin", PHC)?;
-            let connection = rusqlite::Connection::open_with_flags(
-                directory.join("management.sqlite3"),
-                rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
-            )
-            .map_err(io::Error::other)?;
-            let administrator = connection
-                .query_row("SELECT id FROM administrators", [], |row| row.get(0))
-                .map_err(io::Error::other)?;
-            Ok(Self {
-                directory,
-                administrator,
-            })
-        }
-
-        fn coordinator(&self) -> io::Result<Arc<Coordinator>> {
-            Coordinator::new(
-                self.directory.clone(),
-                store::load_policy(&self.directory)?,
-                Arc::new(store::lock(&self.directory)?),
-            )
-        }
-    }
-
-    impl Drop for Fixture {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.directory);
-        }
-    }
-
-    #[tokio::test]
-    async fn writer_waiters_are_bounded_cancel_safe_and_fifo() -> io::Result<()> {
-        let fixture = Fixture::new()?;
-        let coordinator = fixture.coordinator()?;
-        let active = coordinator.writer().await?;
-        let mut waiters = (0..MAX_PENDING_WRITERS)
-            .map(|_| Box::pin(coordinator.writer()))
-            .collect::<Vec<_>>();
-        for waiter in &mut waiters {
-            assert!(futures_util::poll!(waiter).is_pending());
-        }
-        assert_eq!(coordinator.write_pending.available_permits(), 0);
-        let mut overflow = Box::pin(coordinator.writer());
-        let Poll::Ready(Err(error)) = futures_util::poll!(&mut overflow) else {
-            panic!("a full writer queue must reject without waiting");
-        };
-        assert_eq!(error.kind(), io::ErrorKind::WouldBlock);
-
-        // Cancellation really drops the owned future, freeing both its pending
-        // budget and its place in the existing writer semaphore's FIFO queue.
-        drop(waiters.remove(0));
-        assert_eq!(coordinator.write_pending.available_permits(), 1);
-        let mut replacement = Box::pin(coordinator.writer());
-        assert!(futures_util::poll!(&mut replacement).is_pending());
-        assert_eq!(coordinator.write_pending.available_permits(), 0);
-        drop(active);
-
-        for waiter in &mut waiters {
-            assert!(futures_util::poll!(&mut replacement).is_pending());
-            let Poll::Ready(permit) = futures_util::poll!(waiter) else {
-                panic!("the next admitted waiter must hold the sole writer permit");
-            };
-            let permit = permit?;
-            assert_eq!(coordinator.write_work.available_permits(), 0);
-            drop(permit);
-        }
-        let permit = replacement.await?;
-        assert_eq!(
-            coordinator.write_pending.available_permits(),
-            MAX_PENDING_WRITERS
-        );
-        assert_eq!(coordinator.write_work.available_permits(), 0);
-        drop(permit);
-        assert_eq!(coordinator.write_work.available_permits(), 1);
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn writer_wait_timeout_keeps_the_original_busy_error_and_releases_its_budget()
-    -> io::Result<()> {
-        let fixture = Fixture::new()?;
-        let coordinator = fixture.coordinator()?;
-        let _active = coordinator.writer().await?;
-        let error = coordinator.writer().await.unwrap_err();
-        assert_eq!(error.kind(), io::ErrorKind::WouldBlock);
-        assert_eq!(error.to_string(), "policy coordinator is busy");
-        assert_eq!(
-            coordinator.write_pending.available_permits(),
-            MAX_PENDING_WRITERS
-        );
-        assert_eq!(coordinator.write_work.available_permits(), 0);
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn traffic_write_diagnostics_preserve_the_original_typed_error() -> io::Result<()> {
-        let fixture = Fixture::new()?;
-        let coordinator = fixture.coordinator()?;
-        let failure = coordinator
-            .traffic_write_staged(|_| Err::<(), _>(io::Error::other(Error::PublicationFailed)))
-            .await
-            .expect_err("store operation must fail");
-        assert!(matches!(failure.stage, TrafficWriteStage::Store));
-        assert_eq!(failure.error.kind(), io::ErrorKind::Other);
-        assert!(matches!(
-            failure
-                .error
-                .get_ref()
-                .and_then(|source| source.downcast_ref::<Error>()),
-            Some(Error::PublicationFailed)
-        ));
-
-        // The old entry point must return the error itself, not an io::Error whose
-        // outer source is the diagnostic wrapper. Existing wire mapping downcasts
-        // that immediate source rather than searching an arbitrary chain.
-        let error = coordinator
-            .traffic_write(|_| Err::<(), _>(io::Error::other(Error::PublicationFailed)))
-            .await
-            .unwrap_err();
-        assert_eq!(error.kind(), io::ErrorKind::Other);
-        assert!(matches!(
-            error
-                .get_ref()
-                .and_then(|source| source.downcast_ref::<Error>()),
-            Some(Error::PublicationFailed)
-        ));
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn queued_status_observes_the_committed_and_published_writer_revision() -> io::Result<()>
-    {
-        let fixture = Fixture::new()?;
-        let coordinator = fixture.coordinator()?;
-        coordinator.activate().await?;
-        let connection = rusqlite::Connection::open(fixture.directory.join("management.sqlite3"))
-            .map_err(io::Error::other)?;
-        connection
-            .execute_batch("BEGIN IMMEDIATE")
-            .map_err(io::Error::other)?;
-        let mut change = Box::pin(coordinator.change(
-            fixture.administrator.clone(),
-            1,
-            PolicyChange::CreateUser {
-                name: "queued writer".into(),
-                protocols: vec![crate::access::Protocol::Http],
-                concurrent_limit: 1,
-            },
-        ));
-        // The first poll moves admission into the real blocking mutation worker.
-        // Our SQL lock prevents commit while the observation joins its writer queue.
-        assert!(futures_util::poll!(&mut change).is_pending());
-        let mut status = Box::pin(coordinator.status());
-        assert!(futures_util::poll!(&mut status).is_pending());
-        assert_eq!(
-            coordinator.write_pending.available_permits(),
-            MAX_PENDING_WRITERS - 1
-        );
-        assert_eq!(coordinator.reader().revision()?, 1);
-        connection
-            .execute_batch("ROLLBACK")
-            .map_err(io::Error::other)?;
-
-        assert_eq!(change.await?.revision, 2);
-        let status = status.await?;
-        assert!(status.running);
-        assert_eq!(status.saved_revision, 2);
-        assert_eq!(status.applied_revision, Some(2));
-        assert_eq!(status.durable_applied_revision, Some(2));
-        assert_eq!(status.user_count, 1);
-        Ok(())
-    }
 }

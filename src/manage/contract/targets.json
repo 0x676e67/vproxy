@@ -940,99 +940,8 @@
         { "type": "null" }
       ]
     },
-    "Target": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": [
-        "node_id",
-        "name",
-        "origin",
-        "server_ip",
-        "active",
-        "retired",
-        "revision",
-        "observed_epoch",
-        "observed_command",
-        "observed_policy_revision",
-        "rollback_detected"
-      ],
-      "properties": {
-        "node_id": { "$ref": "#/components/schemas/Id" },
-        "name": { "$ref": "#/components/schemas/Name" },
-        "origin": { "$ref": "#/components/schemas/TargetOrigin" },
-        "server_ip": { "$ref": "#/components/schemas/TargetServerIp" },
-        "active": { "type": "boolean" },
-        "retired": { "type": "boolean" },
-        "revision": { "$ref": "#/components/schemas/Revision" },
-        "observed_epoch": { "$ref": "#/components/schemas/NullableRevision" },
-        "observed_command": {
-          "anyOf": [
-            { "$ref": "#/components/schemas/Sequence" },
-            { "type": "null" }
-          ]
-        },
-        "observed_policy_revision": {
-          "$ref": "#/components/schemas/NullableRevision"
-        },
-        "rollback_detected": { "type": "boolean" }
-      },
-      "description": "Controller-local registration. Observed values are historical rollback floors, never live remote status."
-    },
-    "TargetPage": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["items", "next_cursor", "controller_available"],
-      "properties": {
-        "items": {
-          "type": "array",
-          "maxItems": 25,
-          "items": { "$ref": "#/components/schemas/Target" }
-        },
-        "next_cursor": { "$ref": "#/components/schemas/NullableId" },
-        "controller_available": { "type": "boolean" }
-      }
-    },
-    "TargetRegisterInput": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["node_id", "origin", "active"],
-      "properties": {
-        "node_id": { "$ref": "#/components/schemas/Id" },
-        "origin": { "$ref": "#/components/schemas/TargetOrigin" },
-        "active": { "type": "boolean" },
-        "server_ip": { "$ref": "#/components/schemas/TargetServerIp" }
-      },
-      "description": "New enrollment is not performed here. Omitted server_ip stores null for a new registration; null explicitly clears the display metadata."
-    },
-    "TargetConfigureInput": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["expected_revision", "origin", "active"],
-      "properties": {
-        "expected_revision": { "$ref": "#/components/schemas/Revision" },
-        "origin": { "$ref": "#/components/schemas/TargetOrigin" },
-        "active": { "type": "boolean" },
-        "server_ip": { "$ref": "#/components/schemas/TargetServerIp" }
-      },
-      "description": "Omitting server_ip preserves the saved display value; null clears it. Target revision CAS is separate from remote policy CAS."
-    },
-    "TargetStateInput": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["expected_revision", "active"],
-      "properties": {
-        "expected_revision": { "$ref": "#/components/schemas/Revision" },
-        "active": { "type": "boolean" }
-      }
-    },
-    "TargetRevisionInput": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["expected_revision"],
-      "properties": {
-        "expected_revision": { "$ref": "#/components/schemas/Revision" }
-      }
-    },
+    "TargetStateInput": {"$ref": "#/components/schemas/UserStateInput"},
+    "TargetRevisionInput": {"$ref": "#/components/schemas/UserRevisionInput"},
     "TargetPolicy": {
       "type": "object",
       "additionalProperties": false,
@@ -1555,12 +1464,6 @@
           ]
         }
       }
-    },
-    "TargetJobInput": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["job_id"],
-      "properties": { "job_id": { "$ref": "#/components/schemas/Id" } }
     },
     "TargetUserResult": {
       "type": "object",

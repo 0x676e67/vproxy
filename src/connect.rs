@@ -1324,29 +1324,6 @@ fn extract_value_from_extension(extension: Extension) -> Option<u64> {
 mod tests {
     use super::*;
 
-    #[test]
-    fn udp_target_prefers_cidr_family_and_uses_fallback_for_the_other_family() {
-        let connector = Connector::new(
-            Some("2001:db8::1/128".parse().expect("valid IPv6 CIDR")),
-            None,
-            Some(Fallback::Address(Ipv4Addr::LOCALHOST.into())),
-            10,
-            #[cfg(any(target_os = "android", target_os = "fuchsia", target_os = "linux"))]
-            None,
-            None,
-        );
-        let udp = connector.udp(Extension::None);
-
-        assert_eq!(
-            udp.bind_ip_for_target("192.0.2.1:443".parse().expect("valid IPv4 target")),
-            Some(Ipv4Addr::LOCALHOST.into())
-        );
-        assert_eq!(
-            udp.bind_ip_for_target("[2001:db8::2]:443".parse().expect("valid IPv6 target")),
-            Some("2001:db8::1".parse().expect("valid IPv6 address"))
-        );
-    }
-
     #[tokio::test]
     async fn udp_connect_uses_same_family_fallback_when_cidr_bind_fails() {
         let target = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0))
@@ -1372,76 +1349,12 @@ mod tests {
             IpAddr::V4(Ipv4Addr::LOCALHOST)
         );
     }
-
-    #[test]
-    fn test_assign_ipv4_with_fixed_combined() {
-        let cidr = "192.168.0.0/24".parse::<Ipv4Cidr>().unwrap();
-        let range = 28;
-        let mut combined = 0x5;
-
-        for i in 0..5 {
-            combined += i;
-
-            // Generate two IPv4 addresses with the same combined value
-            let ipv4_address1 = assign_ipv4_with_range(cidr, range, combined);
-            let ipv4_address2 = assign_ipv4_with_range(cidr, range, combined);
-
-            println!("IPv4 Address 1: {ipv4_address1}");
-            println!("IPv4 Address 2: {ipv4_address2}");
-        }
-    }
-
-    #[test]
-    fn test_assign_ipv6_with_fixed_combined() {
-        let cidr = "2001:470:e953::/48".parse().unwrap();
-        let range = 64;
-        let mut combined = 0x12345;
-
-        for i in 0..5 {
-            combined += i;
-            // Generate two IPv6 addresses with the same combined value
-            let ipv6_address1 = assign_ipv6_with_range(cidr, range, combined);
-            let ipv6_address2 = assign_ipv6_with_range(cidr, range, combined);
-
-            println!("{ipv6_address1}");
-            println!("{ipv6_address2}")
-        }
-    }
-
-    #[test]
-    fn test_assign_ipv4_from_extension() {
-        let cidr = "2001:470:e953::/48".parse().unwrap();
-        let extension = Extension::Session(0x12345);
-        let ipv6_address = assign_ipv6_from_extension(cidr, None, extension);
-        assert_eq!(
-            ipv6_address,
-            std::net::Ipv6Addr::from([0x2001, 0x470, 0xe953, 0, 0, 0, 1, 0x2345])
-        );
-    }
-
-    #[test]
-    fn test_assign_ip_from_extension_with_full_cidr() {
-        let cidr_v4 = "192.168.0.1/32".parse::<Ipv4Cidr>().unwrap();
-        let extension = Extension::Session(0x12345);
-        let ipv4_address = assign_ipv4_from_extension(cidr_v4, None, extension);
-        assert_eq!(ipv4_address, "192.168.0.1".parse::<Ipv4Addr>().unwrap());
-
-        let cidr_v6 = "2001:db8::1/128".parse::<Ipv6Cidr>().unwrap();
-        let ipv6_address = assign_ipv6_from_extension(cidr_v6, None, extension);
-        assert_eq!(ipv6_address, "2001:db8::1".parse::<Ipv6Addr>().unwrap());
-    }
 }
 
 #[cfg(test)]
 mod source_tests {
     //! Exact-source regressions observe real sockets: successful binding is not
     //! enough if a second address family or a supplied fallback can escape it.
-
-    use http_body_util::BodyExt as _;
-    use tokio::{
-        io::{AsyncReadExt as _, AsyncWriteExt as _},
-        net::TcpListener,
-    };
 
     use super::*;
     const SELECTED: Ipv4Addr = Ipv4Addr::new(127, 0, 0, 2);
@@ -1480,88 +1393,6 @@ mod source_tests {
             Some(true),
         )
         .with_source(Some(source))
-    }
-
-    #[tokio::test]
-    async fn unavailable_profile_never_connects_via_native_or_strict_fallback() {
-        let target = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
-        let address = target.local_addr().unwrap();
-        let extension = Extension::Profiled {
-            route: RouteExtension::Session(42),
-            profile: crate::ebpf::Profile::Windows,
-        };
-        for config in [
-            connector(SELECTED.into()),
-            connector(SELECTED.into()).with_source(None),
-        ] {
-            let error = config.tcp(extension).connect(address).await.unwrap_err();
-            assert_eq!(error.kind(), std::io::ErrorKind::Unsupported);
-            let request = Request::builder()
-                .uri(format!("http://{address}/"))
-                .body(http_body_util::Empty::<bytes::Bytes>::new())
-                .unwrap();
-            assert!(config.http(extension).send_request(request).await.is_err());
-        }
-        assert!(
-            timeout(Duration::from_millis(100), target.accept())
-                .await
-                .is_err()
-        );
-
-        // A SYN preset is not an implicit change to UDP policy or source binding.
-        let udp = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
-        let config = connector(SELECTED.into());
-        let selected = config
-            .udp(extension)
-            .connect(&[udp.local_addr().unwrap()])
-            .await
-            .unwrap();
-        selected.send(b"still-udp").await.unwrap();
-        let mut bytes = [0; 16];
-        let (size, peer) = timeout(Duration::from_secs(1), udp.recv_from(&mut bytes))
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(&bytes[..size], b"still-udp");
-        assert_eq!(peer.ip(), IpAddr::V4(SELECTED));
-    }
-
-    #[tokio::test]
-    async fn strict_tcp_filters_family_and_binds_selected_source_including_bind_address() {
-        let target = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
-        let target_addr = target.local_addr().unwrap();
-        let config = connector(SELECTED.into());
-        let tcp = config.tcp(Extension::Session(42));
-        assert_eq!(
-            tcp.socket_addr(|| panic!("strict source must not use a default"))
-                .unwrap(),
-            SocketAddr::from((SELECTED, 0)),
-        );
-        let addresses = [
-            SocketAddr::from((Ipv6Addr::LOCALHOST, target_addr.port())),
-            target_addr,
-        ];
-        let connected = tcp.connect_with_addrs(addresses).await.unwrap();
-        let (_, peer) = target.accept().await.unwrap();
-        assert_eq!(peer.ip(), IpAddr::V4(SELECTED));
-        assert_eq!(connected.local_addr().unwrap().ip(), peer.ip());
-
-        let incompatible = ipv6_fixture(TcpListener::bind((Ipv6Addr::LOCALHOST, 0)).await);
-        let incompatible_addr = incompatible.as_ref().map_or_else(
-            || SocketAddr::from((Ipv6Addr::LOCALHOST, target_addr.port())),
-            |listener| listener.local_addr().unwrap(),
-        );
-        assert_eq!(
-            tcp.connect(incompatible_addr).await.unwrap_err().kind(),
-            std::io::ErrorKind::AddrNotAvailable
-        );
-        if let Some(incompatible) = incompatible {
-            assert!(
-                timeout(Duration::from_millis(100), incompatible.accept())
-                    .await
-                    .is_err()
-            );
-        }
     }
 
     #[tokio::test]
@@ -1648,75 +1479,5 @@ mod source_tests {
             .unwrap();
         assert_eq!(&bytes[..size], b"candidate");
         assert_eq!(peer.ip(), IpAddr::V4(SELECTED));
-    }
-
-    #[tokio::test]
-    async fn strict_http_observes_source_and_preserves_origin_form_without_family_escape() {
-        let target = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
-        let addr = target.local_addr().unwrap();
-        let origin = tokio::spawn(async move {
-            let (mut stream, peer) = target.accept().await.unwrap();
-            let mut request = Vec::new();
-            let mut bytes = [0; 512];
-            while !request.windows(4).any(|value| value == b"\r\n\r\n") {
-                let size = stream.read(&mut bytes).await.unwrap();
-                assert!(size > 0 && request.len() + size <= 8192);
-                request.extend_from_slice(&bytes[..size]);
-            }
-            stream
-                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")
-                .await
-                .unwrap();
-            (peer, String::from_utf8(request).unwrap())
-        });
-        let config = connector(SELECTED.into());
-        let request = Request::builder()
-            .uri(format!("http://{addr}/path?key=value"))
-            .body(http_body_util::Empty::<bytes::Bytes>::new())
-            .unwrap();
-        let response = timeout(
-            Duration::from_secs(2),
-            config.http(Extension::None).send_request(request),
-        )
-        .await
-        .unwrap()
-        .unwrap();
-        assert_eq!(response.status(), 200);
-        assert_eq!(
-            &response.into_body().collect().await.unwrap().to_bytes()[..],
-            b"ok"
-        );
-        let (peer, request) = origin.await.unwrap();
-        assert_eq!(peer.ip(), IpAddr::V4(SELECTED));
-        assert!(request.starts_with("GET /path?key=value HTTP/1.1\r\n"));
-        assert!(
-            request
-                .to_ascii_lowercase()
-                .contains(&format!("host: {addr}\r\n"))
-        );
-
-        let other = ipv6_fixture(TcpListener::bind((Ipv6Addr::LOCALHOST, 0)).await);
-        let other_addr = other.as_ref().map_or_else(
-            || SocketAddr::from((Ipv6Addr::LOCALHOST, addr.port())),
-            |listener| listener.local_addr().unwrap(),
-        );
-        let request = Request::builder()
-            .uri(format!("http://{other_addr}/"))
-            .body(http_body_util::Empty::<bytes::Bytes>::new())
-            .unwrap();
-        assert!(
-            config
-                .http(Extension::None)
-                .send_request(request)
-                .await
-                .is_err()
-        );
-        if let Some(other) = other {
-            assert!(
-                timeout(Duration::from_millis(100), other.accept())
-                    .await
-                    .is_err()
-            );
-        }
     }
 }

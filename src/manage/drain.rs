@@ -5,7 +5,11 @@ use std::{fmt, io};
 
 use serde::{Deserialize, Serialize};
 
-use super::{maintenance::Ownership, proxy, store};
+use super::{
+    maintenance::Ownership,
+    proxy, store,
+    views::{number, required_nullable},
+};
 
 /// A drain is separate from a saved pause. These assertions bind the explicit
 /// action to one runtime and its current paused policy, never a replacement.
@@ -182,29 +186,10 @@ impl fmt::Display for Error {
 }
 impl std::error::Error for Error {}
 
-fn required_nullable<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-    T: Deserialize<'de>,
-{
-    Option::<T>::deserialize(deserializer)
-}
-
 fn positive(value: &str) -> io::Result<u64> {
     number(value)
         .filter(|value| *value != 0 && *value <= i64::MAX as u64)
         .ok_or_else(invalid_input)
-}
-
-fn number(value: &str) -> Option<u64> {
-    if value.is_empty()
-        || value.len() > 20
-        || value.len() > 1 && value.starts_with('0')
-        || !value.bytes().all(|byte| byte.is_ascii_digit())
-    {
-        return None;
-    }
-    value.parse().ok()
 }
 
 fn invalid_input() -> io::Error {

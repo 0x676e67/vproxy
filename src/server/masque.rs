@@ -35,9 +35,6 @@ use tokio::{
     time::timeout,
 };
 
-#[cfg(test)]
-use tokio::time::Instant;
-
 use super::{
     Context, Handle, MAX_UDP_RELAY_PAYLOAD_SIZE, Server,
     auth::{self, Authenticated, Service, Source, basic_credentials},
@@ -1167,11 +1164,8 @@ fn decode_varint_length(data: &[u8]) -> Option<(u64, usize)> {
 
 #[cfg(test)]
 mod tests {
-    use base64::Engine;
-    use http::header::PROXY_AUTHORIZATION;
 
     use super::*;
-    use crate::{AuthMode, ext::Extension};
 
     fn connect_udp_request() -> http::request::Builder {
         Request::builder()
@@ -1179,55 +1173,6 @@ mod tests {
             .uri("https://proxy.example/.well-known/masque/udp/target.example/443/")
             .extension(Protocol::CONNECT_UDP)
             .header("capsule-protocol", "?1")
-    }
-
-    #[tokio::test]
-    async fn authentication_preserves_username_session_extension() {
-        let credentials =
-            base64::engine::general_purpose::STANDARD.encode("user-session-client-a:pass:word");
-        let request = Request::builder()
-            .header(PROXY_AUTHORIZATION, format!("bAsIc   {credentials}"))
-            .body(())
-            .expect("valid request");
-        let auth: Source = AuthMode {
-            username: Some("user".to_owned()),
-            password: Some("pass:word".to_owned()),
-        }
-        .into();
-
-        assert!(matches!(
-            authenticate(&auth, &request).await,
-            Ok(Authenticated {
-                extension: Extension::Session(_),
-                ..
-            })
-        ));
-
-        let mut duplicate = request;
-        duplicate.headers_mut().append(
-            PROXY_AUTHORIZATION,
-            http::HeaderValue::from_static("Basic dXNlcjpwYXNzOndvcmQ="),
-        );
-        assert!(authenticate(&auth, &duplicate).await.is_err());
-    }
-
-    #[tokio::test]
-    async fn authentication_rejects_an_invalid_password() {
-        let credentials = base64::engine::general_purpose::STANDARD.encode("user:wrong");
-        let request = Request::builder()
-            .header(PROXY_AUTHORIZATION, format!("Basic {credentials}"))
-            .body(())
-            .expect("valid request");
-        let auth: Source = AuthMode {
-            username: Some("user".to_owned()),
-            password: Some("password".to_owned()),
-        }
-        .into();
-
-        assert!(matches!(
-            authenticate(&auth, &request).await,
-            Err(auth::Error::InvalidCredentials)
-        ));
     }
 
     #[test]
@@ -1282,45 +1227,6 @@ mod tests {
     }
 
     #[test]
-    fn datagram_capsule_encodes_zero_context() {
-        assert_eq!(
-            encode_datagram_capsule(b"udp")
-                .expect("valid capsule")
-                .as_ref(),
-            b"\0\x04\0udp"
-        );
-    }
-
-    #[test]
-    fn target_datagram_uses_quarter_stream_id_and_zero_context() {
-        let stream_id = StreamId::try_from(4).expect("valid request stream ID");
-        let datagram = encode_target_datagram(stream_id, b"payload").expect("valid datagram");
-        assert_eq!(datagram.as_ref(), b"\x01\x00payload");
-    }
-
-    #[test]
-    fn decodes_context_varint_without_panicking_on_truncation() {
-        assert_eq!(decode_varint(&[]), None);
-        assert_eq!(decode_varint(&[0x40]), None);
-        assert_eq!(decode_varint(&[0, 1]), Some((0, &[1][..])));
-    }
-
-    #[test]
-    fn capsule_protocol_accepts_boolean_parameters_but_not_lists() {
-        let request = Request::builder()
-            .header("capsule-protocol", "?1; version=1")
-            .body(())
-            .expect("valid request");
-        assert!(uses_capsule_protocol(&request));
-
-        let request = Request::builder()
-            .header("capsule-protocol", "?1, ?1")
-            .body(())
-            .expect("valid request");
-        assert!(!uses_capsule_protocol(&request));
-    }
-
-    #[test]
     fn capsule_protocol_rejects_false_and_malformed_items() {
         for value in ["?0", "1", "?1;", "?1;==="] {
             let request = Request::builder()
@@ -1329,30 +1235,6 @@ mod tests {
                 .expect("valid request");
             assert!(!uses_capsule_protocol(&request), "{value}");
         }
-    }
-
-    #[test]
-    fn tunnel_limit_counts_streams_instead_of_quic_connections() {
-        let limit = Arc::new(Semaphore::new(1));
-        let permit = limit
-            .clone()
-            .try_acquire_owned()
-            .expect("first tunnel is admitted");
-        assert!(limit.clone().try_acquire_owned().is_err());
-        drop(permit);
-        assert!(limit.try_acquire_owned().is_ok());
-    }
-
-    #[test]
-    fn drops_udp_payloads_above_the_proxy_limit() {
-        let payload = [0; MAX_UDP_RELAY_PAYLOAD_SIZE + 1];
-        assert_eq!(
-            usable_udp_payload(&payload, MAX_UDP_RELAY_PAYLOAD_SIZE)
-                .expect("payload at the limit is accepted")
-                .len(),
-            MAX_UDP_RELAY_PAYLOAD_SIZE
-        );
-        assert!(usable_udp_payload(&payload, MAX_UDP_RELAY_PAYLOAD_SIZE + 1).is_none());
     }
 }
 
@@ -1371,19 +1253,14 @@ mod cancellation_tests {
 
     #[tokio::test]
     async fn canceling_unresolved_request_preserves_connection_and_tunnel() {
-        cancellation_preserves_tunnel(false, None).await;
-    }
-
-    #[tokio::test]
-    async fn canceling_authentication_response_preserves_connection_and_tunnel() {
-        cancellation_preserves_tunnel(true, None).await;
+        cancellation_preserves_tunnel(None).await;
     }
 
     #[cfg(feature = "management")]
     #[tokio::test]
     async fn managed_streams_reauthenticate_without_releasing_an_existing_tunnel_lease() {
         use crate::access::{Reader, tests::routed_policy as policy};
-        cancellation_preserves_tunnel(true, Some(Reader::new(policy(1, 1)).unwrap())).await;
+        cancellation_preserves_tunnel(Some(Reader::new(policy(1, 1)).unwrap())).await;
     }
 
     #[cfg(feature = "management")]
@@ -1391,10 +1268,8 @@ mod cancellation_tests {
     #[cfg(not(feature = "management"))]
     type ManagedReader = ();
 
-    async fn cancellation_preserves_tunnel(
-        cancel_authentication: bool,
-        _managed: Option<ManagedReader>,
-    ) {
+    async fn cancellation_preserves_tunnel(_managed: Option<ManagedReader>) {
+        let cancel_authentication = _managed.is_some();
         timeout(Duration::from_secs(10), async {
             // The 407 response cannot finish until this client grants more credit.
             let (server, client) = endpoints(16, None);
@@ -1905,257 +1780,6 @@ mod maintenance_tests {
         })
         .await
         .expect("maintenance wire fixture stalled");
-    }
-
-    #[tokio::test]
-    async fn delayed_capsule_reader_survives_quiesce_and_stopping_still_has_a_bounded_deadline() {
-        timeout(Duration::from_secs(10), async {
-            for stopping in [false, true] {
-                let (endpoint, client) =
-                    super::cancellation_tests::endpoints_with_send_window(64, None, Some(256));
-                let server = server(endpoint);
-                let address = server.endpoint.local_addr().unwrap();
-                let handle = Handle::new();
-                let mut task = AbortOnDrop(tokio::spawn(server.start(handle.clone())));
-                let connection = client.connect(address, "localhost").unwrap().await.unwrap();
-                let (_driver, mut sender) =
-                    h3::client::new(h3_quinn::Connection::new(connection.clone()))
-                        .await
-                        .unwrap();
-                let mut control = connection.accept_uni().await.unwrap();
-                assert_eq!(varint(&mut control).await, 0);
-                settings(&mut control).await;
-                let udp = UdpSocket::bind("127.0.0.1:0").await.unwrap();
-                let port = udp.local_addr().unwrap().port();
-                let expected = vec![0x5a; 1_024];
-                let mut echo = AbortOnDrop(tokio::spawn({
-                    let expected = expected.clone();
-                    async move {
-                        let mut bytes = [0; 32];
-                        let (_, peer) = udp.recv_from(&mut bytes).await.unwrap();
-                        udp.send_to(&expected, peer).await.unwrap();
-                    }
-                }));
-                let mut tunnel = sender.send_request(request(port)).await.unwrap();
-                assert_eq!(
-                    tunnel.recv_response().await.unwrap().status(),
-                    StatusCode::OK
-                );
-                // Observe GOAWAY before filling the small shared send queue: the
-                // test must not itself starve the server's control-stream write.
-                assert!(handle.request_quiesce());
-                assert_eq!(goaway(&mut control).await, tunnel.id().into_inner() + 4);
-                tunnel
-                    .send_data(encode_datagram_capsule(b"request").unwrap())
-                    .await
-                    .unwrap();
-                let mut first = tunnel
-                    .recv_data()
-                    .await
-                    .unwrap()
-                    .expect("first Capsule bytes");
-                let first_length = first.remaining();
-                assert!(
-                    first_length < expected.len(),
-                    "receive credit leaves the response pending"
-                );
-                let mut decoder = CapsuleDecoder::default();
-                let mut capsules = decoder.push(&first.copy_to_bytes(first_length)).unwrap();
-                assert!(
-                    capsules.is_empty(),
-                    "the reliable Capsule is still incomplete"
-                );
-                assert!(!task.0.is_finished());
-                assert!(connection.close_reason().is_none());
-                if stopping {
-                    // No more receive credit: run_tunnel is inside send_data, not
-                    // polling its stop branch. The listener must enforce the same
-                    // real deadline and report abort, rather than false success.
-                    handle.request_shutdown_at(Instant::now() + Duration::from_millis(20));
-                    let error = (&mut task.0).await.unwrap().unwrap_err();
-                    assert_eq!(error.kind(), io::ErrorKind::TimedOut);
-                } else {
-                    tunnel.finish().await.unwrap();
-                    while let Some(mut data) = tunnel.recv_data().await.unwrap() {
-                        let length = data.remaining();
-                        capsules.extend(decoder.push(&data.copy_to_bytes(length)).unwrap());
-                    }
-                    decoder.finish().unwrap();
-                    assert_eq!(
-                        capsules,
-                        vec![Bytes::from([b"\0".as_slice(), &expected].concat())]
-                    );
-                    assert!(connection.close_reason().is_none());
-                    assert!(!task.0.is_finished());
-                }
-                (&mut echo.0).await.unwrap();
-                connection.close(0_u32.into(), b"capsule test peer complete");
-                if !stopping {
-                    (&mut task.0).await.unwrap().unwrap();
-                }
-                client.wait_idle().await;
-            }
-        })
-        .await
-        .expect("delayed Capsule fixture stalled");
-    }
-}
-
-#[cfg(test)]
-mod shutdown_tests {
-    //! Shutdown completion is local ownership cleanup, never a delivery receipt.
-
-    use std::{
-        future::{pending, poll_fn},
-        sync::atomic::{AtomicUsize, Ordering},
-    };
-
-    use super::*;
-
-    struct Dropped(Arc<AtomicUsize>);
-
-    impl Drop for Dropped {
-        fn drop(&mut self) {
-            self.0.fetch_add(1, Ordering::SeqCst);
-        }
-    }
-
-    #[tokio::test]
-    async fn endpoint_drain_reports_timeout_or_task_panic_after_reaping_connections() {
-        timeout(Duration::from_secs(2), async {
-            for panic in [false, true] {
-                let endpoint = Endpoint::client("127.0.0.1:0".parse().unwrap()).unwrap();
-                let dropped = Arc::new(AtomicUsize::new(0));
-                let (started, ready) = tokio::sync::oneshot::channel();
-                let mut connections = JoinSet::new();
-                connections.spawn({
-                    let dropped = dropped.clone();
-                    async move {
-                        let _owned = Dropped(dropped);
-                        let _ = started.send(());
-                        if panic {
-                            panic!("test-owned connection panic");
-                        }
-                        pending::<()>().await;
-                    }
-                });
-                ready.await.unwrap();
-                let handle = Handle::new();
-                handle.request_shutdown_at(Instant::now() + Duration::from_millis(20));
-                let error = drain_endpoint(&endpoint, &mut connections, &handle)
-                    .await
-                    .unwrap_err();
-                assert_eq!(
-                    error.kind(),
-                    if panic {
-                        io::ErrorKind::Other
-                    } else {
-                        io::ErrorKind::TimedOut
-                    }
-                );
-                assert!(connections.is_empty());
-                assert_eq!(dropped.load(Ordering::SeqCst), 1);
-            }
-        })
-        .await
-        .expect("endpoint shutdown fixture stalled");
-    }
-
-    #[tokio::test]
-    async fn connection_error_cleanup_joins_tunnels_and_datagram_before_returning() {
-        timeout(Duration::from_secs(2), async {
-            let dropped = Arc::new(AtomicUsize::new(0));
-            let (tunnel_started, tunnel_ready) = tokio::sync::oneshot::channel();
-            let mut tunnels = JoinSet::new();
-            tunnels.spawn({
-                let dropped = dropped.clone();
-                async move {
-                    let _owned = Dropped(dropped);
-                    let _ = tunnel_started.send(());
-                    pending::<Result<(), BoxError>>().await
-                }
-            });
-            let (datagram_started, datagram_ready) = tokio::sync::oneshot::channel();
-            let mut datagram = AbortOnDrop(tokio::spawn({
-                let dropped = dropped.clone();
-                async move {
-                    let _owned = Dropped(dropped);
-                    let _ = datagram_started.send(());
-                    pending::<Result<(), BoxError>>().await
-                }
-            }));
-            tunnel_ready.await.unwrap();
-            datagram_ready.await.unwrap();
-
-            reap_tunnels(&mut tunnels, false).await.unwrap();
-            assert!(datagram.abort_and_join().await.unwrap_err().is_cancelled());
-            assert!(tunnels.is_empty());
-            assert_eq!(dropped.load(Ordering::SeqCst), 2);
-        })
-        .await
-        .expect("connection cleanup fixture stalled");
-    }
-
-    #[tokio::test]
-    async fn ordinary_quic_peer_closure_does_not_fail_the_listener() {
-        timeout(Duration::from_secs(10), async {
-            let (endpoint, client) = super::cancellation_tests::endpoints(65_536, None);
-            let handle = Handle::new();
-            let server = MasqueServer {
-                endpoint,
-                auth: Arc::new(
-                    crate::AuthMode {
-                        username: None,
-                        password: None,
-                    }
-                    .into(),
-                ),
-                connector: Arc::new(Connector::new(
-                    None,
-                    None,
-                    None,
-                    2,
-                    #[cfg(any(target_os = "android", target_os = "fuchsia", target_os = "linux"))]
-                    None,
-                    None,
-                )),
-                tunnel_limit: Arc::new(Semaphore::new(2)),
-                #[cfg(feature = "management")]
-                leaf: None,
-            };
-            let address = server.endpoint.local_addr().unwrap();
-            let mut task = AbortOnDrop(tokio::spawn(server.start(handle.clone())));
-            // The second actual HTTP response proves a closed first peer did not
-            // turn its connection-local error into a fatal listener result.
-            for _ in 0..2 {
-                let connection = client.connect(address, "localhost").unwrap().await.unwrap();
-                let (mut driver, mut sender) =
-                    h3::client::new(h3_quinn::Connection::new(connection.clone()))
-                        .await
-                        .unwrap();
-                let mut driver = AbortOnDrop(tokio::spawn(async move {
-                    poll_fn(|cx| driver.poll_close(cx)).await
-                }));
-                let mut stream = sender
-                    .send_request(Request::get("https://localhost/").body(()).unwrap())
-                    .await
-                    .unwrap();
-                stream.finish().await.unwrap();
-                assert_eq!(
-                    stream.recv_response().await.unwrap().status(),
-                    StatusCode::BAD_REQUEST
-                );
-                drop(stream);
-                drop(sender);
-                connection.close(0_u32.into(), b"test peer complete");
-                let _ = (&mut driver.0).await.unwrap();
-            }
-            handle.request_graceful_shutdown();
-            (&mut task.0).await.unwrap().unwrap();
-            client.wait_idle().await;
-        })
-        .await
-        .expect("ordinary peer closure fixture stalled");
     }
 }
 

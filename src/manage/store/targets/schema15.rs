@@ -14,38 +14,6 @@ pub(in crate::manage::store) fn upgrade_endpoints(connection: &Connection) -> io
     audit(connection, true)
 }
 
-/// Historical fixtures must actually remove the new vocabulary. Refuse newer
-/// rows before rebuilding so a test cannot quietly discard a metadata command.
-#[cfg(test)]
-pub(in crate::manage::store) fn remove_endpoints_schema_for_test(
-    connection: &Connection,
-) -> io::Result<()> {
-    let present: bool = connection.query_row(
-        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('control_outbox') WHERE name='resource')",
-        [], |row| row.get(0),
-    ).map_err(|error| sqlite_error("cannot inspect endpoint outbox fixture", error))?;
-    if !present {
-        return Ok(());
-    }
-    let newer: bool = connection
-        .query_row(
-            "SELECT EXISTS(SELECT 1 FROM control_outbox WHERE resource<>'proxy_policy'
-          OR expected_metadata_revision IS NOT NULL OR metadata_revision IS NOT NULL)
-          OR EXISTS(SELECT 1 FROM controller_audit WHERE mutation_action='set_public_address')",
-            [],
-            |row| row.get(0),
-        )
-        .map_err(|error| sqlite_error("cannot inspect newer endpoint outbox rows", error))?;
-    if newer {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "endpoint delivery rows cannot become a legacy fixture",
-        ));
-    }
-    outbox(connection, false)?;
-    audit(connection, false)
-}
-
 /// All interpolated fragments are fixed internal DDL for v14/v15, not input
 /// strings. Versioned command BLOBs never pass through a JSON serializer here.
 fn outbox(connection: &Connection, endpoints: bool) -> io::Result<()> {

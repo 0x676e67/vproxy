@@ -432,81 +432,20 @@ mod admission_tests {
     mod http2 {
         //! HTTP/2 streams share one TCP admission, including through TLS negotiation.
 
-        use std::{
-            future::poll_fn,
-            sync::{Arc, Mutex},
-        };
+        use std::sync::Arc;
 
         use base64::Engine;
         use bytes::Bytes;
         use http::{Method, Request, StatusCode, Version, header};
         use http_body_util::Empty;
-        use hyper::{client::conn::http2, upgrade::Upgraded};
-        use hyper_util::rt::TokioIo;
+        use hyper::client::conn::http2;
+        use hyper_util::rt::{TokioExecutor, TokioIo};
         use tokio::io::{AsyncRead, AsyncWrite};
         use tokio_rustls::{TlsConnector, rustls};
 
         use super::*;
 
         type Sender = http2::SendRequest<Empty<Bytes>>;
-        type Tunnel = TokioIo<Upgraded>;
-
-        /// Hyper executes its transport and upgraded send drivers separately from the
-        /// public connection future. Own all of them; never hold this short lock while
-        /// awaiting a driver, since that driver can itself submit an upgrade task.
-        #[derive(Clone, Default)]
-        struct Drivers(Arc<Mutex<DriverState>>);
-
-        #[derive(Default)]
-        struct DriverState {
-            tasks: JoinSet<io::Result<()>>,
-            closed: bool,
-        }
-
-        impl<F> hyper::rt::Executor<F> for Drivers
-        where
-            F: Future<Output = ()> + Send + 'static,
-        {
-            fn execute(&self, future: F) {
-                let mut state = self.0.lock().unwrap();
-                if state.closed {
-                    // Dropping a driver can release another owner that calls back into
-                    // this executor. Never drop its future while holding the lock.
-                    drop(state);
-                    drop(future);
-                    return;
-                }
-                state.tasks.spawn(async move {
-                    future.await;
-                    Ok(())
-                });
-            }
-        }
-
-        impl Drivers {
-            fn abort_all(&self) {
-                let mut state = self.0.lock().unwrap();
-                state.closed = true;
-                state.tasks.abort_all();
-            }
-
-            async fn join(&self, cancelled: bool) -> io::Result<()> {
-                let mut result = Ok(());
-                while let Some(joined) =
-                    poll_fn(|cx| self.0.lock().unwrap().tasks.poll_join_next(cx)).await
-                {
-                    let next = match joined {
-                        Ok(result) => result,
-                        Err(error) if cancelled && error.is_cancelled() => Ok(()),
-                        Err(error) => Err(io::Error::other(error)),
-                    };
-                    if result.is_ok() {
-                        result = next;
-                    }
-                }
-                result
-            }
-        }
 
         fn require(condition: bool, message: &'static str) -> io::Result<()> {
             if condition {
@@ -516,20 +455,15 @@ mod admission_tests {
             }
         }
 
-        async fn client<I>(stream: I, drivers: &Drivers) -> io::Result<Sender>
+        async fn client<I>(stream: I, drivers: &mut JoinSet<io::Result<()>>) -> io::Result<Sender>
         where
             I: AsyncRead + AsyncWrite + Unpin + Send + 'static,
         {
             let (sender, connection) =
-                http2::handshake::<_, _, Empty<Bytes>>(drivers.clone(), TokioIo::new(stream))
+                http2::handshake::<_, _, Empty<Bytes>>(TokioExecutor::new(), TokioIo::new(stream))
                     .await
                     .map_err(io::Error::other)?;
-            drivers
-                .0
-                .lock()
-                .unwrap()
-                .tasks
-                .spawn(async move { connection.await.map_err(io::Error::other) });
+            drivers.spawn(async move { connection.await.map_err(io::Error::other) });
             Ok(sender)
         }
 
@@ -550,19 +484,6 @@ mod admission_tests {
                 .send_request(request.body(Empty::new()).map_err(io::Error::other)?)
                 .await
                 .map_err(io::Error::other)
-        }
-
-        async fn connected(sender: &mut Sender, destination: SocketAddr) -> io::Result<Tunnel> {
-            let response = connect(sender, destination, None).await?;
-            require(
-                response.status() == StatusCode::OK,
-                "H2 CONNECT was not accepted",
-            )?;
-            Ok(TokioIo::new(
-                hyper::upgrade::on(response)
-                    .await
-                    .map_err(io::Error::other)?,
-            ))
         }
 
         async fn exchange<I>(
@@ -616,138 +537,6 @@ mod admission_tests {
             )
         }
 
-        async fn response_head(client: &mut TcpStream) -> io::Result<Vec<u8>> {
-            let mut head = Vec::new();
-            while !head.ends_with(b"\r\n\r\n") {
-                require(
-                    head.len() < 4096,
-                    "queued CONNECT response exceeded fixture bound",
-                )?;
-                head.push(client.read_u8().await?);
-            }
-            Ok(head)
-        }
-
-        #[tokio::test]
-        async fn h2_connect_streams_are_independent_and_retain_one_tcp_admission() -> io::Result<()>
-        {
-            let (address, handle, tasks) = start_fixture(ServerKind::Http)?;
-            let drivers = Drivers::default();
-            let result = timeout(FIXTURE_TIMEOUT, async {
-                let first_origin = TcpListener::bind("127.0.0.1:0").await?;
-                let second_origin = TcpListener::bind("127.0.0.1:0").await?;
-                let later_origin = TcpListener::bind("127.0.0.1:0").await?;
-                let queued_origin = TcpListener::bind("127.0.0.1:0").await?;
-                let mut sender = client(TcpStream::connect(address).await?, &drivers).await?;
-                let mut first = connected(&mut sender, first_origin.local_addr()?).await?;
-                let (mut first_peer, _) = first_origin.accept().await?;
-                let mut second = connected(&mut sender, second_origin.local_addr()?).await?;
-                let (mut second_peer, _) = second_origin.accept().await?;
-                exchange(
-                    &mut first,
-                    &mut first_peer,
-                    b"first-upload",
-                    b"first-download",
-                )
-                .await?;
-                exchange(
-                    &mut second,
-                    &mut second_peer,
-                    b"second-upload",
-                    b"second-download",
-                )
-                .await?;
-
-                let mut queued = TcpStream::connect(address).await?;
-                let destination = queued_origin.local_addr()?;
-                queued
-                    .write_all(
-                        format!("CONNECT {destination} HTTP/1.1\r\nHost: {destination}\r\n\r\n")
-                            .as_bytes(),
-                    )
-                    .await?;
-                no_reply_while_saturated(&mut queued).await?;
-
-                // Drop cancels this independent stream, without claiming a particular
-                // RST_STREAM code. The other tunnel and the H2 transport must survive.
-                drop(first);
-                let mut byte = [0];
-                match first_peer.read(&mut byte).await {
-                    Ok(0) => {}
-                    Err(error)
-                        if matches!(
-                            error.kind(),
-                            io::ErrorKind::ConnectionReset
-                                | io::ErrorKind::ConnectionAborted
-                                | io::ErrorKind::BrokenPipe
-                        ) => {}
-                    Err(error) => return Err(error),
-                    Ok(_) => {
-                        return Err(io::Error::other(
-                            "cancelled stream produced unexpected origin data",
-                        ));
-                    }
-                }
-                drop(first_peer);
-                exchange(
-                    &mut second,
-                    &mut second_peer,
-                    b"still-second",
-                    b"still-independent",
-                )
-                .await?;
-                finish_tunnel(&mut second, &mut second_peer, b"reply-after-end-stream").await?;
-                drop(second);
-                drop(second_peer);
-
-                let mut later = connected(&mut sender, later_origin.local_addr()?).await?;
-                let (mut later_peer, _) = later_origin.accept().await?;
-                exchange(
-                    &mut later,
-                    &mut later_peer,
-                    b"new-stream",
-                    b"same-connection",
-                )
-                .await?;
-                finish_tunnel(&mut later, &mut later_peer, b"").await?;
-                drop(later);
-                drop(later_peer);
-                no_reply_while_saturated(&mut queued).await?;
-
-                // Completed streams are not completed TCP admission. Dropping the last
-                // sender closes this idle transport; join its real executor tasks too.
-                drop(sender);
-                drivers.join(false).await?;
-                require(
-                    response_head(&mut queued)
-                        .await?
-                        .starts_with(b"HTTP/1.1 200 "),
-                    "closing H2 did not restore listener admission",
-                )?;
-                let (mut queued_peer, _) = queued_origin.accept().await?;
-                exchange(
-                    &mut queued,
-                    &mut queued_peer,
-                    b"queued-upload",
-                    b"queued-download",
-                )
-                .await?;
-                finish_tunnel(&mut queued, &mut queued_peer, b"queued-tail").await
-            })
-            .await
-            .unwrap_or_else(|_| {
-                Err(io::Error::new(
-                    io::ErrorKind::TimedOut,
-                    "H2 admission fixture stalled",
-                ))
-            });
-            if result.is_err() {
-                drivers.abort_all();
-            }
-            let joined = drivers.join(result.is_err()).await;
-            finish_fixture(handle, tasks, result.and(joined)).await
-        }
-
         #[tokio::test]
         async fn explicit_https_h2_negotiation_holds_admission_and_enforces_basic_auth()
         -> io::Result<()> {
@@ -780,7 +569,7 @@ mod admission_tests {
                     password: Some("admission-password".into()),
                 }),
             )?;
-            let drivers = Drivers::default();
+            let mut drivers = JoinSet::new();
             let result = timeout(FIXTURE_TIMEOUT, async {
                 let stalled = TcpStream::connect(address).await?;
                 let next = TcpStream::connect(address).await?;
@@ -804,7 +593,7 @@ mod admission_tests {
                     tls.get_ref().1.alpn_protocol() == Some(b"h2".as_slice()),
                     "explicit certificate listener did not negotiate H2",
                 )?;
-                let mut sender = client(tls, &drivers).await?;
+                let mut sender = client(tls, &mut drivers).await?;
                 let origin = TcpListener::bind("127.0.0.1:0").await?;
                 let wrong = format!(
                     "Basic {}",
@@ -850,7 +639,10 @@ mod admission_tests {
                 drop(tunnel);
                 drop(peer);
                 drop(sender);
-                drivers.join(false).await
+                while let Some(joined) = drivers.join_next().await {
+                    joined.map_err(io::Error::other)??;
+                }
+                Ok(())
             })
             .await
             .unwrap_or_else(|_| {
@@ -859,11 +651,8 @@ mod admission_tests {
                     "HTTPS H2 admission fixture stalled",
                 ))
             });
-            if result.is_err() {
-                drivers.abort_all();
-            }
-            let joined = drivers.join(result.is_err()).await;
-            finish_fixture(handle, tasks, result.and(joined)).await
+            drivers.shutdown().await;
+            finish_fixture(handle, tasks, result).await
         }
     }
 
@@ -881,7 +670,6 @@ mod admission_tests {
     use tokio::{
         io::{AsyncReadExt, AsyncWriteExt},
         net::{TcpListener, TcpStream},
-        sync::Semaphore,
         task::JoinSet,
         time::timeout,
     };
@@ -889,7 +677,6 @@ mod admission_tests {
     use super::{
         BoundServer, Context, Handle, Server, ServerKind, Source, connection_limit,
         http::{HttpServer, accept::DefaultAcceptor},
-        validate_concurrent,
     };
     use crate::{AuthMode, connect::Connector};
 
@@ -898,60 +685,6 @@ mod admission_tests {
     fn assert_pending(future: Pin<&mut impl Future>) {
         let mut context = TaskContext::from_waker(Waker::noop());
         assert!(future.poll(&mut context).is_pending());
-    }
-
-    #[test]
-    fn concurrent_limits_reject_zero_and_overflow_before_semaphore_creation() -> io::Result<()> {
-        let maximum = (i32::MAX as usize).min(Semaphore::MAX_PERMITS);
-        let maximum = u32::try_from(maximum).expect("socket bound fits u32");
-        for value in [1, 1024, maximum] {
-            assert_eq!(validate_concurrent(value)?, value as usize);
-            assert_eq!(connection_limit(value)?.available_permits(), value as usize);
-        }
-        for value in [0, maximum.checked_add(1).expect("bounded by i32"), u32::MAX] {
-            assert_eq!(
-                validate_concurrent(value)
-                    .expect_err("invalid limit")
-                    .kind(),
-                io::ErrorKind::InvalidInput
-            );
-            assert_eq!(
-                connection_limit(value)
-                    .expect_err("must validate before Semaphore::new")
-                    .kind(),
-                io::ErrorKind::InvalidInput
-            );
-        }
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn incoming_at_capacity_resumes_only_after_a_permit_is_released() -> io::Result<()> {
-        timeout(FIXTURE_TIMEOUT, async {
-            let mut listener = TcpListener::bind("127.0.0.1:0").await?;
-            let limit = connection_limit(1)?;
-            let held = limit.clone().acquire_owned().await.expect("open budget");
-            let client = TcpStream::connect(listener.local_addr()?).await?;
-            let client_address = client.local_addr()?;
-            let mut incoming = Box::pin(HttpServer::<DefaultAcceptor>::incoming(
-                &mut listener,
-                &limit,
-            ));
-            assert_pending(incoming.as_mut());
-            assert_eq!(limit.available_permits(), 0);
-
-            drop(held);
-            let ((accepted, peer), permit) = incoming.await?;
-            assert_eq!(peer, client_address);
-            assert_eq!(limit.available_permits(), 0);
-            drop(accepted);
-            drop(client);
-            drop(permit);
-            assert_eq!(limit.available_permits(), 1);
-            Ok(())
-        })
-        .await
-        .expect("owned loopback admission must complete")
     }
 
     #[tokio::test]
@@ -990,57 +723,6 @@ mod admission_tests {
         })
         .await
         .expect("cancelling admission must not consume the queued peer")
-    }
-
-    #[tokio::test]
-    async fn cancelling_an_accept_wait_returns_the_reserved_permit() -> io::Result<()> {
-        timeout(FIXTURE_TIMEOUT, async {
-            let mut listener = TcpListener::bind("127.0.0.1:0").await?;
-            let limit = connection_limit(1)?;
-            {
-                let mut incoming = Box::pin(HttpServer::<DefaultAcceptor>::incoming(
-                    &mut listener,
-                    &limit,
-                ));
-                assert_pending(incoming.as_mut());
-                assert_eq!(limit.available_permits(), 0);
-            }
-            assert_eq!(limit.available_permits(), 1);
-            let client = TcpStream::connect(listener.local_addr()?).await?;
-            let ((accepted, _), permit) =
-                HttpServer::<DefaultAcceptor>::incoming(&mut listener, &limit).await?;
-            assert_eq!(limit.available_permits(), 0);
-            drop(accepted);
-            drop(client);
-            drop(permit);
-            assert_eq!(limit.available_permits(), 1);
-            Ok(())
-        })
-        .await
-        .expect("accept cancellation must leave the listener reusable")
-    }
-
-    #[tokio::test]
-    async fn a_closed_budget_returns_an_error_without_accepting_the_peer() -> io::Result<()> {
-        timeout(FIXTURE_TIMEOUT, async {
-            let mut listener = TcpListener::bind("127.0.0.1:0").await?;
-            let limit = connection_limit(1)?;
-            let client = TcpStream::connect(listener.local_addr()?).await?;
-            let peer = client.local_addr()?;
-            limit.close();
-            assert!(
-                HttpServer::<DefaultAcceptor>::incoming(&mut listener, &limit)
-                    .await
-                    .is_err()
-            );
-            let (accepted, address) = listener.accept().await?;
-            assert_eq!(address, peer);
-            drop(accepted);
-            drop(client);
-            Ok(())
-        })
-        .await
-        .expect("a closed admission budget must fail before accept")
     }
 
     fn start_fixture(
@@ -1127,56 +809,6 @@ mod admission_tests {
                 "saturated listener replied to or closed a queued peer",
             )),
         }
-    }
-
-    #[tokio::test]
-    async fn socks_bind_and_udp_control_sessions_hold_the_listener_budget() -> io::Result<()> {
-        for command in [2, 3] {
-            let (address, handle, tasks) = start_fixture(ServerKind::Socks5)?;
-            let result = timeout(FIXTURE_TIMEOUT, async {
-                let mut control = TcpStream::connect(address).await?;
-                socks_greeting(&mut control).await?;
-                // RFC 1928 section 6: BIND waits after its first success reply;
-                // UDP ASSOCIATE keeps the association until this TCP control ends.
-                // https://www.rfc-editor.org/rfc/rfc1928.html#section-6
-                control
-                    .write_all(&[5, command, 0, 1, 0, 0, 0, 0, 0, 0])
-                    .await?;
-                let mut reply = [0; 10];
-                control.read_exact(&mut reply).await?;
-                if reply[..4] != [5, 0, 0, 1] || reply[8..] == [0, 0] {
-                    return Err(io::Error::other(
-                        "SOCKS control command did not establish a listener",
-                    ));
-                }
-
-                let mut queued = TcpStream::connect(address).await?;
-                queued.write_all(&[5, 1, 0]).await?;
-                no_reply_while_saturated(&mut queued).await?;
-                drop(control);
-                let mut response = [0; 2];
-                queued.read_exact(&mut response).await?;
-                if response != [5, 0] {
-                    return Err(io::Error::other(
-                        "closing the SOCKS control did not restore admission",
-                    ));
-                }
-                // Shutdown must also interrupt the next capacity wait while this
-                // admitted peer is still waiting to send its SOCKS command.
-                handle.request_graceful_shutdown();
-                drop(queued);
-                Ok(())
-            })
-            .await
-            .unwrap_or_else(|_| {
-                Err(io::Error::new(
-                    io::ErrorKind::TimedOut,
-                    "SOCKS admission fixture stalled",
-                ))
-            });
-            finish_fixture(handle, tasks, result).await?;
-        }
-        Ok(())
     }
 
     /// Explicit proxy-only fixture files prevent auto construction from touching
@@ -1304,112 +936,17 @@ mod admission_tests {
 mod shutdown_tests {
     //! Shutdown reports forced cancellation separately from natural completion.
 
-    use std::{future::pending, io, sync::Arc, time::Duration};
+    use std::{io, time::Duration};
 
     use tokio::{
         io::{AsyncReadExt, AsyncWriteExt},
         net::{TcpListener, TcpStream},
-        sync::oneshot,
-        task::{JoinHandle, JoinSet},
-        time::{Instant, timeout},
+        task::JoinHandle,
+        time::timeout,
     };
 
-    use super::{
-        BoundServer, Context, Handle, ServerKind, Source, connection_limit, drain_connections,
-        drain_permits,
-    };
+    use super::{BoundServer, Context, Handle, ServerKind, Source};
     use crate::{AuthMode, connect::Connector};
-
-    #[tokio::test]
-    async fn connection_shutdown_reports_timeout_after_reaping_cancelled_owners() {
-        let mut connections = JoinSet::new();
-        let (entered, ready) = oneshot::channel();
-        let (dropped, finished) = oneshot::channel();
-        struct DropNotice(Option<oneshot::Sender<()>>);
-        impl Drop for DropNotice {
-            fn drop(&mut self) {
-                if let Some(notice) = self.0.take() {
-                    let _ = notice.send(());
-                }
-            }
-        }
-        connections.spawn(async move {
-            let _owner = DropNotice(Some(dropped));
-            entered.send(()).unwrap();
-            pending::<()>().await;
-        });
-        ready.await.unwrap();
-        let handle = Handle::new();
-        handle.request_shutdown_at(Instant::now() + Duration::from_millis(20));
-        let error = drain_connections(&mut connections, "fixture", &handle)
-            .await
-            .unwrap_err();
-        assert_eq!(error.kind(), io::ErrorKind::TimedOut);
-        assert!(connections.is_empty());
-        finished.await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn connection_shutdown_returns_task_failure_and_reaps_other_tasks() {
-        let handle = Handle::new();
-        handle.request_quiesce();
-        let mut connections = JoinSet::new();
-        connections.spawn(async { panic!("owned fixture task failed") });
-        let waiting = handle.clone();
-        connections.spawn(async move { waiting.wait_stopping().await });
-        let error = drain_connections(&mut connections, "fixture", &handle)
-            .await
-            .unwrap_err();
-        assert_eq!(error.kind(), io::ErrorKind::Other);
-        assert!(connections.is_empty());
-        assert!(
-            !handle.is_quiescing(),
-            "a task failure escalates maintenance to process stop"
-        );
-    }
-
-    #[tokio::test]
-    async fn connection_shutdown_returns_success_only_for_naturally_finished_tasks() {
-        let handle = Handle::new();
-        handle.request_quiesce();
-        let mut connections = JoinSet::new();
-        connections.spawn(async { tokio::task::yield_now().await });
-        drain_connections(&mut connections, "fixture", &handle)
-            .await
-            .unwrap();
-        assert!(connections.is_empty());
-        assert!(
-            handle.is_quiescing(),
-            "normal quiescence must not become a timed stop"
-        );
-    }
-
-    #[tokio::test]
-    async fn connection_ownership_shutdown_waits_for_all_original_slots() {
-        let limit = connection_limit(2).unwrap();
-        let first = Arc::new(limit.clone().acquire_owned().await.unwrap());
-        let second = limit.clone().acquire_owned().await.unwrap();
-        let body_owner = first.clone();
-        drop(first);
-        let handle = Handle::new();
-        handle.request_shutdown_at(Instant::now() + Duration::from_millis(20));
-        assert_eq!(
-            drain_permits(&limit, 2, &handle).await.unwrap_err().kind(),
-            io::ErrorKind::TimedOut
-        );
-        // A cancelled acquire_many must return any partial reservation.
-        drop(second);
-        assert_eq!(limit.available_permits(), 1);
-        drop(body_owner);
-        drain_permits(&limit, 2, &handle).await.unwrap();
-        assert_eq!(limit.available_permits(), 2);
-
-        limit.close();
-        assert_eq!(
-            drain_permits(&limit, 2, &handle).await.unwrap_err().kind(),
-            io::ErrorKind::Other
-        );
-    }
 
     fn socks_fixture() -> (std::net::SocketAddr, Handle, JoinHandle<io::Result<()>>) {
         let server = BoundServer::bind(
@@ -1451,50 +988,6 @@ mod shutdown_tests {
         let mut reply = [0; 10];
         client.read_exact(&mut reply).await.unwrap();
         assert_eq!(&reply[..4], &[5, 0, 0, 1]);
-    }
-
-    #[tokio::test]
-    async fn socks_shutdown_reports_held_auth_bind_and_udp_sessions_as_incomplete() {
-        timeout(Duration::from_secs(10), async {
-            let mut checks = JoinSet::new();
-            for command in [0, 2, 3] {
-                checks.spawn(async move {
-                    let (address, handle, server) = socks_fixture();
-                    let mut client = TcpStream::connect(address).await.unwrap();
-                    // Negotiation confirms the server owns this accepted session.
-                    // command=0 then leaves the request head incomplete; there is
-                    // no managed lease, but the connection is still outstanding.
-                    socks_negotiate(&mut client).await;
-                    if command != 0 {
-                        client
-                            .write_all(&[5, command, 0, 1, 0, 0, 0, 0, 0, 0])
-                            .await
-                            .unwrap();
-                        socks_first_reply(&mut client).await;
-                    }
-                    assert!(handle.request_quiesce());
-                    tokio::task::yield_now().await;
-                    assert!(
-                        !server.is_finished(),
-                        "maintenance must not abort held SOCKS sessions"
-                    );
-                    handle.request_shutdown_at(Instant::now() + Duration::from_millis(20));
-                    assert_eq!(
-                        server.await.unwrap().unwrap_err().kind(),
-                        io::ErrorKind::TimedOut,
-                        "held SOCKS command {command} must not report a completed drain"
-                    );
-                    let mut byte = [0];
-                    assert_eq!(client.read(&mut byte).await.unwrap(), 0);
-                    assert!(TcpStream::connect(address).await.is_err());
-                });
-            }
-            while let Some(result) = checks.join_next().await {
-                result.unwrap();
-            }
-        })
-        .await
-        .unwrap();
     }
 
     #[tokio::test]

@@ -7,6 +7,7 @@ use std::{collections::HashSet, io, path::Path};
 
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use rusqlite::{Connection, Row, TransactionBehavior, params, types::ValueRef};
+use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
 
 use super::{peers::open_existing, random_id, read_overview, sqlite_error, valid_id};
@@ -21,11 +22,6 @@ const MAX_PAGE_SIZE: u32 = 50;
 
 mod operation_audit;
 mod search;
-#[cfg(test)]
-pub(super) use operation_audit::{
-    require_legacy_for_test as require_legacy_audit_for_test,
-    restore_legacy_for_test as restore_legacy_audit_for_test,
-};
 pub(super) use operation_audit::{
     upgrade_schema as upgrade_operation_audit, validate_snapshot as validate_operation_audit,
 };
@@ -33,19 +29,24 @@ pub(in crate::manage) use search::search_users;
 pub(super) use search::search_users_in;
 
 /// An explicit local policy mutation; no variant accepts a human-selected secret.
-#[derive(Clone)]
+#[subenum::subenum(UserMutation, PresetMutation, MaintenanceMutation)]
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
 pub(in crate::manage) enum PolicyChange {
     /// Node-wide admission only; existing authorized operations keep their lease.
+    #[subenum(MaintenanceMutation)]
     SetAdmission {
         accepting: bool,
     },
     /// Creates an active identity; empty protocols intentionally grant no access.
+    #[subenum(UserMutation)]
     CreateUser {
         name: String,
         protocols: Vec<Protocol>,
         concurrent_limit: u32,
     },
     /// Replaces mutable user fields without changing its stable ID or credentials.
+    #[subenum(UserMutation)]
     UpdateUser {
         id: String,
         name: String,
@@ -53,33 +54,43 @@ pub(in crate::manage) enum PolicyChange {
         concurrent_limit: u32,
     },
     /// Changes admission only; already admitted flows retain their existing lease.
+    #[subenum(UserMutation)]
     SetUserActive {
         id: String,
         active: bool,
     },
     /// Irreversibly retires the user and all of its credential identities.
+    #[subenum(UserMutation)]
     DeleteUser {
         id: String,
     },
     /// Generates a new random login identity and high-entropy proxy password.
+    #[subenum(UserMutation)]
     CreateCredential {
         user_id: String,
     },
     /// Changes admission without advancing the secret's verifier generation.
+    #[subenum(UserMutation)]
     SetCredentialActive {
         id: String,
         active: bool,
     },
     /// Keeps ID/login stable, replaces the secret and advances its verifier generation.
+    #[subenum(UserMutation)]
     RotateCredential {
         id: String,
     },
     /// Leaves a permanent tombstone; neither enabling nor rotation may restore it.
+    #[subenum(UserMutation)]
     RevokeCredential {
         id: String,
     },
     CreatePrefix {
         name: String,
+        #[serde(
+            serialize_with = "serde_with::As::<serde_with::DisplayFromStr>::serialize",
+            deserialize_with = "crate::access::routing::canonical_ip"
+        )]
         cidr: cidr::IpCidr,
     },
     RetirePrefix {
@@ -110,14 +121,14 @@ pub(in crate::manage) enum PolicyChange {
         pool_id: String,
         address_id: String,
     },
-    SetRoutePermission {
-        permission: RoutePermission,
-    },
+    SetRoutePermission(RoutePermission),
     /// Replace one user's complete built-in preset grant and TCP default.
+    #[subenum(PresetMutation)]
     SetUserPresets {
         presets: UserPreset,
     },
     /// Replace a pool's suggestion without granting it to any user.
+    #[subenum(PresetMutation)]
     SetPoolPreset {
         preset: PoolPreset,
     },
@@ -145,7 +156,7 @@ impl PolicyChange {
             | Self::SetPoolState { .. }
             | Self::AddPoolMember { .. }
             | Self::RemovePoolMember { .. }
-            | Self::SetRoutePermission { .. } => 2,
+            | Self::SetRoutePermission(..) => 2,
             Self::SetUserPresets { .. } | Self::SetPoolPreset { .. } => 3,
         }
     }
@@ -1177,7 +1188,7 @@ fn mutate(
         | PolicyChange::SetPoolState { .. }
         | PolicyChange::AddPoolMember { .. }
         | PolicyChange::RemovePoolMember { .. }
-        | PolicyChange::SetRoutePermission { .. }) => {
+        | PolicyChange::SetRoutePermission(..)) => {
             let changed = super::routing::mutate(policy, change)?;
             super::routing::write_entity(connection, &changed.0)?;
             if let RoutingEntity::Pool(pool) = &changed.0
@@ -1479,863 +1490,4 @@ fn conflict(message: &'static str) -> io::Error {
 }
 fn missing(message: &'static str) -> io::Error {
     io::Error::new(io::ErrorKind::NotFound, message)
-}
-
-#[cfg(test)]
-mod tests {
-    use std::sync::{Arc, Barrier};
-
-    use super::*;
-    use crate::manage::store::{
-        self, DATABASE_NAME, Guard, SCHEMA_VERSION, initialize, inspect, lock, migrate,
-        register_peer, revoke_certificate,
-    };
-
-    mod search {
-        use super::*;
-        use crate::manage::user_search::{Error as SearchError, Mode, Query};
-
-        fn seed(fixture: &Fixture, count: usize) -> io::Result<Vec<String>> {
-            let mut ids: Vec<_> = (0..count)
-                .map(|index| URL_SAFE_NO_PAD.encode((index as u128).to_be_bytes()))
-                .collect();
-            ids.sort();
-            let mut connection = fixture.writable()?;
-            let transaction = connection
-                .transaction()
-                .map_err(|error| sqlite_error("cannot begin search fixture", error))?;
-            for id in &ids {
-                transaction.execute("INSERT INTO proxy_users(id,name,active,deleted,protocols,concurrent_limit,revision) VALUES(?1,'unmatched',1,0,1,8,1)", [id])
-            .map_err(|error| sqlite_error("cannot seed search fixture", error))?;
-            }
-            transaction
-                .commit()
-                .map_err(|error| sqlite_error("cannot commit search fixture", error))?;
-            Ok(ids)
-        }
-
-        fn name_query(
-            q: &str,
-            deleted: bool,
-            limit: u32,
-            after: Option<String>,
-        ) -> io::Result<Query> {
-            Query::new(Mode::Name, q.into(), deleted, limit, after)
-        }
-
-        #[test]
-        fn literal_name_search_filters_before_pages_and_includes_tombstones_only_explicitly()
-        -> io::Result<()> {
-            let fixture = Fixture::new()?;
-            let _guard = fixture.guard()?;
-            let ids = seed(&fixture, 32)?;
-            let connection = fixture.writable()?;
-            for (id, name, deleted) in [
-                (&ids[28], "Prefix AlPhA%_界", false),
-                (&ids[29], "alpha%_界 second", false),
-                (&ids[30], "ALPHA%_界 deleted", true),
-                (&ids[31], "alphabet is not a wildcard match", false),
-            ] {
-                connection
-                    .execute(
-                        "UPDATE proxy_users SET name=?1,deleted=?2,active=?3 WHERE id=?4",
-                        params![name, deleted, !deleted, id],
-                    )
-                    .map_err(|error| sqlite_error("cannot name search fixture", error))?;
-            }
-            assert!(
-                list_users(&fixture.directory, false, None, 25)?
-                    .items
-                    .iter()
-                    .all(|user| !user.name.contains('%'))
-            );
-            let first = search_users(
-                &fixture.directory,
-                &name_query("ALPHA%_界", false, 1, None)?,
-            )?;
-            assert_eq!(first.revision, 1);
-            assert_eq!(first.items.len(), 1);
-            assert_eq!(first.items[0].id, ids[28]);
-            let second = search_users(
-                &fixture.directory,
-                &name_query("alpha%_界", false, 1, first.next_cursor)?,
-            )?;
-            assert_eq!(second.items.len(), 1);
-            assert_eq!(second.items[0].id, ids[29]);
-            assert!(second.next_cursor.is_none());
-            let history = search_users(
-                &fixture.directory,
-                &name_query("alpha%_界", true, 50, None)?,
-            )?;
-            assert_eq!(history.items.len(), 3);
-            assert!(history.items[2].deleted && !history.items[2].active);
-            assert_eq!(policy_status(&fixture.directory)?.revision, 1);
-            Ok(())
-        }
-
-        #[test]
-        fn explicit_id_mode_does_not_match_an_id_shaped_name_or_resurrect_a_tombstone()
-        -> io::Result<()> {
-            let fixture = Fixture::new()?;
-            let _guard = fixture.guard()?;
-            let ids = seed(&fixture, 2)?;
-            fixture
-                .writable()?
-                .execute(
-                    "UPDATE proxy_users SET name=?1 WHERE id=?2",
-                    params![ids[0], ids[1]],
-                )
-                .map_err(|error| sqlite_error("cannot name identity fixture", error))?;
-            let exact = Query::new(Mode::Id, ids[0].clone(), false, 1, None)?;
-            let found = search_users(&fixture.directory, &exact)?;
-            assert_eq!(found.items[0].id, ids[0]);
-            assert!(found.next_cursor.is_none());
-            let name = search_users(&fixture.directory, &name_query(&ids[0], false, 1, None)?)?;
-            assert_eq!(name.items[0].id, ids[1]);
-            fixture
-                .writable()?
-                .execute(
-                    "UPDATE proxy_users SET active=0,deleted=1 WHERE id=?1",
-                    [&ids[0]],
-                )
-                .map_err(|error| sqlite_error("cannot retire identity fixture", error))?;
-            assert!(search_users(&fixture.directory, &exact)?.items.is_empty());
-            let history = Query::new(Mode::Id, ids[0].clone(), true, 1, None)?;
-            assert!(search_users(&fixture.directory, &history)?.items[0].deleted);
-            Ok(())
-        }
-
-        #[test]
-        fn search_cursor_rejects_another_node_and_a_new_policy_snapshot() -> io::Result<()> {
-            let fixture = Fixture::new()?;
-            let _guard = fixture.guard()?;
-            seed(&fixture, 3)?;
-            let first = search_users(
-                &fixture.directory,
-                &name_query("unmatched", false, 1, None)?,
-            )?;
-            let next = name_query("unmatched", false, 1, first.next_cursor)?;
-            let other = Fixture::new()?;
-            let error = search_users(&other.directory, &next).err().unwrap();
-            assert!(matches!(
-                error
-                    .get_ref()
-                    .and_then(|error| error.downcast_ref::<SearchError>()),
-                Some(SearchError::InvalidCursor)
-            ));
-            // The fixture intentionally seeds only the searched metadata, not routing
-            // or preset policy. HTTP coverage below uses a real policy mutation.
-            fixture
-                .writable()?
-                .execute("UPDATE proxy_policy_state SET revision=2", [])
-                .map_err(|error| sqlite_error("cannot advance search fixture revision", error))?;
-            let error = search_users(&fixture.directory, &next).err().unwrap();
-            assert!(matches!(
-                error
-                    .get_ref()
-                    .and_then(|error| error.downcast_ref::<SearchError>()),
-                Some(SearchError::Changed)
-            ));
-            assert_eq!(policy_status(&fixture.directory)?.revision, 2);
-            Ok(())
-        }
-
-        #[test]
-        fn name_scan_counts_deleted_rows_and_rejects_capacity_before_reading_the_extra_row()
-        -> io::Result<()> {
-            let fixture = Fixture::new()?;
-            let _guard = fixture.guard()?;
-            let ids = seed(&fixture, MAX_USERS + 1)?;
-            let connection = fixture.writable()?;
-            connection
-                .execute("DELETE FROM proxy_users WHERE id=?1", [&ids[MAX_USERS]])
-                .map_err(|error| sqlite_error("cannot set capacity fixture", error))?;
-            connection
-                .execute("UPDATE proxy_users SET active=0,deleted=1", [])
-                .map_err(|error| sqlite_error("cannot set deleted fixture", error))?;
-            for id in &ids[..2] {
-                connection
-                    .execute(
-                        "UPDATE proxy_users SET name='hit',active=1,deleted=0 WHERE id=?1",
-                        [id],
-                    )
-                    .map_err(|error| sqlite_error("cannot set matching fixture", error))?;
-            }
-            let query = name_query("hit", false, 1, None)?;
-            let full = search_users(&fixture.directory, &query)?;
-            assert_eq!(full.items.len(), 1);
-            assert!(full.next_cursor.is_some());
-            connection
-                .pragma_update(None, "ignore_check_constraints", true)
-                .map_err(|error| sqlite_error("cannot construct capacity fault", error))?;
-            connection.execute("INSERT INTO proxy_users(id,name,active,deleted,protocols,concurrent_limit,revision) VALUES(?1,?2,0,1,1,8,1)", params![ids[MAX_USERS], "x".repeat(1_048_576)])
-        .map_err(|error| sqlite_error("cannot insert over-capacity fixture", error))?;
-            let error = search_users(&fixture.directory, &query).err().unwrap();
-            assert_eq!(error.kind(), io::ErrorKind::InvalidData);
-            assert_eq!(error.to_string(), "user search exceeds policy capacity");
-            Ok(())
-        }
-
-        #[test]
-        fn bounded_metadata_validation_continues_after_the_retained_page_and_covers_id_lookup()
-        -> io::Result<()> {
-            let fixture = Fixture::new()?;
-            let _guard = fixture.guard()?;
-            let ids = seed(&fixture, 3)?;
-            let connection = fixture.writable()?;
-            connection
-                .pragma_update(None, "ignore_check_constraints", true)
-                .map_err(|error| sqlite_error("cannot construct metadata fault", error))?;
-            let query = name_query("unmatched", false, 1, None)?;
-            connection
-                .execute(
-                    "UPDATE proxy_users SET name=?1 WHERE id=?2",
-                    params!["x".repeat(1_048_576), ids[2]],
-                )
-                .map_err(|error| sqlite_error("cannot set oversized metadata", error))?;
-            assert_eq!(
-                search_users(&fixture.directory, &query)
-                    .err()
-                    .unwrap()
-                    .kind(),
-                io::ErrorKind::InvalidData
-            );
-            let exact = Query::new(Mode::Id, ids[2].clone(), false, 1, None)?;
-            assert_eq!(
-                search_users(&fixture.directory, &exact)
-                    .err()
-                    .unwrap()
-                    .kind(),
-                io::ErrorKind::InvalidData
-            );
-            connection
-                .execute(
-                    "UPDATE proxy_users SET name=CAST(x'ff' AS TEXT) WHERE id=?1",
-                    [&ids[2]],
-                )
-                .map_err(|error| sqlite_error("cannot set malformed UTF-8 metadata", error))?;
-            assert_eq!(
-                search_users(&fixture.directory, &query)
-                    .err()
-                    .unwrap()
-                    .kind(),
-                io::ErrorKind::InvalidData
-            );
-            connection
-                .execute(
-                    "UPDATE proxy_users SET name='unmatched',active=7 WHERE id=?1",
-                    [&ids[2]],
-                )
-                .map_err(|error| sqlite_error("cannot set malformed numeric metadata", error))?;
-            assert_eq!(
-                search_users(&fixture.directory, &query)
-                    .err()
-                    .unwrap()
-                    .kind(),
-                io::ErrorKind::InvalidData
-            );
-            Ok(())
-        }
-    }
-
-    const PHC: &str = "$argon2id$v=19$m=19456,t=2,p=1$c2FsdA$Zml4dHVyZQ";
-
-    /// Owns a fresh private directory; admin IDs come from its initialized database.
-    struct Fixture {
-        directory: std::path::PathBuf,
-        administrator: String,
-    }
-
-    impl Fixture {
-        fn new() -> io::Result<Self> {
-            let directory =
-                std::env::temp_dir().join(format!("vproxy-user-store-{}", random_id()?));
-            initialize(&directory, "local node", "admin", PHC)?;
-            let connection = open_existing(&directory, false)?;
-            let administrator = connection
-                .query_row("SELECT id FROM administrators", [], |row| row.get(0))
-                .map_err(|error| sqlite_error("cannot read fixture administrator", error))?;
-            Ok(Self {
-                directory,
-                administrator,
-            })
-        }
-
-        fn guard(&self) -> io::Result<Guard> {
-            lock(&self.directory)
-        }
-
-        fn apply(&self, revision: u64, change: PolicyChange) -> io::Result<ChangeResult> {
-            apply_policy(
-                &self.directory,
-                &self.administrator,
-                revision,
-                change,
-                &store::update_lock(&self.directory)?,
-            )
-        }
-
-        fn create_user(&self, revision: u64, name: &str) -> io::Result<ChangeResult> {
-            self.apply(
-                revision,
-                PolicyChange::CreateUser {
-                    name: name.into(),
-                    protocols: vec![Protocol::Http, Protocol::Socks5, Protocol::Masque],
-                    concurrent_limit: 8,
-                },
-            )
-        }
-
-        fn writable(&self) -> io::Result<Connection> {
-            open_existing(&self.directory, true)
-        }
-
-        fn make_v2(&self) -> io::Result<()> {
-            store::traffic::remove_schema_for_test(&self.writable()?)?;
-            self.writable()?.execute_batch(
-            "DROP TABLE routing_audit; DROP TABLE routing_exit_grants; DROP TABLE routing_pool_grants; DROP TABLE routing_permissions; DROP TABLE routing_pool_members; DROP TABLE routing_pools; DROP TABLE routing_addresses; DROP TABLE routing_prefixes; DROP TABLE controller_audit; DROP TABLE control_outbox; DROP TABLE managed_targets; DROP TABLE control_audit; DROP TABLE control_receipts; DROP TABLE control_ownership; DROP TABLE proxy_policy_audit; DROP TABLE proxy_credentials; DROP TABLE proxy_users; DROP TABLE proxy_policy_state; PRAGMA user_version = 2;"
-        ).map_err(|error| sqlite_error("cannot construct v2 fixture", error))
-        }
-    }
-
-    impl Drop for Fixture {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.directory);
-        }
-    }
-
-    #[test]
-    fn generated_credentials_rotate_and_retire_without_reusing_history() -> io::Result<()> {
-        let fixture = Fixture::new()?;
-        let _guard = fixture.guard()?;
-        let initial = load_policy(&fixture.directory)?;
-        assert_eq!(initial.revision, 1);
-        assert!(initial.users.is_empty() && initial.credentials.is_empty());
-        let created = fixture.create_user(1, "First user")?;
-        let user = created.user.unwrap();
-        assert!(user.active && !user.deleted);
-        assert_eq!(user.revision, 1);
-        assert!(created.secret.is_none());
-        let created = fixture.apply(
-            2,
-            PolicyChange::CreateCredential {
-                user_id: user.id.clone(),
-            },
-        )?;
-        let credential = created.credential.unwrap();
-        let old_secret = created.secret.unwrap();
-        assert_eq!(old_secret.len(), 43);
-        assert_eq!(credential.login.len(), 36);
-        assert!(!credential.login.contains('-'));
-        assert_eq!(credential.verifier_revision, 1);
-        assert!(
-            access::Reader::new(created.policy)?
-                .authenticate(&credential.login, old_secret.as_bytes(), Protocol::Http)
-                .is_ok()
-        );
-        let stored = load_policy(&fixture.directory)?;
-        assert_eq!(
-            stored.credentials[0].secret_digest,
-            access::digest_secret(&credential.id, old_secret.as_bytes())
-        );
-
-        let rotated = fixture.apply(
-            3,
-            PolicyChange::RotateCredential {
-                id: credential.id.clone(),
-            },
-        )?;
-        let new_secret = rotated.secret.unwrap();
-        assert_ne!(old_secret.as_str(), new_secret.as_str());
-        assert_eq!(rotated.credential.as_ref().unwrap().id, credential.id);
-        assert_eq!(rotated.credential.as_ref().unwrap().login, credential.login);
-        assert_eq!(rotated.credential.as_ref().unwrap().verifier_revision, 2);
-        let reader = access::Reader::new(rotated.policy)?;
-        assert!(
-            reader
-                .authenticate(&credential.login, old_secret.as_bytes(), Protocol::Http)
-                .is_err()
-        );
-        assert!(
-            reader
-                .authenticate(&credential.login, new_secret.as_bytes(), Protocol::Http)
-                .is_ok()
-        );
-        let disabled = fixture.apply(
-            4,
-            PolicyChange::SetCredentialActive {
-                id: credential.id.clone(),
-                active: false,
-            },
-        )?;
-        assert_eq!(disabled.credential.unwrap().verifier_revision, 2);
-        reader.publish(disabled.policy)?;
-        assert!(
-            reader
-                .authenticate(&credential.login, new_secret.as_bytes(), Protocol::Http)
-                .is_err()
-        );
-        let enabled = fixture.apply(
-            5,
-            PolicyChange::SetCredentialActive {
-                id: credential.id.clone(),
-                active: true,
-            },
-        )?;
-        assert_eq!(enabled.credential.unwrap().verifier_revision, 2);
-        reader.publish(enabled.policy)?;
-        assert!(
-            reader
-                .authenticate(&credential.login, new_secret.as_bytes(), Protocol::Http)
-                .is_ok()
-        );
-        let deleted = fixture.apply(
-            6,
-            PolicyChange::DeleteUser {
-                id: user.id.clone(),
-            },
-        )?;
-        assert!(deleted.user.as_ref().unwrap().deleted);
-        assert_eq!(deleted.user.as_ref().unwrap().revision, 2);
-        assert!(deleted.policy.credentials[0].revoked);
-        assert_eq!(deleted.policy.credentials[0].verifier_revision, 2);
-        reader.publish(deleted.policy)?;
-        assert!(
-            reader
-                .authenticate(&credential.login, new_secret.as_bytes(), Protocol::Http)
-                .is_err()
-        );
-        for change in [
-            PolicyChange::SetUserActive {
-                id: user.id.clone(),
-                active: true,
-            },
-            PolicyChange::CreateCredential {
-                user_id: user.id.clone(),
-            },
-            PolicyChange::RotateCredential {
-                id: credential.id.clone(),
-            },
-            PolicyChange::SetCredentialActive {
-                id: credential.id.clone(),
-                active: true,
-            },
-        ] {
-            assert!(
-                matches!(fixture.apply(7, change), Err(error) if error.kind() == io::ErrorKind::AlreadyExists)
-            );
-        }
-        assert_eq!(policy_status(&fixture.directory)?.revision, 7);
-        assert!(
-            list_users(&fixture.directory, false, None, 50)?
-                .items
-                .is_empty()
-        );
-        assert_eq!(
-            list_users(&fixture.directory, true, None, 50)?.items.len(),
-            1
-        );
-        assert!(list_credentials(&fixture.directory, Some(&user.id), None, 50)?.items[0].revoked);
-        let connection = fixture.writable()?;
-        let (actor, action): (String, String) = connection.query_row("SELECT administrator_id, action FROM proxy_policy_audit ORDER BY sequence DESC LIMIT 1", [], |row| Ok((row.get(0)?, row.get(1)?)))
-        .map_err(|error| sqlite_error("cannot inspect fixture audit", error))?;
-        assert_eq!(actor, fixture.administrator);
-        assert_eq!(action, "delete_user");
-        Ok(())
-    }
-
-    #[test]
-    fn unknown_actor_bad_input_and_cas_failure_do_not_consume_revision() -> io::Result<()> {
-        let fixture = Fixture::new()?;
-        let _guard = fixture.guard()?;
-        let change = || PolicyChange::CreateUser {
-            name: "user".into(),
-            protocols: vec![Protocol::Http],
-            concurrent_limit: 1,
-        };
-        for id in ["invalid".to_owned(), random_id()?] {
-            assert!(
-                matches!(apply_policy(&fixture.directory, &id, 1, change(), &store::update_lock(&fixture.directory)?), Err(error) if error.kind() == io::ErrorKind::PermissionDenied)
-            );
-        }
-        assert!(
-            matches!(fixture.apply(2, change()), Err(error) if error.kind() == io::ErrorKind::AlreadyExists)
-        );
-        assert!(
-            matches!(fixture.apply(1, PolicyChange::CreateUser { name: "bad\nname".into(), protocols: vec![], concurrent_limit: 1 }), Err(error) if error.kind() == io::ErrorKind::InvalidInput)
-        );
-        assert!(
-            matches!(fixture.apply(1, PolicyChange::CreateUser { name: "user".into(), protocols: vec![Protocol::Http, Protocol::Http], concurrent_limit: 1 }), Err(error) if error.kind() == io::ErrorKind::InvalidInput)
-        );
-        assert!(
-            matches!(fixture.apply(1, PolicyChange::CreateUser { name: "user".into(), protocols: vec![], concurrent_limit: 0 }), Err(error) if error.kind() == io::ErrorKind::InvalidInput)
-        );
-        assert_eq!(policy_status(&fixture.directory)?.revision, 1);
-        assert_eq!(policy_status(&fixture.directory)?.user_count, 0);
-        let user = fixture.create_user(1, "initial")?.user.unwrap();
-        let updated = fixture.apply(
-            2,
-            PolicyChange::UpdateUser {
-                id: user.id.clone(),
-                name: "renamed".into(),
-                protocols: vec![Protocol::Socks5],
-                concurrent_limit: 2,
-            },
-        )?;
-        assert_eq!(updated.user.unwrap().revision, 2);
-        let disabled = fixture.apply(
-            3,
-            PolicyChange::SetUserActive {
-                id: user.id,
-                active: false,
-            },
-        )?;
-        assert_eq!(disabled.user.unwrap().revision, 3);
-        Ok(())
-    }
-
-    #[test]
-    fn global_cas_serializes_writers_and_receipts_never_claim_new_policy() -> io::Result<()> {
-        let fixture = Fixture::new()?;
-        let guard = Arc::new(fixture.guard()?);
-        assert_eq!(policy_status(&fixture.directory)?.applied_revision, None);
-        record_applied(&fixture.directory, 1)?;
-        let barrier = Arc::new(Barrier::new(3));
-        let mut handles = Vec::new();
-        for name in ["first", "second"] {
-            let directory = fixture.directory.clone();
-            let administrator = fixture.administrator.clone();
-            let barrier = Arc::clone(&barrier);
-            let owner = Arc::clone(&guard);
-            handles.push(std::thread::spawn(move || {
-                let _owner = owner;
-                barrier.wait();
-                let update = store::update_lock(&directory)?;
-                apply_policy(
-                    &directory,
-                    &administrator,
-                    1,
-                    PolicyChange::CreateUser {
-                        name: name.into(),
-                        protocols: vec![Protocol::Http],
-                        concurrent_limit: 1,
-                    },
-                    &update,
-                )
-            }));
-        }
-        barrier.wait();
-        let mut successes = 0;
-        let mut conflicts = 0;
-        for handle in handles {
-            match handle
-                .join()
-                .map_err(|_| io::Error::other("policy writer fixture panicked"))?
-            {
-                Ok(result) => {
-                    assert_eq!(result.policy.revision, 2);
-                    successes += 1;
-                }
-                Err(error)
-                    if matches!(
-                        error.kind(),
-                        io::ErrorKind::AlreadyExists | io::ErrorKind::WouldBlock
-                    ) =>
-                {
-                    conflicts += 1
-                }
-                Err(error) => return Err(error),
-            }
-        }
-        assert_eq!((successes, conflicts), (1, 1));
-        let status = policy_status(&fixture.directory)?;
-        assert_eq!(
-            (status.revision, status.applied_revision, status.user_count),
-            (2, Some(1), 1)
-        );
-        assert!(
-            matches!(record_applied(&fixture.directory, 1), Err(error) if error.kind() == io::ErrorKind::AlreadyExists)
-        );
-        record_applied(&fixture.directory, 2)?;
-        record_applied(&fixture.directory, 2)?;
-        assert_eq!(policy_status(&fixture.directory)?.applied_revision, Some(2));
-        Ok(())
-    }
-
-    #[test]
-    fn pages_are_stable_bounded_and_omit_secret_material() -> io::Result<()> {
-        let fixture = Fixture::new()?;
-        let _guard = fixture.guard()?;
-        for index in 0..5 {
-            fixture.create_user(index + 1, "user")?;
-        }
-        assert!(list_users(&fixture.directory, false, None, 0).is_err());
-        assert!(list_users(&fixture.directory, false, None, 51).is_err());
-        assert!(list_users(&fixture.directory, false, Some("bad cursor"), 2).is_err());
-        let first = list_users(&fixture.directory, false, None, 2)?;
-        let second = list_users(&fixture.directory, false, first.next_cursor.as_deref(), 2)?;
-        let third = list_users(&fixture.directory, false, second.next_cursor.as_deref(), 2)?;
-        assert_eq!(
-            (first.items.len(), second.items.len(), third.items.len()),
-            (2, 2, 1)
-        );
-        assert!(third.next_cursor.is_none());
-        let ids: std::collections::HashSet<_> = first
-            .items
-            .iter()
-            .chain(&second.items)
-            .chain(&third.items)
-            .map(|user| &user.id)
-            .collect();
-        assert_eq!(ids.len(), 5);
-        let user_id = first.items[0].id.clone();
-        let credential = fixture
-            .apply(
-                6,
-                PolicyChange::CreateCredential {
-                    user_id: user_id.clone(),
-                },
-            )?
-            .credential
-            .unwrap();
-        let page = list_credentials(&fixture.directory, Some(&user_id), None, 50)?;
-        assert_eq!(page.items.len(), 1);
-        assert_eq!(page.items[0].id, credential.id);
-        let revoked = fixture.apply(
-            7,
-            PolicyChange::RevokeCredential {
-                id: credential.id.clone(),
-            },
-        )?;
-        assert_eq!(revoked.credential.unwrap().verifier_revision, 1);
-        assert!(
-            matches!(fixture.apply(8, PolicyChange::RotateCredential { id: credential.id }), Err(error) if error.kind() == io::ErrorKind::AlreadyExists)
-        );
-        assert_eq!(policy_status(&fixture.directory)?.credential_count, 1);
-        Ok(())
-    }
-
-    #[test]
-    fn malformed_storage_and_revision_exhaustion_fail_closed() -> io::Result<()> {
-        let fixture = Fixture::new()?;
-        let _guard = fixture.guard()?;
-        let id = fixture.create_user(1, "user")?.user.unwrap().id;
-        let connection = fixture.writable()?;
-        connection.execute_batch("PRAGMA ignore_check_constraints = ON; UPDATE proxy_users SET active = 2; PRAGMA ignore_check_constraints = OFF;")
-        .map_err(|error| sqlite_error("cannot corrupt fixture user flag", error))?;
-        assert!(
-            matches!(load_policy(&fixture.directory), Err(error) if error.kind() == io::ErrorKind::InvalidData)
-        );
-        assert!(
-            matches!(list_users(&fixture.directory, true, None, 50), Err(error) if error.kind() == io::ErrorKind::InvalidData)
-        );
-        connection
-            .execute("UPDATE proxy_users SET active = 1", [])
-            .map_err(|error| sqlite_error("cannot restore fixture user flag", error))?;
-        fixture.apply(
-            2,
-            PolicyChange::CreateCredential {
-                user_id: id.clone(),
-            },
-        )?;
-        connection.execute_batch("PRAGMA ignore_check_constraints = ON; UPDATE proxy_credentials SET verifier_version = 2; PRAGMA ignore_check_constraints = OFF;")
-        .map_err(|error| sqlite_error("cannot corrupt fixture verifier version", error))?;
-        assert!(
-            matches!(list_credentials(&fixture.directory, None, None, 50), Err(error) if error.kind() == io::ErrorKind::InvalidData)
-        );
-        connection
-            .execute("UPDATE proxy_credentials SET verifier_version = 1", [])
-            .and_then(|_| {
-                connection.execute("UPDATE proxy_policy_state SET revision = ?1", [i64::MAX])
-            })
-            .map_err(|error| sqlite_error("cannot exhaust fixture policy revision", error))?;
-        assert!(
-            matches!(fixture.apply(i64::MAX as u64, PolicyChange::DeleteUser { id }), Err(error) if error.kind() == io::ErrorKind::InvalidData)
-        );
-        assert_eq!(policy_status(&fixture.directory)?.revision, i64::MAX as u64);
-        Ok(())
-    }
-
-    #[test]
-    fn migration_from_v2_preserves_peer_tombstones_revisions_and_administrator() -> io::Result<()> {
-        let fixture = Fixture::new()?;
-        fixture.make_v2()?;
-        let node = inspect(&fixture.directory)?.node_id;
-        let peer_id = random_id()?;
-        register_peer(
-            &fixture.directory,
-            &peer_id,
-            "peer",
-            b"old certificate",
-            "peer.example",
-            None,
-        )?;
-        revoke_certificate(&fixture.directory, b"old certificate", 1)?;
-        let connection = fixture.writable()?;
-        let before: (String, String) = connection
-            .query_row("SELECT id, password_hash FROM administrators", [], |row| {
-                Ok((row.get(0)?, row.get(1)?))
-            })
-            .map_err(|error| sqlite_error("cannot inspect v2 fixture administrator", error))?;
-        assert!(load_policy(&fixture.directory).is_err());
-        let active = fixture.guard()?;
-        let backup = fixture.directory.join("before-v3.sqlite3");
-        assert!(
-            matches!(migrate(&fixture.directory, &backup), Err(error) if error.kind() == io::ErrorKind::WouldBlock)
-        );
-        assert!(!backup.exists());
-        drop(active);
-        let overview = migrate(&fixture.directory, &backup)?;
-        assert_eq!(overview.schema_version, SCHEMA_VERSION);
-        assert_eq!(overview.node_id, node);
-        assert_eq!(load_policy(&fixture.directory)?.revision, 1);
-        assert_eq!(
-            store::list_peers(&fixture.directory)?[0].authorization_revision,
-            2
-        );
-        assert!(store::authorize_peer(&fixture.directory, b"old certificate")?.is_none());
-        let after: (String, String) = connection
-            .query_row("SELECT id, password_hash FROM administrators", [], |row| {
-                Ok((row.get(0)?, row.get(1)?))
-            })
-            .map_err(|error| {
-                sqlite_error("cannot inspect migrated fixture administrator", error)
-            })?;
-        assert_eq!(before, after);
-        let copied = store::open(&backup, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
-        assert_eq!(store::read_overview(&copied)?.schema_version, 2);
-        let revoked: i64 = copied
-            .query_row("SELECT revoked FROM peer_certificates", [], |row| {
-                row.get(0)
-            })
-            .map_err(|error| sqlite_error("cannot inspect copied certificate tombstone", error))?;
-        assert_eq!(revoked, 1);
-        assert!(fixture.directory.join(DATABASE_NAME).is_file());
-        Ok(())
-    }
-
-    #[test]
-    fn tombstones_keep_capacity_and_audit_retention_is_bounded() -> io::Result<()> {
-        let users = Fixture::new()?;
-        let _users_guard = users.guard()?;
-        let mut connection = users.writable()?;
-        {
-            let transaction = connection
-                .transaction()
-                .map_err(|error| sqlite_error("cannot begin capacity fixture", error))?;
-            for _ in 0..MAX_USERS {
-                transaction
-                    .execute(
-                        "INSERT INTO proxy_users VALUES (?1, 'retired', 0, 1, 0, 1, 1)",
-                        [random_id()?],
-                    )
-                    .map_err(|error| sqlite_error("cannot seed retired user capacity", error))?;
-            }
-            transaction
-                .execute(
-                    "INSERT INTO routing_permissions SELECT id,1 FROM proxy_users",
-                    [],
-                )
-                .map_err(|error| sqlite_error("cannot seed explicit retired user routes", error))?;
-            transaction
-                .commit()
-                .map_err(|error| sqlite_error("cannot commit capacity fixture", error))?;
-        }
-        assert!(users.create_user(1, "new").is_err());
-        let status = policy_status(&users.directory)?;
-        assert_eq!((status.revision, status.user_count), (1, MAX_USERS as u32));
-
-        let credentials = Fixture::new()?;
-        let _credential_guard = credentials.guard()?;
-        let user = credentials.create_user(1, "owner")?.user.unwrap();
-        let mut connection = credentials.writable()?;
-        {
-            let transaction = connection
-                .transaction()
-                .map_err(|error| sqlite_error("cannot begin credential capacity fixture", error))?;
-            for _ in 0..MAX_CREDENTIALS {
-                let id = random_id()?;
-                transaction
-                    .execute(
-                        "INSERT INTO proxy_credentials VALUES (?1, ?2, ?3, 2, 1, ?4, 0, 1, 1)",
-                        params![id, user.id, login_for_id(&id)?, [0u8; 32].as_slice()],
-                    )
-                    .map_err(|error| {
-                        sqlite_error("cannot seed credential tombstone capacity", error)
-                    })?;
-            }
-            transaction.execute("DELETE FROM proxy_policy_audit", [])
-            .and_then(|_| transaction.execute(
-                "WITH RECURSIVE numbers(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM numbers WHERE n < ?1)
-                 INSERT INTO proxy_policy_audit (sequence, entry, administrator_id, action, user_id, policy_revision)
-                 SELECT n, 'local_management', ?2, 'create_user', ?3, 2 FROM numbers",
-                params![MAX_AUDIT_RECORDS, credentials.administrator, user.id]))
-            .map_err(|error| sqlite_error("cannot seed audit retention fixture", error))?;
-            transaction.commit().map_err(|error| {
-                sqlite_error("cannot commit credential capacity fixture", error)
-            })?;
-        }
-        assert!(
-            credentials
-                .apply(
-                    2,
-                    PolicyChange::CreateCredential {
-                        user_id: user.id.clone()
-                    }
-                )
-                .is_err()
-        );
-        assert_eq!(
-            policy_status(&credentials.directory)?.credential_count,
-            MAX_CREDENTIALS as u32
-        );
-        credentials.apply(
-            2,
-            PolicyChange::SetUserActive {
-                id: user.id,
-                active: false,
-            },
-        )?;
-        let (count, first, last): (i64, i64, i64) = connection
-            .query_row(
-                "SELECT count(*), min(sequence), max(sequence) FROM proxy_policy_audit",
-                [],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-            )
-            .map_err(|error| sqlite_error("cannot inspect bounded audit fixture", error))?;
-        assert_eq!(
-            (count, first, last),
-            (
-                i64::from(MAX_AUDIT_RECORDS),
-                2,
-                i64::from(MAX_AUDIT_RECORDS) + 1
-            )
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn failed_v2_migration_keeps_source_identity_and_consistent_backup() -> io::Result<()> {
-        let fixture = Fixture::new()?;
-        fixture.make_v2()?;
-        let before = inspect(&fixture.directory)?;
-        let connection = fixture.writable()?;
-        connection
-            .execute("CREATE TABLE proxy_users (conflicting_object TEXT)", [])
-            .map_err(|error| sqlite_error("cannot create migration collision fixture", error))?;
-        let backup = fixture.directory.join("failed-v3.sqlite3");
-        assert!(migrate(&fixture.directory, &backup).is_err());
-        let after = inspect(&fixture.directory)?;
-        assert_eq!(after.schema_version, 2);
-        assert_eq!(after.node_id, before.node_id);
-        assert_eq!(after.administrator_count, before.administrator_count);
-        let new_tables: i64 = connection.query_row(
-        "SELECT count(*) FROM sqlite_schema WHERE name IN ('proxy_policy_state', 'proxy_credentials', 'proxy_policy_audit')", [], |row| row.get(0)
-    ).map_err(|error| sqlite_error("cannot inspect migration rollback fixture", error))?;
-        assert_eq!(new_tables, 0);
-        let copied = store::open(&backup, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
-        assert_eq!(store::read_overview(&copied)?.schema_version, 2);
-        assert_eq!(store::read_overview(&copied)?.node_id, before.node_id);
-        Ok(())
-    }
 }

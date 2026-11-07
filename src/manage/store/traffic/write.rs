@@ -4,7 +4,7 @@
 
 use std::{collections::HashSet, io, path::Path};
 
-use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
+use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 
 use crate::{
     access::traffic::{PoolSnapshot, SeriesSnapshot},
@@ -23,31 +23,6 @@ use super::{
 // A long collector interruption cannot be attributed to a single UTC window.
 // Cumulative totals remain valid; that interval's detail is explicitly missing.
 const MAX_CLOCK_STEP_MS: u64 = 10 * 60 * 1_000;
-
-/// Source captures at most 2,048 expired rows per resolution (6,144 total).
-/// Together with a 256-sample checkpoint this stays below the journal row cap;
-/// logical retention floors hide the remaining expired rows until later batches.
-#[cfg(feature = "witness-journal")]
-const SOURCE_PRUNE_ROWS: i64 = 2_048;
-
-/// Native removes all expired rows. Source bounds physical deletion while all
-/// readers use the atomically committed logical cutoff, including between batches.
-#[derive(Clone, Copy)]
-pub(super) enum Retention {
-    Complete,
-    #[cfg(feature = "witness-journal")]
-    Batched,
-}
-
-impl Retention {
-    fn limit(self) -> Option<i64> {
-        match self {
-            Self::Complete => None,
-            #[cfg(feature = "witness-journal")]
-            Self::Batched => Some(SOURCE_PRUNE_ROWS),
-        }
-    }
-}
 
 /// Records an open run before real proxy startup. The expected epoch/cursor
 /// must match the restoration used to initialize the live counters. An old open
@@ -72,15 +47,13 @@ pub(in crate::manage) fn start_run(
     Ok(run)
 }
 
-/// Stage the original run/CAS marker in a held transaction. Only the caller's
-/// commit and witness confirmation may make it a live collector run.
-pub(super) fn start_run_in(
-    transaction: &Connection,
+/// Stage the run/CAS marker; the caller commits it before collector startup.
+fn start_run_in(
+    transaction: &Transaction<'_>,
     expected_epoch: &str,
     expected_cursor: u64,
     observed_at: Option<u64>,
 ) -> io::Result<Run> {
-    require_transaction(transaction)?;
     let mut state = state_in(transaction)?;
     if !state.status.http_split {
         return Err(io::Error::new(
@@ -139,14 +112,7 @@ pub(in crate::manage) fn checkpoint(
     let transaction = connection
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(decode_error)?;
-    let status = checkpoint_in(
-        &transaction,
-        run_id,
-        observed_at,
-        samples,
-        pools,
-        Retention::Complete,
-    )?;
+    let status = checkpoint_in(&transaction, run_id, observed_at, samples, pools)?;
     transaction
         .commit()
         .map_err(|error| sqlite_error("cannot commit traffic checkpoint", error))?;
@@ -155,15 +121,13 @@ pub(in crate::manage) fn checkpoint(
 
 /// Stage one already-bounded absolute batch. Run identity, ownership, monotonic
 /// counters, UTC attribution and retention are checked in this same SQL view.
-pub(super) fn checkpoint_in(
-    transaction: &Connection,
+fn checkpoint_in(
+    transaction: &Transaction<'_>,
     run_id: &str,
     observed_at: Option<u64>,
     samples: &[SeriesSnapshot],
     pools: &[PoolSnapshot],
-    retention: Retention,
 ) -> io::Result<Status> {
-    require_transaction(transaction)?;
     let mut state = state_in(transaction)?;
     require_run(&state, run_id, false)?;
     advance_cursor(&mut state)?;
@@ -172,14 +136,8 @@ pub(super) fn checkpoint_in(
         series: state.series_count,
         windows: state.window_count,
     };
-    let limit = retention.limit();
-    if let Some(now) =
-        now.filter(|_| state.status.last_checkpoint_at != observed_at || limit.is_some())
-    {
-        // A Source cycle can contain several 256-sample batches at one instant.
-        // Each gets a bounded cleanup slice, so expired rows cannot consume the
-        // entire capacity while later batches add their current windows.
-        prune_windows(transaction, &mut capacity, &mut state.status, now, limit)?;
+    if let Some(now) = now.filter(|_| state.status.last_checkpoint_at != observed_at) {
+        prune_windows(transaction, &mut capacity, &mut state.status, now)?;
         state.retention_at = Some(now);
     }
     let node_id = state.status.node_id.clone();
@@ -311,12 +269,11 @@ pub(in crate::manage) fn finish(
 
 /// Close only the matching run after forwarding has stopped. A repeated close
 /// is read-only; an error cannot fabricate a clean marker.
-pub(super) fn finish_in(
-    transaction: &Connection,
+fn finish_in(
+    transaction: &Transaction<'_>,
     run_id: &str,
     observed_at: Option<u64>,
 ) -> io::Result<Status> {
-    require_transaction(transaction)?;
     let mut state = state_in(transaction)?;
     require_run(&state, run_id, true)?;
     if !state.status.clean {
@@ -328,17 +285,7 @@ pub(super) fn finish_in(
     Ok(state.status)
 }
 
-fn require_transaction(connection: &Connection) -> io::Result<()> {
-    if connection.is_autocommit() {
-        return Err(input("traffic write requires a held transaction"));
-    }
-    Ok(())
-}
-
-pub(super) fn validate_checkpoint(
-    samples: &[SeriesSnapshot],
-    pools: &[PoolSnapshot],
-) -> io::Result<()> {
+fn validate_checkpoint(samples: &[SeriesSnapshot], pools: &[PoolSnapshot]) -> io::Result<()> {
     if samples
         .len()
         .checked_add(pools.len())
@@ -553,25 +500,17 @@ fn prune_windows(
     capacity: &mut Capacity,
     status: &mut Status,
     now: u64,
-    limit: Option<i64>,
 ) -> io::Result<()> {
     // Apply a global UTC floor, including dormant/deleted identities. Keeping
     // the last 60 *active* minutes per identity would not be 60-minute retention.
     for resolution in [Resolution::Minute, Resolution::Hour, Resolution::Day] {
         let floor = sql_number(resolution.floor(now))?;
-        let removed = match limit {
-            Some(limit) => connection.execute(
-                "DELETE FROM traffic_windows WHERE rowid IN (
-                 SELECT rowid FROM traffic_windows WHERE resolution=?1 AND window_id<?2
-                 ORDER BY window_id LIMIT ?3)",
-                params![resolution.code(), floor, limit],
-            ),
-            None => connection.execute(
+        let removed = connection
+            .execute(
                 "DELETE FROM traffic_windows WHERE resolution=?1 AND window_id<?2",
                 params![resolution.code(), floor],
-            ),
-        }
-        .map_err(decode_error)?;
+            )
+            .map_err(decode_error)?;
         let removed =
             u64::try_from(removed).map_err(|_| invalid_data("traffic retention count overflow"))?;
         capacity.windows = capacity
@@ -587,33 +526,4 @@ fn prune_windows(
 
 fn conflict(message: &'static str) -> io::Error {
     io::Error::new(io::ErrorKind::WouldBlock, message)
-}
-
-#[cfg(test)]
-pub(super) fn exhausted_budget_for_test(
-    connection: &Connection,
-    status: &mut Status,
-    pool: &str,
-) -> io::Result<bool> {
-    let mut capacity = Capacity {
-        series: 0,
-        windows: MAX_WINDOWS,
-    };
-    add_windows(
-        connection,
-        &mut capacity,
-        status,
-        Subject {
-            scope: 1,
-            id: pool,
-            protocol: 0,
-        },
-        Snapshot {
-            upload: 9,
-            download: 0,
-            saturated: false,
-        },
-        120_000,
-    )?;
-    Ok(capacity.windows == MAX_WINDOWS)
 }

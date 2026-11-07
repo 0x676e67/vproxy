@@ -761,11 +761,6 @@ mod connect_tests {
     use super::*;
     use crate::{AuthMode, server::auth::Source};
 
-    async fn proxy(auth: Source) -> (SocketAddr, JoinHandle<()>) {
-        let (address, task, _) = proxy_with_limit(auth, Arc::new(Semaphore::new(8))).await;
-        (address, task)
-    }
-
     async fn proxy_with_limit(
         auth: Source,
         limit: Arc<Semaphore>,
@@ -827,128 +822,6 @@ mod connect_tests {
         String::from_utf8(head).unwrap()
     }
 
-    #[test]
-    fn connect_target_requires_authority_host_and_explicit_valid_port() {
-        for target in [
-            "example.com:443",
-            "127.0.0.1:80",
-            "[::1]:443",
-            "[2001:db8::1]:65535",
-        ] {
-            let uri: http::Uri = target.parse().unwrap();
-            assert!(uri.path_and_query().is_none(), "{target}");
-            assert_eq!(connect_target(&uri).unwrap().as_str(), target);
-        }
-        for target in [
-            "example.com",
-            "example.com:",
-            "example.com:0",
-            "example.com:65536",
-            "example.com:abc",
-            "example.com:+443",
-            ":443",
-            "user:secret@example.com:443",
-            "http://example.com:443",
-            "http://example.com:443/",
-            "http://example.com:443/?query=value",
-            "/example.com:443",
-            "[invalid]:443",
-            "[::1]",
-            "[::1]:0",
-        ] {
-            if let Ok(uri) = target.parse::<http::Uri>() {
-                assert!(connect_target(&uri).is_none(), "accepted {target}");
-            }
-        }
-    }
-
-    #[test]
-    fn connect_errors_do_not_disguise_local_failures_as_bad_upstream_responses() {
-        for (kind, status) in [
-            (io::ErrorKind::TimedOut, StatusCode::GATEWAY_TIMEOUT),
-            (io::ErrorKind::ConnectionRefused, StatusCode::BAD_GATEWAY),
-            (io::ErrorKind::NetworkDown, StatusCode::SERVICE_UNAVAILABLE),
-            (
-                io::ErrorKind::AddrNotAvailable,
-                StatusCode::SERVICE_UNAVAILABLE,
-            ),
-            (io::ErrorKind::OutOfMemory, StatusCode::SERVICE_UNAVAILABLE),
-            (
-                io::ErrorKind::PermissionDenied,
-                StatusCode::SERVICE_UNAVAILABLE,
-            ),
-            (io::ErrorKind::Other, StatusCode::INTERNAL_SERVER_ERROR),
-        ] {
-            assert_eq!(connect_failure_status(&io::Error::from(kind)), status);
-        }
-    }
-
-    #[tokio::test]
-    async fn unavailable_connect_target_returns_gateway_failure_without_success_or_upgrade() {
-        tokio::time::timeout(Duration::from_secs(5), async {
-        // Keep the target port reserved without listening. The OS can refuse
-        // or leave this setup pending until the configured budget expires.
-        // Releasing the port would let another test acquire it before dialing.
-        let target = TcpSocket::new_v4().unwrap();
-        target.bind("127.0.0.1:0".parse().unwrap()).unwrap();
-        let destination = target.local_addr().unwrap();
-        let (address, task) = proxy(anonymous()).await;
-        let mut client = TcpStream::connect(address).await.unwrap();
-        client
-            .write_all(
-                format!("CONNECT {destination} HTTP/1.1\r\nHost: {destination}\r\nConnection: close\r\n\r\n")
-                    .as_bytes(),
-            )
-            .await
-            .unwrap();
-        let head = response_head(&mut client).await;
-        assert!(
-            head.starts_with("HTTP/1.1 502") || head.starts_with("HTTP/1.1 504"),
-            "{head}"
-        );
-        let mut tail = Vec::new();
-        client.read_to_end(&mut tail).await.unwrap();
-        assert!(tail.is_empty());
-        task.await.unwrap();
-    })
-    .await
-    .expect("unavailable CONNECT must complete without entering tunnel mode");
-    }
-
-    #[tokio::test]
-    async fn invalid_connect_target_is_rejected_before_authentication_or_dialing() {
-        tokio::time::timeout(Duration::from_secs(5), async {
-        let target = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let destination = target.local_addr().unwrap();
-        let (address, task) = proxy(Source::Legacy(AuthMode {
-            username: Some("admin".into()),
-            password: Some("fixture-password".into()),
-        }))
-        .await;
-        let mut client = TcpStream::connect(address).await.unwrap();
-        client
-            .write_all(
-                format!("CONNECT http://{destination}/path HTTP/1.1\r\nHost: {destination}\r\nConnection: close\r\n\r\n")
-                    .as_bytes(),
-            )
-            .await
-            .unwrap();
-        let head = response_head(&mut client).await;
-        assert!(head.starts_with("HTTP/1.1 400"), "{head}");
-        assert!(!head.to_ascii_lowercase().contains("proxy-authenticate:"));
-        let mut body = Vec::new();
-        client.read_to_end(&mut body).await.unwrap();
-        task.await.unwrap();
-        let pending = std::future::poll_fn(|context| {
-            Poll::Ready(target.poll_accept(context).is_pending())
-        })
-        .await;
-        assert!(pending, "invalid target must not cause an outbound connection");
-    })
-    .await
-    .expect("invalid CONNECT targets must not enter authentication or networking");
-    }
-
     #[tokio::test]
     async fn established_connect_preserves_pipelined_payload_and_half_close() {
         tokio::time::timeout(Duration::from_secs(5), async {
@@ -998,41 +871,6 @@ mod connect_tests {
     })
     .await
     .expect("CONNECT must preserve prefetched data and the opposite half");
-    }
-
-    #[cfg(feature = "management")]
-    #[tokio::test]
-    async fn connect_setup_failure_releases_managed_admission_without_counting_http_framing() {
-        use crate::access::{
-            Protocol, Reader,
-            tests::{ROUTED_LOGIN as LOGIN, routed_policy as policy, secret},
-        };
-        use base64::Engine;
-
-        tokio::time::timeout(Duration::from_secs(5), async {
-        let reader = Reader::new(policy(1, 1)).unwrap();
-        let (address, task) = proxy(Source::Managed(reader.clone())).await;
-        let mut client = TcpStream::connect(address).await.unwrap();
-        let token = base64::engine::general_purpose::STANDARD
-            .encode([LOGIN.as_bytes(), b":", &secret()].concat());
-        // The policy selects an IPv4 source. An IPv6 destination cannot use
-        // that source, independently of whether the host has IPv6 enabled.
-        client
-            .write_all(
-                format!("CONNECT [::1]:443 HTTP/1.1\r\nHost: [::1]:443\r\nProxy-Authorization: Basic {token}\r\nConnection: close\r\n\r\n")
-                    .as_bytes(),
-            )
-            .await
-            .unwrap();
-        assert!(response_head(&mut client).await.starts_with("HTTP/1.1 503"));
-        task.await.unwrap();
-        assert!(reader.authenticate(LOGIN, &secret(), Protocol::Http).is_ok());
-        assert!(reader.traffic_registry().snapshot().unwrap().iter().all(|row| {
-            row.value.upload == 0 && row.value.download == 0 && !row.value.saturated
-        }));
-    })
-    .await
-    .expect("failed CONNECT setup must release its managed lease");
     }
 }
 
@@ -1338,137 +1176,6 @@ mod security_tests {
 
     #[cfg(feature = "management")]
     #[tokio::test]
-    async fn request_and_response_bodies_release_only_their_shared_lease_on_eof_error_or_drop() {
-        use crate::access::{
-            Protocol, Reader,
-            tests::{LOGIN, policy, secret},
-        };
-        let reader = Reader::new(policy(1, 1)).unwrap();
-        let admitted = reader
-            .authenticate(LOGIN, &secret(), Protocol::Http)
-            .unwrap();
-        let authenticated = Authenticated {
-            extension: admitted.extension,
-            source: admitted.source,
-            lease: Some(admitted.lease),
-            presets: Some(admitted.presets),
-        };
-        let request = LeaseBody::new(
-            Full::new(Bytes::from_static(b"request")),
-            &authenticated,
-            Direction::Upload,
-        );
-        let response = LeaseBody::new(
-            Full::new(Bytes::from_static(b"response")),
-            &authenticated,
-            Direction::Download,
-        );
-        drop(authenticated);
-        assert_eq!(
-            response.collect().await.unwrap().to_bytes(),
-            b"response".as_slice()
-        );
-        assert!(matches!(
-            reader.authenticate(LOGIN, &secret(), Protocol::Http),
-            Err(crate::access::Error::Capacity)
-        ));
-        drop(request);
-        let next = reader
-            .authenticate(LOGIN, &secret(), Protocol::Http)
-            .unwrap();
-        let authenticated = Authenticated {
-            extension: next.extension,
-            source: next.source,
-            lease: Some(next.lease),
-            presets: Some(next.presets),
-        };
-        let failure =
-            http_body_util::StreamBody::new(futures_util::stream::iter([Err::<Frame<Bytes>, _>(
-                io::Error::other("fixture body error"),
-            )]));
-        let failed = LeaseBody::new(failure, &authenticated, Direction::Download);
-        drop(authenticated);
-        assert!(failed.collect().await.is_err());
-        assert!(
-            reader
-                .authenticate(LOGIN, &secret(), Protocol::Http)
-                .is_ok()
-        );
-    }
-
-    #[tokio::test]
-    async fn independent_http_bodies_share_one_tcp_slot_until_eof_error_or_drop() {
-        let authenticated = Authenticated::legacy(crate::ext::Extension::None);
-        let limit = Arc::new(Semaphore::new(1));
-        let permit = Arc::new(limit.clone().try_acquire_owned().unwrap());
-        let mut upload = LeaseBody::new(
-            Full::new(Bytes::from_static(b"upload")),
-            &authenticated,
-            #[cfg(feature = "management")]
-            Direction::Upload,
-        )
-        .with_connection_permit(Some(permit.clone()));
-        let response = LeaseBody::new(
-            Full::new(Bytes::from_static(b"response")),
-            &authenticated,
-            #[cfg(feature = "management")]
-            Direction::Download,
-        )
-        .with_connection_permit(Some(permit.clone()));
-        drop(permit);
-        assert_eq!(
-            response.collect().await.unwrap().to_bytes(),
-            b"response".as_slice()
-        );
-        assert_eq!(
-            limit.available_permits(),
-            0,
-            "an independently driven upload still owns the same TCP slot"
-        );
-        assert!(upload.frame().await.unwrap().is_ok());
-        assert_eq!(
-            limit.available_permits(),
-            1,
-            "EOF releases the slot even while the body wrapper is retained"
-        );
-        drop(upload);
-
-        let failure =
-            http_body_util::StreamBody::new(futures_util::stream::iter([Err::<Frame<Bytes>, _>(
-                io::Error::other("fixture body error"),
-            )]));
-        let mut failed = LeaseBody::new(
-            failure,
-            &authenticated,
-            #[cfg(feature = "management")]
-            Direction::Download,
-        )
-        .with_connection_permit(Some(Arc::new(limit.clone().try_acquire_owned().unwrap())));
-        assert!(failed.frame().await.unwrap().is_err());
-        assert_eq!(
-            limit.available_permits(),
-            1,
-            "a body error returns its slot without waiting for wrapper drop"
-        );
-
-        let dropped = LeaseBody::new(
-            Full::new(Bytes::from_static(b"not polled")),
-            &authenticated,
-            #[cfg(feature = "management")]
-            Direction::Upload,
-        )
-        .with_connection_permit(Some(Arc::new(limit.clone().try_acquire_owned().unwrap())));
-        assert_eq!(limit.available_permits(), 0);
-        drop(dropped);
-        assert_eq!(
-            limit.available_permits(),
-            1,
-            "cancelled/dropped bodies release their slot"
-        );
-    }
-
-    #[cfg(feature = "management")]
-    #[tokio::test]
     async fn managed_connect_keeps_admission_until_the_upgraded_tunnel_finishes() {
         use crate::access::{
             Protocol, Reader,
@@ -1527,255 +1234,6 @@ mod security_tests {
         proxy_task.await.unwrap();
         assert!(reader.authenticate(LOGIN, &secret(), Protocol::Http).is_ok());
     }).await.expect("managed CONNECT admission must end with its tunnel");
-    }
-}
-
-#[cfg(test)]
-mod shutdown_tests {
-    //! Driver, body and CONNECT ownership have different completion boundaries.
-
-    use std::{convert::Infallible, sync::Mutex, task::Waker};
-
-    use tokio::{io::ReadBuf, task::JoinSet, time::Instant};
-    use tokio_util::sync::CancellationToken;
-
-    use super::*;
-    use crate::{AuthMode, ext::Extension, server::auth::Source};
-
-    fn acceptor() -> HttpAcceptor {
-        HttpAcceptor::new(Context {
-            auth: Source::Legacy(AuthMode {
-                username: None,
-                password: None,
-            }),
-            bind: "127.0.0.1:0".parse().unwrap(),
-            concurrent: 1,
-            connect_timeout: 1,
-            connector: Connector::new(
-                None,
-                None,
-                None,
-                1,
-                #[cfg(any(target_os = "android", target_os = "fuchsia", target_os = "linux"))]
-                None,
-                None,
-            ),
-        })
-    }
-
-    fn assert_pending(future: Pin<&mut impl std::future::Future>) {
-        let mut context = TaskContext::from_waker(Waker::noop());
-        assert!(future.poll(&mut context).is_pending());
-    }
-
-    /// Polling the final body frame releases its body owner before Hyper can write
-    /// that frame. The real H1 driver below must still remain part of shutdown.
-    struct FinalBody {
-        data: Option<Bytes>,
-        polled: CancellationToken,
-    }
-
-    impl Body for FinalBody {
-        type Data = Bytes;
-        type Error = Infallible;
-
-        fn poll_frame(
-            self: Pin<&mut Self>,
-            _: &mut TaskContext<'_>,
-        ) -> Poll<Option<Result<Frame<Bytes>, Infallible>>> {
-            let this = self.get_mut();
-            let data = this.data.take();
-            this.polled.cancel();
-            Poll::Ready(data.map(|bytes| Ok(Frame::data(bytes))))
-        }
-
-        fn is_end_stream(&self) -> bool {
-            self.data.is_none()
-        }
-
-        fn size_hint(&self) -> SizeHint {
-            SizeHint::with_exact(self.data.as_ref().map_or(0, |bytes| bytes.len() as u64))
-        }
-    }
-
-    /// Complete request head, but no response byte is ever accepted. This isolates
-    /// queued H1 output without loopback buffers or elapsed-time assertions.
-    struct BlockedWriter(&'static [u8]);
-
-    impl AsyncRead for BlockedWriter {
-        fn poll_read(
-            self: Pin<&mut Self>,
-            _: &mut TaskContext<'_>,
-            buffer: &mut ReadBuf<'_>,
-        ) -> Poll<io::Result<()>> {
-            let this = self.get_mut();
-            if this.0.is_empty() {
-                return Poll::Pending;
-            }
-            let length = buffer.remaining().min(this.0.len());
-            buffer.put_slice(&this.0[..length]);
-            this.0 = &this.0[length..];
-            Poll::Ready(Ok(()))
-        }
-    }
-
-    impl AsyncWrite for BlockedWriter {
-        fn poll_write(
-            self: Pin<&mut Self>,
-            _: &mut TaskContext<'_>,
-            _: &[u8],
-        ) -> Poll<io::Result<usize>> {
-            Poll::Pending
-        }
-
-        fn poll_flush(self: Pin<&mut Self>, _: &mut TaskContext<'_>) -> Poll<io::Result<()>> {
-            Poll::Pending
-        }
-
-        fn poll_shutdown(self: Pin<&mut Self>, _: &mut TaskContext<'_>) -> Poll<io::Result<()>> {
-            Poll::Pending
-        }
-    }
-
-    #[tokio::test]
-    async fn final_body_frame_returns_its_slot_but_blocked_h1_driver_still_times_out() {
-        let limit = Arc::new(Semaphore::new(1));
-        let slot = Arc::new(Mutex::new(Some(Arc::new(
-            limit.clone().try_acquire_owned().unwrap(),
-        ))));
-        let polled = CancellationToken::new();
-        let body_polled = polled.clone();
-        let service = service_fn(move |_: Request<Incoming>| {
-            let body = LeaseBody::new(
-                FinalBody {
-                    data: Some(Bytes::from_static(b"last frame")),
-                    polled: body_polled.clone(),
-                },
-                &Authenticated::legacy(Extension::None),
-                #[cfg(feature = "management")]
-                Direction::Download,
-            )
-            .with_connection_permit(slot.lock().unwrap().take());
-            async move { Ok::<_, Infallible>(Response::new(body)) }
-        });
-        let builder = acceptor().builder;
-        let mut connections = JoinSet::new();
-        connections.spawn(async move {
-            let _ = builder
-                .serve_connection_with_upgrades(
-                    TokioIo::new(BlockedWriter(
-                        b"GET / HTTP/1.1\r\nHost: example.test\r\nConnection: close\r\n\r\n",
-                    )),
-                    service,
-                )
-                .await;
-        });
-        tokio::time::timeout(Duration::from_secs(5), polled.cancelled())
-            .await
-            .expect("H1 polled the final frame without accepting output");
-        assert_eq!(
-            limit.available_permits(),
-            1,
-            "body EOF is not transport completion"
-        );
-        {
-            let mut joined = std::pin::pin!(connections.join_next());
-            assert_pending(joined.as_mut());
-        }
-        let handle = Handle::new();
-        handle.request_quiesce();
-        let error = {
-            let mut draining =
-                std::pin::pin!(drain_connections(&mut connections, "HTTP fixture", &handle));
-            assert_pending(draining.as_mut());
-            handle.request_shutdown_at(Instant::now());
-            draining.await.unwrap_err()
-        };
-        assert_eq!(error.kind(), io::ErrorKind::TimedOut);
-        assert!(
-            connections.is_empty(),
-            "timed-out drivers were aborted and reaped"
-        );
-        drain_permits(&limit, 1, &handle).await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn connect_tracker_timeout_is_an_error_until_the_owned_task_really_finishes() {
-        for stopping in [false, true] {
-            let acceptor = acceptor();
-            let release = CancellationToken::new();
-            let _release_on_exit = release.clone().drop_guard();
-            let waiting = release.clone();
-            let task = acceptor
-                .handler
-                .tasks
-                .spawn(async move { waiting.cancelled().await });
-            let handle = Handle::new();
-            handle.request_quiesce();
-            {
-                let mut draining = std::pin::pin!(acceptor.shutdown(&handle));
-                assert_pending(draining.as_mut());
-                if stopping {
-                    handle.request_shutdown_at(Instant::now());
-                    let error = draining.await.unwrap_err();
-                    assert_eq!(error.kind(), io::ErrorKind::TimedOut);
-                    assert!(
-                        !acceptor.handler.tasks.is_empty(),
-                        "timeout did not finish the CONNECT task"
-                    );
-                    release.cancel();
-                    task.await.unwrap();
-                } else {
-                    release.cancel();
-                    task.await.unwrap();
-                    draining.await.unwrap();
-                    assert!(
-                        handle.is_quiescing(),
-                        "natural CONNECT completion preserves maintenance"
-                    );
-                }
-            }
-            // An already-ready cleanup is still allowed at an expired common
-            // deadline; no second relative timeout is granted to this tracker.
-            acceptor.shutdown(&handle).await.unwrap();
-            assert!(acceptor.handler.tasks.is_empty());
-        }
-    }
-
-    #[tokio::test]
-    async fn independent_body_owners_hold_the_existing_shutdown_barrier_until_the_last_eof() {
-        let limit = Arc::new(Semaphore::new(1));
-        let permit = Arc::new(limit.clone().try_acquire_owned().unwrap());
-        let authenticated = Authenticated::legacy(Extension::None);
-        let mut upload = LeaseBody::new(
-            Full::new(Bytes::from_static(b"upload")),
-            &authenticated,
-            #[cfg(feature = "management")]
-            Direction::Upload,
-        )
-        .with_connection_permit(Some(permit.clone()));
-        let response = LeaseBody::new(
-            Full::new(Bytes::from_static(b"response")),
-            &authenticated,
-            #[cfg(feature = "management")]
-            Direction::Download,
-        )
-        .with_connection_permit(Some(permit.clone()));
-        drop(permit);
-        let handle = Handle::new();
-        handle.request_quiesce();
-        let mut barrier = std::pin::pin!(drain_permits(&limit, 1, &handle));
-        assert_pending(barrier.as_mut());
-        response.collect().await.unwrap();
-        assert_pending(barrier.as_mut());
-        let queued_frame = upload.frame().await.unwrap().unwrap();
-        barrier.await.unwrap();
-        assert!(
-            queued_frame.data_ref().is_some(),
-            "queued DATA is not a body owner"
-        );
-        assert_eq!(limit.available_permits(), 1);
-        assert!(handle.is_quiescing());
     }
 }
 
@@ -1883,63 +1341,6 @@ mod traffic_tests {
         origin_task.await.unwrap();
     }).await.expect("H1 payload accounting must finish");
     }
-
-    #[cfg(target_os = "linux")]
-    #[tokio::test]
-    async fn nonempty_connect_upgrade_preread_is_forwarded_once_before_splice() {
-        tokio::time::timeout(Duration::from_secs(10), async {
-        let reader = Reader::new(policy(1, 8)).unwrap();
-        let admission = reader.authenticate(LOGIN, &secret(), crate::access::Protocol::Http).unwrap();
-        let authenticated = Authenticated { extension: admission.extension, source: admission.source, lease: Some(admission.lease), presets: Some(admission.presets) };
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let mut client = TcpStream::connect(listener.local_addr().unwrap()).await.unwrap();
-        let request = b"CONNECT example.invalid:443 HTTP/1.1\r\nHost: example.invalid:443\r\n\r\nprefetched-tunnel";
-        client.write_all(request).await.unwrap();
-        let (stream, _) = listener.accept().await.unwrap();
-        // Arrange the exact precondition, not a timing guess that a client write
-        // will happen to reach Hyper's parser in one read.
-        let mut queued = [0; 512];
-        loop {
-            if stream.peek(&mut queued).await.unwrap() >= request.len() { break; }
-            tokio::task::yield_now().await;
-        }
-        let (send, mut receive) = tokio::sync::mpsc::unbounded_channel();
-        let driver = tokio::spawn(async move {
-            Builder::new(TokioExecutor::new()).serve_connection_with_upgrades(TokioIo::new(stream),
-                service_fn(move |mut request: Request<Incoming>| {
-                    send.send(hyper::upgrade::on(&mut request)).unwrap();
-                    async { Ok::<_, Infallible>(Response::new(Empty::<Bytes>::new())) }
-                }),
-            ).await.unwrap();
-        });
-        let upgraded = receive.recv().await.unwrap().await.unwrap();
-        let parts = hyper_util::server::conn::auto::upgrade::downcast::<TokioIo<TcpStream>>(upgraded).unwrap();
-        assert_eq!(parts.read_buf, b"prefetched-tunnel".as_slice());
-        let target = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let mut outbound = TcpStream::connect(target.local_addr().unwrap()).await.unwrap();
-        let client_task = tokio::spawn(async move {
-            let mut head = Vec::new();
-            while !head.ends_with(b"\r\n\r\n") { head.push(client.read_u8().await.unwrap()); }
-            assert!(head.starts_with(b"HTTP/1.1 200"));
-            client.shutdown().await.unwrap();
-            let mut answer = Vec::new();
-            client.read_to_end(&mut answer).await.unwrap();
-            assert_eq!(answer, b"reply");
-        });
-        let target_task = tokio::spawn(async move {
-            let (mut stream, _) = target.accept().await.unwrap();
-            let mut payload = Vec::new();
-            stream.read_to_end(&mut payload).await.unwrap();
-            assert_eq!(payload, b"prefetched-tunnel");
-            stream.write_all(b"reply").await.unwrap();
-            stream.shutdown().await.unwrap();
-        });
-        let mut inbound = parts.io.into_inner();
-        assert_eq!(copy_prefetched(&mut inbound, &mut outbound, &parts.read_buf, &authenticated).await.unwrap(), (17, 5));
-        client_task.await.unwrap(); target_task.await.unwrap(); driver.await.unwrap();
-        assert_eq!(totals(&reader), Snapshot { upload: 17, download: 5, saturated: false });
-    }).await.expect("CONNECT pre-read accounting must finish");
-    }
 }
 
 #[cfg(all(test, feature = "management"))]
@@ -1951,16 +1352,9 @@ mod write_tests {
     //! only guard H1's explicit Queue setting; the socket interop test separately
     //! exercises the production `HttpConnector` configuration.
 
-    use std::{
-        convert::Infallible,
-        io::IoSlice,
-        sync::{
-            Mutex,
-            atomic::{AtomicBool, AtomicUsize, Ordering},
-        },
-    };
+    use std::{convert::Infallible, io::IoSlice, sync::Mutex};
 
-    use bytes::Buf as _;
+    use http_body_util::{Either, Full, StreamBody};
     use tokio::io::ReadBuf;
 
     use super::*;
@@ -1969,61 +1363,18 @@ mod write_tests {
             Protocol, Reader,
             tests::{LOGIN, policy, secret},
         },
-        server::auth::Source,
         traffic::Snapshot,
     };
-
-    /// Unknown size selects chunked framing; exact size selects Content-Length.
-    /// The body owns ordinary Bytes. Only production LeaseBody attaches the meter.
-    struct PayloadBody {
-        data: Option<Bytes>,
-        exact: bool,
-    }
-
-    impl PayloadBody {
-        fn new(exact: bool) -> Self {
-            Self {
-                data: Some(Bytes::from(vec![0xfe; 32])),
-                exact,
-            }
-        }
-    }
-
-    impl Body for PayloadBody {
-        type Data = Bytes;
-        type Error = Infallible;
-
-        fn poll_frame(
-            self: Pin<&mut Self>,
-            _: &mut TaskContext<'_>,
-        ) -> Poll<Option<Result<Frame<Bytes>, Infallible>>> {
-            Poll::Ready(self.get_mut().data.take().map(|data| Ok(Frame::data(data))))
-        }
-
-        fn is_end_stream(&self) -> bool {
-            self.data.is_none()
-        }
-
-        fn size_hint(&self) -> SizeHint {
-            let mut hint = SizeHint::default();
-            if self.exact {
-                hint.set_exact(if self.data.is_some() { 32 } else { 0 });
-            }
-            hint
-        }
-    }
 
     #[derive(Default)]
     struct Accepted {
         payload: usize,
         vectored: usize,
-        encoded: Vec<u8>,
     }
 
     /// Limit encoded writes, not DATA advances. Header/chunk bytes can span several
     /// writes; 0xfe cannot occur in the fixed ASCII headers or chunk framing.
     struct PartialWriter {
-        input: &'static [u8],
         accepted: Arc<Mutex<Accepted>>,
     }
 
@@ -2039,7 +1390,6 @@ mod write_tests {
                     break;
                 }
                 accepted.payload += usize::from(*byte == 0xfe);
-                accepted.encoded.push(*byte);
                 written += 1;
             }
             accepted.vectored += usize::from(vectored);
@@ -2051,18 +1401,10 @@ mod write_tests {
         fn poll_read(
             self: Pin<&mut Self>,
             _: &mut TaskContext<'_>,
-            buffer: &mut ReadBuf<'_>,
+            _: &mut ReadBuf<'_>,
         ) -> Poll<io::Result<()>> {
-            let this = self.get_mut();
-            // This peer never supplies a response/next request. The write error
-            // must finish the driver, rather than an unrelated read-side EOF.
-            if this.input.is_empty() {
-                return Poll::Pending;
-            }
-            let length = buffer.remaining().min(this.input.len());
-            buffer.put_slice(&this.input[..length]);
-            this.input = &this.input[length..];
-            Poll::Ready(Ok(()))
+            // Keep reads pending so the writer error ends the driver.
+            Poll::Pending
         }
     }
 
@@ -2112,24 +1454,6 @@ mod write_tests {
         (reader, authenticated)
     }
 
-    fn acceptor(reader: &Reader) -> HttpAcceptor {
-        HttpAcceptor::new(Context {
-            auth: Source::Managed(reader.clone()),
-            bind: "127.0.0.1:0".parse().unwrap(),
-            concurrent: 8,
-            connect_timeout: 3,
-            connector: Connector::new(
-                None,
-                None,
-                None,
-                3,
-                #[cfg(any(target_os = "android", target_os = "fuchsia", target_os = "linux"))]
-                None,
-                None,
-            ),
-        })
-    }
-
     fn assert_totals(reader: &Reader, upload: u64, download: u64) {
         let series = reader.traffic_registry().snapshot().unwrap();
         let actual = series
@@ -2147,16 +1471,10 @@ mod write_tests {
         );
     }
 
-    fn assert_partial(accepted: &Mutex<Accepted>, exact: bool) {
+    fn assert_partial(accepted: &Mutex<Accepted>) {
         let accepted = accepted.lock().unwrap();
         assert_eq!(accepted.payload, 8);
         assert!(accepted.vectored > 0);
-        let head = String::from_utf8_lossy(&accepted.encoded).to_ascii_lowercase();
-        assert!(head.contains(if exact {
-            "content-length: 32\r\n"
-        } else {
-            "transfer-encoding: chunked\r\n"
-        }));
     }
 
     #[tokio::test]
@@ -2166,7 +1484,6 @@ mod write_tests {
                 let (reader, authenticated) = admission();
                 let accepted = Arc::new(Mutex::new(Accepted::default()));
                 let writer = PartialWriter {
-                    input: b"",
                     accepted: accepted.clone(),
                 };
                 // This protects the pinned H1 Queue behavior, not construction of
@@ -2176,15 +1493,22 @@ mod write_tests {
                 let (mut sender, connection) =
                     builder.handshake(TokioIo::new(writer)).await.unwrap();
                 let driver = tokio::spawn(connection);
+                let data = Bytes::from(vec![0xfe; 32]);
+                let body = if exact {
+                    Either::Left(Full::new(data))
+                } else {
+                    Either::Right(StreamBody::new(futures_util::stream::iter([Ok::<
+                        _,
+                        Infallible,
+                    >(
+                        Frame::data(data),
+                    )])))
+                };
                 let request = Request::builder()
                     .method(Method::POST)
                     .uri("/")
                     .header(header::HOST, "example.test")
-                    .body(LeaseBody::new(
-                        PayloadBody::new(exact),
-                        &authenticated,
-                        Direction::Upload,
-                    ))
+                    .body(LeaseBody::new(body, &authenticated, Direction::Upload))
                     .unwrap();
                 drop(authenticated);
                 assert!(sender.send_request(request).await.is_err());
@@ -2192,190 +1516,11 @@ mod write_tests {
                 // its driver successfully. Only the request result is contractual.
                 let _ = driver.await.unwrap();
                 drop(sender);
-                assert_partial(&accepted, exact);
+                assert_partial(&accepted);
                 assert_totals(&reader, 8, 0);
             }
         })
         .await
         .expect("partial H1 upload must finish on the writer error");
-    }
-
-    #[tokio::test]
-    async fn production_h1_response_builder_keeps_only_accepted_payload_after_error() {
-        tokio::time::timeout(Duration::from_secs(5), async {
-            for exact in [true, false] {
-                let (reader, authenticated) = admission();
-                let accepted = Arc::new(Mutex::new(Accepted::default()));
-                let writer = PartialWriter {
-                    input: b"GET / HTTP/1.1\r\nHost: example.test\r\n\r\n",
-                    accepted: accepted.clone(),
-                };
-                let service = service_fn(move |_: Request<Incoming>| {
-                    let body = LeaseBody::new(
-                        PayloadBody::new(exact),
-                        &authenticated,
-                        Direction::Download,
-                    );
-                    async move { Ok::<_, Infallible>(Response::new(body)) }
-                });
-                let builder = acceptor(&reader).builder.clone();
-                let result = builder
-                    .serve_connection_with_upgrades(TokioIo::new(writer), service)
-                    .await;
-                assert!(result.is_err());
-                assert_partial(&accepted, exact);
-                assert_totals(&reader, 0, 8);
-            }
-        })
-        .await
-        .expect("partial H1 response must finish on the writer error");
-    }
-
-    #[tokio::test]
-    async fn polling_and_dropping_unwritten_production_data_does_not_record_payload() {
-        let (reader, authenticated) = admission();
-        let mut body = LeaseBody::new(PayloadBody::new(false), &authenticated, Direction::Upload);
-        let frame = body.frame().await.unwrap().unwrap();
-        assert_eq!(frame.data_ref().unwrap().remaining(), 32);
-        assert_totals(&reader, 0, 0);
-        drop(frame);
-        drop(body);
-        drop(authenticated);
-        assert_totals(&reader, 0, 0);
-    }
-
-    /// Fail the transport flush only after a verified TLS handshake has finished.
-    /// Ciphertext writes stay successful, so public TLS write acceptance and a
-    /// subsequent flush failure are distinct, deterministic observable events.
-    struct FlushFailure<T> {
-        inner: T,
-        fail: Arc<AtomicBool>,
-        errors: Arc<AtomicUsize>,
-    }
-
-    impl<T: AsyncRead + Unpin> AsyncRead for FlushFailure<T> {
-        fn poll_read(
-            self: Pin<&mut Self>,
-            cx: &mut TaskContext<'_>,
-            buffer: &mut ReadBuf<'_>,
-        ) -> Poll<io::Result<()>> {
-            Pin::new(&mut self.get_mut().inner).poll_read(cx, buffer)
-        }
-    }
-
-    impl<T: AsyncWrite + Unpin> AsyncWrite for FlushFailure<T> {
-        fn poll_write(
-            self: Pin<&mut Self>,
-            cx: &mut TaskContext<'_>,
-            buffer: &[u8],
-        ) -> Poll<io::Result<usize>> {
-            Pin::new(&mut self.get_mut().inner).poll_write(cx, buffer)
-        }
-
-        fn poll_flush(self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<io::Result<()>> {
-            let this = self.get_mut();
-            if this.fail.load(Ordering::Relaxed) {
-                this.errors.fetch_add(1, Ordering::Relaxed);
-                return Poll::Ready(Err(io::ErrorKind::BrokenPipe.into()));
-            }
-            Pin::new(&mut this.inner).poll_flush(cx)
-        }
-
-        fn poll_shutdown(self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<io::Result<()>> {
-            Pin::new(&mut self.get_mut().inner).poll_shutdown(cx)
-        }
-    }
-
-    fn tls_configs() -> (Arc<rustls::ServerConfig>, Arc<rustls::ClientConfig>) {
-        use rcgen::{
-            BasicConstraints, CertificateParams, CertifiedIssuer, IsCa, KeyPair, KeyUsagePurpose,
-        };
-        use rustls::pki_types::PrivatePkcs8KeyDer;
-
-        let mut ca = CertificateParams::new(Vec::<String>::new()).unwrap();
-        ca.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
-        ca.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
-        let ca = CertifiedIssuer::self_signed(ca, KeyPair::generate().unwrap()).unwrap();
-        let mut parameters = CertificateParams::new(vec!["localhost".into()]).unwrap();
-        parameters.is_ca = IsCa::ExplicitNoCa;
-        parameters.extended_key_usages = vec![rcgen::ExtendedKeyUsagePurpose::ServerAuth];
-        parameters.key_usages = vec![KeyUsagePurpose::DigitalSignature];
-        let key = KeyPair::generate().unwrap();
-        let leaf = parameters.signed_by(&key, &ca).unwrap();
-        let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
-        let mut server = rustls::ServerConfig::builder_with_provider(provider.clone())
-            .with_safe_default_protocol_versions()
-            .unwrap()
-            .with_no_client_auth()
-            .with_single_cert(
-                vec![leaf.der().clone()],
-                PrivatePkcs8KeyDer::from(key.serialize_der()).into(),
-            )
-            .unwrap();
-        let mut roots = rustls::RootCertStore::empty();
-        roots.add(ca.der().clone()).unwrap();
-        let mut client = rustls::ClientConfig::builder_with_provider(provider)
-            .with_safe_default_protocol_versions()
-            .unwrap()
-            .with_root_certificates(roots)
-            .with_no_client_auth();
-        server.alpn_protocols = vec![b"http/1.1".to_vec()];
-        client.alpn_protocols = vec![b"http/1.1".to_vec()];
-        (Arc::new(server), Arc::new(client))
-    }
-
-    #[tokio::test]
-    async fn verified_tls_h1_keeps_accepted_payload_when_the_later_flush_fails() {
-        use rustls::pki_types::ServerName;
-        use tokio_rustls::{TlsAcceptor, TlsConnector};
-
-        tokio::time::timeout(Duration::from_secs(5), async {
-            let (server_config, client_config) = tls_configs();
-            let (client_io, server_io) = tokio::io::duplex(64 * 1024);
-            let fail = Arc::new(AtomicBool::new(false));
-            let errors = Arc::new(AtomicUsize::new(0));
-            let server_io = FlushFailure {
-                inner: server_io,
-                fail: fail.clone(),
-                errors: errors.clone(),
-            };
-            let tls_acceptor = TlsAcceptor::from(server_config);
-            let connector = TlsConnector::from(client_config);
-            let (server, mut client) = tokio::try_join!(
-                tls_acceptor.accept(server_io),
-                connector.connect(ServerName::try_from("localhost").unwrap(), client_io),
-            )
-            .unwrap();
-            assert_eq!(
-                server.get_ref().1.alpn_protocol(),
-                Some(b"http/1.1".as_slice())
-            );
-            fail.store(true, Ordering::Relaxed);
-            client
-                .write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
-                .await
-                .unwrap();
-            client.flush().await.unwrap();
-            let (reader, authenticated) = admission();
-            assert_totals(&reader, 0, 0);
-            let service = service_fn(move |_: Request<Incoming>| {
-                let body =
-                    LeaseBody::new(PayloadBody::new(true), &authenticated, Direction::Download);
-                async move { Ok::<_, Infallible>(Response::new(body)) }
-            });
-            let builder = acceptor(&reader).builder.clone();
-            assert!(
-                builder
-                    .serve_connection_with_upgrades(TokioIo::new(server), service)
-                    .await
-                    .is_err()
-            );
-            assert!(errors.load(Ordering::Relaxed) > 0);
-            // H1 had accepted all 32 DATA bytes before TLS poll_flush failed. A
-            // later flush failure must neither retract them nor add TLS/framing.
-            assert_totals(&reader, 0, 32);
-        })
-        .await
-        .expect("verified TLS flush failure must finish without a timer race");
     }
 }

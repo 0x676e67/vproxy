@@ -1,6 +1,6 @@
-//! Local source floors, independent of the optional SQLite Session build.
-//! A bound source is fenced from ordinary startup/writers until the complete
-//! witnessed runtime is connected. Missing state never creates a new binding.
+//! Legacy source floors remain readable after retiring the transaction runtime.
+//! Bound sources are fenced from ordinary startup and writes. Missing state
+//! never creates a new binding or releases an existing protected identity.
 
 use super::{invalid_data, sqlite_error};
 use crate::manage::witness::{Enrollment, digest};
@@ -53,7 +53,7 @@ pub(super) struct State {
 }
 
 /// Small local reference, not the configuration or secret material itself.
-/// Revisions use CAS and advance in the same witnessed transaction as the floor.
+/// Legacy revisions were committed in the same transaction as the floor.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(in crate::manage) struct Configuration {
@@ -132,7 +132,7 @@ pub(super) fn load(connection: &Connection, version: u32) -> io::Result<Option<S
     .transpose()
 }
 
-/// The common reader validates the namespace even in feature-off builds.
+/// The common reader validates the retained namespace before ordinary access.
 pub(super) fn validate_schema(connection: &Connection, version: u32) -> io::Result<()> {
     if let Some(state) = load(connection, version)? {
         let node: String = connection
@@ -171,26 +171,6 @@ pub(super) fn require_unprotected(connection: &Connection) -> io::Result<()> {
     Ok(())
 }
 
-#[cfg(feature = "witness-journal")]
-pub(super) fn save(connection: &Connection, state: &State) -> io::Result<()> {
-    state.validate()?;
-    let bytes = serde_json::to_vec(state).map_err(|_| corrupt())?;
-    if bytes.len() > MAX_STATE {
-        return Err(corrupt());
-    }
-    let changed = connection
-        .execute(
-            "INSERT INTO recovery_source(singleton,payload) VALUES(1,?1)
-      ON CONFLICT(singleton) DO UPDATE SET payload=excluded.payload",
-            [bytes],
-        )
-        .map_err(|e| sqlite_error("cannot store local source floor", e))?;
-    if changed != 1 || load(connection, super::SCHEMA_VERSION)?.as_ref() != Some(state) {
-        return Err(corrupt());
-    }
-    Ok(())
-}
-
 fn fenced() -> io::Error {
     io::Error::new(
         io::ErrorKind::PermissionDenied,
@@ -204,25 +184,9 @@ fn corrupt() -> io::Error {
 #[cfg(test)]
 pub(in crate::manage) fn remove_schema_for_test(connection: &Connection) -> io::Result<()> {
     super::proxy_service::remove_schema_for_test(connection)?;
-    ensure_unused_for_test(connection)?;
     connection
         .execute_batch("DROP TABLE IF EXISTS recovery_source;")
         .map_err(|e| sqlite_error("cannot reconstruct pre-source fixture", e))
-}
-
-#[cfg(test)]
-pub(in crate::manage) fn ensure_unused_for_test(connection: &Connection) -> io::Result<()> {
-    let present: bool = connection
-        .query_row(
-            "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name='recovery_source')",
-            [],
-            |r| r.get(0),
-        )
-        .map_err(|e| sqlite_error("cannot inspect source fixture", e))?;
-    if present && load(connection, 26)?.is_some() {
-        return Err(corrupt());
-    }
-    Ok(())
 }
 
 #[cfg(test)]
@@ -246,48 +210,6 @@ mod tests {
             },
             configuration: None,
         })
-    }
-
-    #[test]
-    fn optional_configuration_keeps_legacy_bytes_and_validates_floor_and_revision() -> io::Result<()>
-    {
-        let f = Fixture::new_with_private_source(true, true)?;
-        let c = store::peers::open_existing(&f.client_state, true)?;
-        let mut s = state(&f)?;
-        let legacy = format!(
-            "{{\"enrollment\":{},\"floor\":{}}}",
-            serde_json::to_string(&s.enrollment).map_err(io::Error::other)?,
-            serde_json::to_string(&s.floor).map_err(io::Error::other)?
-        );
-        assert_eq!(
-            serde_json::to_vec(&s).map_err(io::Error::other)?,
-            legacy.as_bytes()
-        );
-        for revision in [0, 1, i64::MAX as u64 + 1] {
-            s.configuration = Some(Configuration {
-                revision,
-                sha256: [1; 32],
-            });
-            assert!(s.validate().is_err());
-        }
-        s.floor = Floor {
-            sequence: 1,
-            intent_id: Some(store::random_id()?),
-            previous: Some("0".repeat(64)),
-        };
-        s.configuration = Some(Configuration {
-            revision: 1,
-            sha256: [1; 32],
-        });
-        s.validate()?;
-        c.execute(
-            "INSERT INTO recovery_source VALUES(1,?1)",
-            [serde_json::to_vec(&s).map_err(io::Error::other)?],
-        )
-        .map_err(io::Error::other)?;
-        assert_eq!(load(&c, 26)?, Some(s));
-        assert!(store::recovery::startup(&f.client_state).is_err());
-        Ok(())
     }
 
     #[test]
@@ -320,96 +242,6 @@ mod tests {
             assert_eq!(store::inspect(&f.client_state)?.node_id, f.client_id);
             assert_eq!(store::recovery::diagnostic_startup(&f.client_state)?, None);
             assert_eq!(load(&c, 26)?, sql.then_some(expected));
-        }
-        Ok(())
-    }
-
-    #[test]
-    fn canonical_floor_decode_refuses_bad_identity_shape_and_future_sequence() -> io::Result<()> {
-        let f = Fixture::new_with_private_source(true, true)?;
-        let c = store::peers::open_existing(&f.client_state, true)?;
-        let s = state(&f)?;
-        for mode in 0..5 {
-            let mut bad = s.clone();
-            match mode {
-                0 => bad.floor.sequence = i64::MAX as u64 + 1,
-                1 => bad.floor.intent_id = Some(store::random_id()?),
-                2 => bad.enrollment.peer_node_id = store::random_id()?,
-                3 => {}
-                _ => bad.floor.sequence = 1,
-            }
-            let mut bytes = serde_json::to_vec(&bad).map_err(io::Error::other)?;
-            if mode == 3 {
-                bytes.pop();
-                bytes.extend_from_slice(b",\"extra\":true}");
-            }
-            c.execute("INSERT INTO recovery_source VALUES(1,?1) ON CONFLICT(singleton) DO UPDATE SET payload=excluded.payload",[&bytes]).map_err(io::Error::other)?;
-            assert!(store::inspect(&f.client_state).is_err());
-            let retained: Vec<u8> = c
-                .query_row("SELECT payload FROM recovery_source", [], |r| r.get(0))
-                .map_err(io::Error::other)?;
-            assert_eq!(retained, bytes);
-        }
-        Ok(())
-    }
-
-    #[test]
-    fn schema25_upgrade_preserves_old_file_and_rolls_back_source_table_collision() -> io::Result<()>
-    {
-        for collision in [false, true] {
-            let f = Fixture::new_with_private_source(true, false)?;
-            let c = store::peers::open_existing(&f.client_state, true)?;
-            store::recovery::restore_schema_twenty_five_for_test(&c)?;
-            let ddl: String = c
-                .query_row(
-                    "SELECT sql FROM sqlite_schema WHERE name='recovery_state'",
-                    [],
-                    |r| r.get(0),
-                )
-                .map_err(io::Error::other)?;
-            if collision {
-                c.execute_batch("CREATE TABLE recovery_source(note TEXT); INSERT INTO recovery_source VALUES('retain');").map_err(io::Error::other)?;
-            }
-            drop(c);
-            let backup = f
-                .server_state
-                .parent()
-                .ok_or_else(corrupt)?
-                .join("before26.sqlite3");
-            let result = store::migrate(&f.client_state, &backup);
-            let old =
-                Connection::open_with_flags(&backup, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
-                    .map_err(io::Error::other)?;
-            assert_eq!(
-                old.pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0))
-                    .map_err(io::Error::other)?,
-                25
-            );
-            assert_eq!(
-                old.query_row(
-                    "SELECT sql FROM sqlite_schema WHERE name='recovery_state'",
-                    [],
-                    |r| r.get::<_, String>(0)
-                )
-                .map_err(io::Error::other)?,
-                ddl
-            );
-            if collision {
-                assert!(result.is_err());
-                assert_eq!(store::inspect(&f.client_state)?.schema_version, 25);
-                let c = store::peers::open_existing(&f.client_state, false)?;
-                assert_eq!(
-                    c.query_row("SELECT note FROM recovery_source", [], |r| r
-                        .get::<_, String>(0))
-                        .map_err(io::Error::other)?,
-                    "retain"
-                );
-            } else {
-                assert_eq!(result?.schema_version, store::SCHEMA_VERSION);
-                let c = store::peers::open_existing(&f.client_state, false)?;
-                assert_eq!(load(&c, 26)?, None);
-                assert_eq!(store::inspect(&f.client_state)?.node_id, f.client_id);
-            }
         }
         Ok(())
     }

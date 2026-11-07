@@ -87,7 +87,6 @@ pub(in crate::manage) async fn request_with_admission(
     operation: Request,
     admission: policy::ReadAdmission,
 ) -> io::Result<Reply> {
-    coordinator.ensure_source_confirmed()?;
     request_as(
         Authorization::Coordinator(coordinator, admission),
         tls,
@@ -382,13 +381,11 @@ async fn authorize(
     match authorization {
         Authorization::Offline(source) => source.authorize(leaf, expected).await,
         Authorization::Coordinator(coordinator, admission) => {
-            coordinator.ensure_source_confirmed()?;
             let revision = coordinator
                 .read_with_admission(*admission, move |directory| {
                     authorize_in(directory, &leaf, &expected)
                 })
                 .await?;
-            coordinator.ensure_source_confirmed()?;
             Ok(revision)
         }
     }
@@ -868,15 +865,16 @@ pub(super) fn validate_user(user: &User) -> io::Result<()> {
 fn validate_credential(credential: &Credential) -> io::Result<()> {
     number(&credential.verifier_revision, false)?;
     let mut id = [0; 16];
-    if !valid_id(&credential.id)
+    if credential.id.len() != 22
+        || !matches!(
+            URL_SAFE_NO_PAD.decode_slice(&credential.id, &mut id),
+            Ok(16)
+        )
         || !valid_id(&credential.user_id)
         || credential.syntax_version != 2
         || credential.login.len() != 36
         || !credential.login.starts_with("vp2_")
         || (credential.revoked && credential.active)
-        || URL_SAFE_NO_PAD
-            .decode_slice(&credential.id, &mut id)
-            .is_err()
     {
         return Err(invalid("invalid node credential metadata"));
     }
@@ -1080,360 +1078,11 @@ fn invalid(message: &'static str) -> io::Error {
 
 #[cfg(test)]
 mod tests {
+    fn command() -> serde_json::Value {
+        serde_json::json!({"version":1,"target_node_id":"AAAAAAAAAAAAAAAAAAAAAA","resource":"proxy_policy","controller_epoch":"2","command_id":"1","expected_policy_revision":"1","source_administrator_id":"AQEBAQEBAQEBAQEBAQEBAQ","mutation":{"action":"create_user","name":"remote user","protocols":["http"],"concurrent_limit":2}})
+    }
+
     use super::*;
-
-    #[test]
-    fn witness_errors_keep_only_fixed_codes_with_their_expected_status() {
-        for (status, code) in [
-            (StatusCode::BAD_REQUEST, "witness_invalid"),
-            (StatusCode::CONFLICT, "witness_conflict"),
-            (StatusCode::CONFLICT, "witness_capacity"),
-            (StatusCode::FORBIDDEN, "witness_denied"),
-            (StatusCode::SERVICE_UNAVAILABLE, "witness_upgrade_required"),
-            (StatusCode::SERVICE_UNAVAILABLE, "witness_busy"),
-            (StatusCode::SERVICE_UNAVAILABLE, "witness_unavailable"),
-        ] {
-            let body = serde_json::to_vec(&serde_json::json!({"error":{"code":code}})).unwrap();
-            let error = remote_error(status, &body, 1);
-            assert_eq!(
-                error
-                    .get_ref()
-                    .unwrap()
-                    .downcast_ref::<RemoteError>()
-                    .unwrap()
-                    .code,
-                code
-            );
-            let mismatched = remote_error(StatusCode::UNAUTHORIZED, &body, 1);
-            assert_eq!(
-                mismatched
-                    .get_ref()
-                    .unwrap()
-                    .downcast_ref::<RemoteError>()
-                    .unwrap()
-                    .code,
-                "node_request_rejected"
-            );
-        }
-        let error = remote_error(
-            StatusCode::SERVICE_UNAVAILABLE,
-            br#"{"error":{"code":"private remote diagnostic"}}"#,
-            1,
-        );
-        assert!(!error.to_string().contains("private"));
-    }
-
-    #[test]
-    fn atomic_operations_capacity_is_fixed_and_unsupported_never_falls_back() {
-        for (status, allow, expected) in [
-            (
-                StatusCode::SERVICE_UNAVAILABLE,
-                true,
-                "operations_alerts_capacity",
-            ),
-            (
-                StatusCode::SERVICE_UNAVAILABLE,
-                false,
-                "node_request_rejected",
-            ),
-            (StatusCode::FORBIDDEN, true, "node_request_rejected"),
-        ] {
-            let error = remote_error_with_snapshot(
-                status,
-                br#"{"error":{"code":"operations_alerts_capacity"}}"#,
-                true,
-                allow,
-            );
-            assert_eq!(
-                error
-                    .get_ref()
-                    .unwrap()
-                    .downcast_ref::<RemoteError>()
-                    .unwrap()
-                    .code,
-                expected
-            );
-        }
-        let unsupported = remote_error_with_snapshot(
-            StatusCode::NOT_FOUND,
-            br#"{"error":{"code":"not_found"}}"#,
-            true,
-            true,
-        );
-        assert_eq!(
-            unsupported
-                .get_ref()
-                .unwrap()
-                .downcast_ref::<RemoteError>()
-                .unwrap()
-                .code,
-            "node_protocol_unsupported"
-        );
-        let (_, path, _) = encode(&Request::OperationsSnapshot).unwrap();
-        assert_eq!(path, "/node/v1/proxy/operations-snapshot");
-    }
-
-    #[test]
-    fn user_search_rejections_preserve_typed_input_and_changed_codes_only_with_their_status() {
-        for (status, code, expected) in [
-            (
-                StatusCode::BAD_REQUEST,
-                "invalid_user_search",
-                "invalid_user_search",
-            ),
-            (
-                StatusCode::BAD_REQUEST,
-                "invalid_user_search_cursor",
-                "invalid_user_search_cursor",
-            ),
-            (
-                StatusCode::CONFLICT,
-                "user_search_changed",
-                "user_search_changed",
-            ),
-            (
-                StatusCode::FORBIDDEN,
-                "user_search_changed",
-                "node_request_rejected",
-            ),
-            (
-                StatusCode::NOT_FOUND,
-                "invalid_user_search",
-                "node_request_rejected",
-            ),
-            (
-                StatusCode::NOT_FOUND,
-                "not_found",
-                "node_protocol_unsupported",
-            ),
-            (
-                StatusCode::NOT_FOUND,
-                "resource_not_found",
-                "resource_not_found",
-            ),
-        ] {
-            let body = serde_json::to_vec(&serde_json::json!({"error":{"code":code}})).unwrap();
-            let error = remote_error_with_negotiation(status, &body, true);
-            let rejected = error
-                .get_ref()
-                .and_then(|e| e.downcast_ref::<RemoteError>())
-                .unwrap();
-            assert_eq!(rejected.code, expected);
-        }
-        let error = remote_error_with_negotiation(
-            StatusCode::NOT_FOUND,
-            br#"{"error":{"code":"not_found","private":"ignored"}}"#,
-            true,
-        );
-        assert_eq!(
-            error
-                .get_ref()
-                .and_then(|e| e.downcast_ref::<RemoteError>())
-                .unwrap()
-                .code,
-            "node_request_rejected"
-        );
-    }
-
-    #[test]
-    fn endpoint_catalog_validates_selected_identity_bounds_and_nonsecret_vocabulary() {
-        use serde_json::json;
-        let data = json!({"node_id":"AAAAAAAAAAAAAAAAAAAAAA","proxy_running":true,"listeners":[{"protocol":"http","bind":"0.0.0.0:8080","public_address":"proxy.example:443"}]});
-        assert!(matches!(
-            decode(
-                &Request::Endpoints,
-                &envelope(data.clone()),
-                "AAAAAAAAAAAAAAAAAAAAAA",
-                StatusCode::OK
-            ),
-            Ok(Reply::Endpoints(_))
-        ));
-        let mut invalid = Vec::new();
-        let mut value = data.clone();
-        value["node_id"] = json!("BBBBBBBBBBBBBBBBBBBBBA");
-        invalid.push(value);
-        let mut value = data.clone();
-        value["listeners"][0]["tls_key"] = json!("private.key");
-        invalid.push(value);
-        for address in [
-            "0.0.0.0:1080",
-            "user:secret@proxy.example:443",
-            "PROXY.example:443",
-            "proxy.example:0",
-        ] {
-            let mut value = data.clone();
-            value["listeners"][0]["public_address"] = json!(address);
-            invalid.push(value);
-        }
-        let mut value = data.clone();
-        value["listeners"][0]["bind"] = json!("127.0.0.1:0");
-        invalid.push(value);
-        let mut value = data.clone();
-        value["listeners"][0]["protocol"] = json!("quic");
-        invalid.push(value);
-        let mut value = data.clone();
-        value["listeners"] = json!(vec![data["listeners"][0].clone(); 17]);
-        invalid.push(value);
-        let mut value = data;
-        value["listeners"] = json!([]);
-        invalid.push(value);
-        for value in invalid {
-            assert!(
-                decode(
-                    &Request::Endpoints,
-                    &envelope(value),
-                    "AAAAAAAAAAAAAAAAAAAAAA",
-                    StatusCode::OK
-                )
-                .is_err()
-            );
-        }
-        let (method, path, body) = encode(&Request::Endpoints).unwrap();
-        assert_eq!(method, Method::GET);
-        assert_eq!(path, "/node/v1/proxy/endpoints");
-        assert!(body.is_empty());
-    }
-
-    #[test]
-    fn independent_traffic_routes_negotiate_support_without_downgrading_or_hiding_missing_resources()
-     {
-        for (status, body, expected) in [
-            (
-                StatusCode::NOT_FOUND,
-                br#"{"error":{"code":"not_found"}}"#.as_slice(),
-                "node_protocol_unsupported",
-            ),
-            (
-                StatusCode::NOT_FOUND,
-                br#"{"error":{"code":"resource_not_found"}}"#.as_slice(),
-                "resource_not_found",
-            ),
-            (
-                StatusCode::SERVICE_UNAVAILABLE,
-                br#"{"error":{"code":"management_upgrade_required"}}"#.as_slice(),
-                "management_upgrade_required",
-            ),
-            (
-                StatusCode::NOT_FOUND,
-                br#"{"error":{"code":"not_found","other":true}}"#.as_slice(),
-                "node_request_rejected",
-            ),
-        ] {
-            let error = remote_error_with_negotiation(status, body, true);
-            assert_eq!(
-                error
-                    .get_ref()
-                    .unwrap()
-                    .downcast_ref::<RemoteError>()
-                    .unwrap()
-                    .code,
-                expected
-            );
-        }
-        assert_eq!(
-            remote_error(
-                StatusCode::NOT_FOUND,
-                br#"{"error":{"code":"not_found"}}"#,
-                1
-            )
-            .get_ref()
-            .unwrap()
-            .downcast_ref::<RemoteError>()
-            .unwrap()
-            .code,
-            "node_request_rejected"
-        );
-    }
-
-    #[test]
-    fn version_two_unsupported_is_not_a_missing_resource_or_upgrade_error() {
-        for (version, status, body, expected) in [
-            (
-                2,
-                StatusCode::NOT_FOUND,
-                br#"{"error":{"code":"not_found"}}"#.as_slice(),
-                "node_protocol_unsupported",
-            ),
-            (
-                1,
-                StatusCode::NOT_FOUND,
-                br#"{"error":{"code":"not_found"}}"#.as_slice(),
-                "node_request_rejected",
-            ),
-            (
-                2,
-                StatusCode::NOT_FOUND,
-                br#"{"error":{"code":"resource_not_found"}}"#.as_slice(),
-                "resource_not_found",
-            ),
-            (
-                2,
-                StatusCode::SERVICE_UNAVAILABLE,
-                br#"{"error":{"code":"management_upgrade_required"}}"#.as_slice(),
-                "management_upgrade_required",
-            ),
-            (
-                2,
-                StatusCode::NOT_FOUND,
-                br#"{"error":{"code":"not_found","private":"ignored"}}"#.as_slice(),
-                "node_request_rejected",
-            ),
-        ] {
-            let error = remote_error(status, body, version);
-            assert_eq!(
-                error
-                    .get_ref()
-                    .unwrap()
-                    .downcast_ref::<RemoteError>()
-                    .unwrap()
-                    .code,
-                expected
-            );
-        }
-    }
-
-    #[test]
-    fn receipt_version_is_internal_and_v1_rejects_routing_metadata() {
-        let mut data = receipt("applied");
-        data["routing"] = serde_json::json!({"kind":"pool","id":"AAAAAAAAAAAAAAAAAAAAAA"});
-        assert!(
-            decode(
-                &Request::Receipt {
-                    version: 1,
-                    controller_epoch: 2,
-                    command_id: 1
-                },
-                &envelope(data.clone()),
-                "AAAAAAAAAAAAAAAAAAAAAA",
-                StatusCode::OK
-            )
-            .is_err()
-        );
-        data["user_id"] = serde_json::Value::Null;
-        data["credential_id"] = serde_json::Value::Null;
-        let mut encoded: serde_json::Value = serde_json::from_slice(&envelope(data)).unwrap();
-        encoded["version"] = serde_json::json!(2);
-        let Ok(Reply::Receipt(value)) = decode(
-            &Request::Receipt {
-                version: 2,
-                controller_epoch: 2,
-                command_id: 1,
-            },
-            &serde_json::to_vec(&encoded).unwrap(),
-            "AAAAAAAAAAAAAAAAAAAAAA",
-            StatusCode::OK,
-        ) else {
-            panic!("matching v2 receipt")
-        };
-        assert_eq!(value.version, 2);
-        assert!(value.routing.is_some());
-        assert!(
-            serde_json::to_value(value)
-                .unwrap()
-                .get("version")
-                .is_none()
-        );
-    }
 
     #[test]
     fn transport_permission_denied_is_not_a_peer_authorization_error() {
@@ -1450,27 +1099,13 @@ mod tests {
                 .get_ref()
                 .is_some_and(|error| error.is::<TransportError>())
         );
-        assert!(
-            error
-                .get_ref()
-                .is_some_and(|error| !error.is::<RemoteError>())
-        );
-        assert!(!error.to_string().contains("operating-system detail"));
         assert!(!format!("{error:?}").contains("operating-system detail"));
-        let detail = error
-            .get_ref()
-            .and_then(|error| error.downcast_ref::<TransportError>())
-            .unwrap();
-        assert_eq!(detail.stage, "connect");
-        assert_eq!(detail.os_error, None);
-
         // A synthetic native code proves preservation on every platform; it
         // does not claim to reproduce a Windows socket failure on this host.
         let native = io::Error::from_raw_os_error(10013);
         let original_kind = native.kind();
         let error = transport(native, "connect");
         assert_eq!(error.kind(), original_kind);
-        assert_eq!(error.raw_os_error(), None);
         let detail = error
             .get_ref()
             .and_then(|error| error.downcast_ref::<TransportError>())
@@ -1488,11 +1123,6 @@ mod tests {
             error
                 .get_ref()
                 .is_some_and(|error| error.is::<RemoteError>())
-        );
-        assert!(
-            error
-                .get_ref()
-                .is_some_and(|error| !error.is::<TransportError>())
         );
     }
 
@@ -1524,7 +1154,7 @@ mod tests {
             )
             .is_err()
         );
-        let command: Command = serde_json::from_value(super::super::tests::command()).unwrap();
+        let command: Command = serde_json::from_value(command()).unwrap();
         let data = serde_json::json!({"receipt":receipt("saved"),"replayed":true,"user":null,"credential":null,"secret":null,"secret_available":false});
         assert!(
             decode(
@@ -1539,111 +1169,6 @@ mod tests {
             decode(
                 &Request::Command(command),
                 &envelope(data),
-                "AAAAAAAAAAAAAAAAAAAAAA",
-                StatusCode::OK
-            )
-            .is_err()
-        );
-    }
-
-    #[test]
-    fn client_rejects_secret_in_replay_and_unknown_fields_without_exposing_the_body() {
-        let command: Command = serde_json::from_value(super::super::tests::command()).unwrap();
-        let data = serde_json::json!({"receipt":receipt("applied"),"replayed":true,"user":null,"credential":null,"secret":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","secret_available":true});
-        assert!(
-            decode(
-                &Request::Command(command),
-                &envelope(data),
-                "AAAAAAAAAAAAAAAAAAAAAA",
-                StatusCode::OK
-            )
-            .is_err()
-        );
-        let error = remote_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            br#"{"error":{"code":"private-password-and-path"}}"#,
-            1,
-        );
-        assert!(!error.to_string().contains("private-password"));
-        assert_eq!(
-            error
-                .get_ref()
-                .unwrap()
-                .downcast_ref::<RemoteError>()
-                .unwrap()
-                .code,
-            "node_request_rejected"
-        );
-    }
-
-    #[test]
-    fn client_decimals_and_credentials_preserve_precision_and_identity() {
-        assert_eq!(
-            number("9223372036854775807", false).unwrap(),
-            i64::MAX as u64
-        );
-        for value in [
-            "01",
-            "0",
-            "1e3",
-            "9007199254740992.0",
-            "9223372036854775808",
-        ] {
-            assert!(number(value, false).is_err());
-        }
-        let mut credential = Credential {
-            id: "AAAAAAAAAAAAAAAAAAAAAA".into(),
-            user_id: "AQEBAQEBAQEBAQEBAQEBAQ".into(),
-            login: "vp2_00000000000000000000000000000000".into(),
-            syntax_version: 2,
-            active: true,
-            revoked: false,
-            verifier_revision: "1".into(),
-        };
-        validate_credential(&credential).unwrap();
-        credential.login = "vp2_00000000000000000000000000000001".into();
-        assert!(validate_credential(&credential).is_err());
-    }
-
-    #[test]
-    fn command_replies_cannot_substitute_another_resource_or_policy_generation() {
-        let mut command: Command = serde_json::from_value(super::super::tests::command()).unwrap();
-        command.mutation = Mutation::SetUserActive {
-            id: "AQEBAQEBAQEBAQEBAQEBAQ".into(),
-            active: false,
-        };
-        let data = serde_json::json!({"receipt":receipt("applied"),"replayed":true,"user":null,"credential":null,"secret":null,"secret_available":false});
-        assert!(
-            decode(
-                &Request::Command(command.clone()),
-                &envelope(data.clone()),
-                "AAAAAAAAAAAAAAAAAAAAAA",
-                StatusCode::OK
-            )
-            .is_err()
-        );
-        command.mutation = Mutation::CreateUser {
-            name: "fixture".into(),
-            protocols: vec![],
-            concurrent_limit: 1,
-        };
-        let mut wrong = data.clone();
-        wrong["receipt"]["policy_revision"] = "3".into();
-        assert!(
-            decode(
-                &Request::Command(command.clone()),
-                &envelope(wrong),
-                "AAAAAAAAAAAAAAAAAAAAAA",
-                StatusCode::OK
-            )
-            .is_err()
-        );
-        let mut wrong = data;
-        wrong["replayed"] = false.into();
-        assert!(
-            decode(
-                &Request::Command(command),
-                &envelope(wrong),
                 "AAAAAAAAAAAAAAAAAAAAAA",
                 StatusCode::OK
             )

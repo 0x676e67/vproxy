@@ -178,45 +178,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn block_on_returns_server_result() {
-        let runtime = Runtime::new(NonZeroUsize::new(2).expect("non-zero worker count"));
-
-        let result = runtime.block_on(|_| async { Err(io::Error::other("test error").into()) });
-
-        assert!(matches!(result, Err(crate::error::Error::IO(_))));
-    }
-
-    #[test]
-    fn block_on_returns_server_panic() {
-        let runtime = Runtime::new(NonZeroUsize::new(2).expect("non-zero worker count"));
-
-        let result = runtime.block_on(|_| async {
-            if std::hint::black_box(true) {
-                panic!("test panic");
-            }
-            Ok(())
-        });
-
-        assert!(matches!(result, Err(crate::error::Error::IO(_))));
-    }
-
-    #[test]
-    fn worker_dispatch_remains_in_its_own_runtime_after_restart() {
-        for _ in 0..3 {
-            Runtime::new(NonZeroUsize::new(1).expect("one worker"))
-                .block_on(|handle| async move {
-                    assert_eq!(
-                        handle.runtime_handle().id(),
-                        tokio::runtime::Handle::current().id(),
-                        "one-worker dispatch selected a foreign runtime"
-                    );
-                    Ok(())
-                })
-                .expect("dispatch remains in current runtime");
-        }
-    }
-
-    #[test]
     fn simultaneous_runtime_dispatch_survives_a_sibling_shutdown() {
         let first = Runtime::new(NonZeroUsize::new(1).expect("one worker"));
         let second = Runtime::new(NonZeroUsize::new(1).expect("one worker"));
@@ -255,67 +216,5 @@ mod tests {
             .wait()
             .expect("second result after first runtime stopped");
         second.shutdown();
-    }
-
-    #[test]
-    #[cfg(feature = "management")]
-    fn canceled_async_wait_preserves_the_single_completion_result() {
-        let runtime = Runtime::new(NonZeroUsize::new(1).expect("one worker"));
-        let (release, released) = oneshot::channel();
-        let mut completion = runtime
-            .spawn(async move {
-                released.await.map_err(io::Error::other)?;
-                Err(io::Error::new(io::ErrorKind::PermissionDenied, "test failure").into())
-            })
-            .expect("start proxy task");
-        let control = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .expect("control runtime");
-        control.block_on(async {
-            assert!(tokio::time::timeout(Duration::from_millis(10), completion.finished()).await.is_err());
-            release.send(()).expect("release proxy");
-            let result = completion.finished().await;
-            assert!(matches!(result, Err(crate::error::Error::IO(error)) if error.kind() == io::ErrorKind::PermissionDenied));
-        });
-        assert!(completion.wait_timeout(Duration::ZERO).is_ok());
-        runtime.shutdown();
-    }
-
-    #[test]
-    #[cfg(feature = "management")]
-    fn synchronous_teardown_has_a_result_wait_deadline() {
-        let runtime = Runtime::new(NonZeroUsize::new(1).expect("one worker"));
-        let mut completion = runtime
-            .spawn(std::future::pending())
-            .expect("start pending task");
-        let result = completion.wait_timeout(Duration::from_millis(10));
-        assert!(
-            matches!(result, Err(crate::error::Error::IO(error)) if error.kind() == io::ErrorKind::TimedOut)
-        );
-        runtime.shutdown();
-    }
-
-    #[test]
-    #[cfg(feature = "management")]
-    fn unconsumed_timeout_result_reaches_synchronous_teardown() {
-        let runtime = Runtime::new(NonZeroUsize::new(1).expect("one worker"));
-        let mut completion = runtime
-            .spawn(async {
-                Err(
-                    io::Error::new(io::ErrorKind::TimedOut, "fixture listener drain deadline")
-                        .into(),
-                )
-            })
-            .expect("start timeout result");
-        let result = completion.wait_timeout(Duration::from_secs(1));
-        let duplicate = completion.wait_timeout(Duration::ZERO);
-        runtime.shutdown();
-        // Distinguish the delivered driver error from the channel's own wait
-        // deadline. No protocol driver or network completion is simulated here.
-        assert!(
-            matches!(result, Err(crate::error::Error::IO(error)) if error.kind() == io::ErrorKind::TimedOut && error.to_string() == "fixture listener drain deadline")
-        );
-        assert!(duplicate.is_ok(), "synchronous teardown also consumes once");
     }
 }

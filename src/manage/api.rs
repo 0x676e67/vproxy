@@ -13,15 +13,6 @@ mod maintenance;
 mod notifications;
 mod password;
 mod presets;
-#[cfg(feature = "witness-journal")]
-#[cfg_attr(
-    not(test),
-    allow(
-        dead_code,
-        reason = "Public Source management startup awaits complete activation gates"
-    )
-)]
-mod registered;
 mod remote_traffic;
 mod routing;
 mod runtime;
@@ -29,6 +20,19 @@ mod service;
 mod targets;
 mod traffic;
 mod users;
+
+pub(super) fn contract() -> utoipa::openapi::OpenApi {
+    let mut contract = certificates::definition().into_openapi();
+    contract.merge(<routing::Contract as utoipa::OpenApi>::openapi());
+    contract.merge(<targets::Contract as utoipa::OpenApi>::openapi());
+    contract.merge(<super::views::Contract as utoipa::OpenApi>::openapi());
+    for path in contract.paths.paths.values_mut() {
+        if let Some(get) = &mut path.get {
+            get.parameters.get_or_insert_default();
+        }
+    }
+    contract
+}
 
 use std::{
     collections::HashMap,
@@ -228,8 +232,6 @@ pub(super) fn run(args: Args) -> io::Result<()> {
                 health_config,
                 health_explicit: args.health_config.is_some(),
                 observe_target_alerts: args.observe_target_alerts,
-                #[cfg(feature = "witness-journal")]
-                source: None,
             })
         },
         shutdown_signal(),
@@ -252,13 +254,9 @@ struct Prepared {
     health_config: super::health::Config,
     health_explicit: bool,
     observe_target_alerts: bool,
-    /// Original registered reference and actual node signer, not a takeover
-    /// grant. Rechecked after startup writes and binds, before any accept/issuer.
-    #[cfg(feature = "witness-journal")]
-    source: Option<(super::store::journal::configuration::Reference, [u8; 32])>,
 }
 
-/// Keep proxy reaping, final metering and Source writer completion outside the
+/// Keep proxy reaping and final metering outside the
 /// cancellable startup/supervision future. The original stop future is polled
 /// once for both startup and steady state; it is never recreated on a retry.
 fn run_prepared(
@@ -275,7 +273,6 @@ fn run_prepared(
     let mut running_proxy = None;
     let mut managed_proxy = None;
     let mut state_owner = None;
-    let mut writer_owner = None;
     // A planned drain may consume Completion while management stays online.
     // Keep its failure outside that future: finish() cannot return it twice.
     let mut driver_error = None;
@@ -285,23 +282,12 @@ fn run_prepared(
         let Prepared {
             mut state, bind, tls, acme, certificate_source, service_tls, node, prepared_proxy,
             profile_config, health_config, health_explicit, observe_target_alerts,
-            #[cfg(feature = "witness-journal")]
-            source,
         } = tokio::select! {
             prepared = prepare => prepared?,
             signal = signals.join_next() => return signal_result(signal),
         };
-        // Retain the coordinator before any later fallible startup work. A
-        // partial preparation must still drain its Source writer before Tokio
-        // disappears. This owner must not prevent the unique AppState setup.
-        writer_owner = state.policy.clone();
         let directory = state.directory.clone();
         let web_service=prepared_proxy.is_none() && service_tls.is_some() && state.schema_version>=27;
-        #[cfg(feature = "witness-journal")]
-        if source.is_some() && node.is_none() {
-            return Err(io::Error::new(io::ErrorKind::PermissionDenied,
-                "registered node transport required"));
-        }
         let node_listener = if let Some(config) = node {
             if let Some(policy) = &state.policy {
                 policy.read(super::store::list_peers).await?;
@@ -442,12 +428,6 @@ fn run_prepared(
         } else {
             None
         };
-        #[cfg(feature = "witness-journal")]
-        if let Some((reference, key)) = source {
-            state.policy.as_ref().ok_or_else(|| io::Error::new(
-                io::ErrorKind::PermissionDenied, "registered coordinator required"))?
-                .source_startup(state.directory.clone(), reference, key).await?;
-        }
         if let Some(prepared) = prepared_proxy {
             let policy = state.policy.as_ref().ok_or_else(|| io::Error::new(
                 io::ErrorKind::InvalidData, "managed proxy requires an explicit management schema migration"))?;
@@ -596,22 +576,6 @@ fn run_prepared(
             (false, Ok(())) => {}
         }
     }
-    if let Some(policy) = state_owner
-        .as_ref()
-        .and_then(|state| state.policy.as_ref())
-        .or(writer_owner.as_ref())
-    {
-        // A witnessed source thread still needs this runtime for Offline TLS
-        // authorization. Drain its accepted work before destroying Tokio;
-        // dropping a wait is not proof that a write or confirmation stopped.
-        let stopped = runtime.block_on(policy.shutdown_writer());
-        match (result.is_ok(), stopped) {
-            (true, stopped) => result = stopped,
-            (false, Err(error)) => tracing::error!(kind = ?error.kind(),
-                "source writer shutdown failed after an earlier service error"),
-            (false, Ok(())) => {}
-        }
-    }
     runtime.shutdown_timeout(SHUTDOWN_TIMEOUT);
     drop(state_owner);
     result
@@ -695,17 +659,6 @@ struct AppState {
 }
 
 impl AppState {
-    /// A locally committed Source row is not yet authority. This check never
-    /// acquires SQL or a writer permit and is a no-op for ordinary Native state.
-    fn confirmed(&self) -> Result<(), ApiError> {
-        if let Some(policy) = &self.policy {
-            policy.ensure_source_confirmed().map_err(|_| {
-                ApiError::new(StatusCode::SERVICE_UNAVAILABLE, "authentication_busy")
-            })?;
-        }
-        Ok(())
-    }
-
     /// A poisoned security lock is a failed request, never an unauthenticated
     /// fallback or an excuse to discard existing rate/session state.
     fn security(&self) -> Result<MutexGuard<'_, SecurityState>, ApiError> {
@@ -1183,7 +1136,6 @@ fn single_header(headers: &HeaderMap, name: header::HeaderName) -> Result<Option
 }
 
 async fn guard(State(state): State<Arc<AppState>>, request: Request, next: Next) -> Response {
-    let read = matches!(*request.method(), Method::GET | Method::HEAD);
     let mut response = match validate_request(
         request.headers(),
         request.method(),
@@ -1191,20 +1143,11 @@ async fn guard(State(state): State<Arc<AppState>>, request: Request, next: Next)
         &state.origin,
     ) {
         Err(error) => error.into_response(),
-        Ok(()) => match state.confirmed() {
-            Err(error) => error.into_response(),
-            Ok(()) => match timeout(REQUEST_TIMEOUT, next.run(request)).await {
-                // Reads must not export locally committed, unconfirmed facts.
-                // Do not replace a mutation handler's original outcome-unknown
-                // response with a generic authentication error after dispatch.
-                Ok(response) if read => match state.confirmed() {
-                    Ok(()) => response,
-                    Err(error) => error.into_response(),
-                },
-                Ok(response) => response,
-                Err(_) => ApiError::new(StatusCode::SERVICE_UNAVAILABLE, "request_timeout")
-                    .into_response(),
-            },
+        Ok(()) => match timeout(REQUEST_TIMEOUT, next.run(request)).await {
+            Ok(response) => response,
+            Err(_) => {
+                ApiError::new(StatusCode::SERVICE_UNAVAILABLE, "request_timeout").into_response()
+            }
         },
     };
     for (name, value) in [
@@ -1323,7 +1266,6 @@ async fn login(
     .map_err(|_| ApiError::internal())?;
     // Hashing/body I/O can outlive the earlier guard. Check both successful and
     // failed verification before issuing a cookie or blaming the credentials.
-    state.confirmed()?;
     let administrator =
         administrator.ok_or_else(|| ApiError::new(StatusCode::FORBIDDEN, "invalid_credentials"))?;
     let token = random_token()?;
@@ -1392,7 +1334,6 @@ fn random_token() -> Result<String, ApiError> {
 }
 
 fn authenticated_session(headers: &HeaderMap, state: &AppState) -> Result<SessionView, ApiError> {
-    state.confirmed()?;
     let token = session_cookie(headers)?.ok_or_else(ApiError::authentication_required)?;
     state
         .security()?
@@ -1599,121 +1540,6 @@ async fn supervise_proxy(
     signal.await
 }
 
-#[cfg(test)]
-mod runtime_supervision_tests {
-    use std::sync::atomic::{AtomicUsize, Ordering};
-
-    use super::*;
-    use crate::{
-        manage::proxy::{DrainActor, DrainIntent, Lifecycle, Phase},
-        server::Handle,
-    };
-
-    fn planned(lifecycle: &Lifecycle) {
-        let id = lifecycle.snapshot().unwrap().runtime_id;
-        lifecycle
-            .request(
-                &id,
-                DrainIntent {
-                    node_id: "AAAAAAAAAAAAAAAAAAAAAA".into(),
-                    request_id: "AQEBAQEBAQEBAQEBAQEBAQ".into(),
-                    epoch: 1,
-                    revision: 2,
-                    actor: DrainActor::Local {
-                        administrator_id: "AgICAgICAgICAgICAgICAg".into(),
-                    },
-                },
-            )
-            .unwrap();
-    }
-
-    #[tokio::test]
-    async fn planned_completion_keeps_original_signal_and_retains_driver_error() {
-        for kind in [
-            None,
-            Some(io::ErrorKind::TimedOut),
-            Some(io::ErrorKind::PermissionDenied),
-        ] {
-            let lifecycle = Lifecycle::new(Handle::new()).unwrap();
-            planned(&lifecycle);
-            let (stop, signal) = tokio::sync::oneshot::channel();
-            let starts = Arc::new(AtomicUsize::new(0));
-            let counted = starts.clone();
-            let signal = async move {
-                counted.fetch_add(1, Ordering::Relaxed);
-                signal
-                    .await
-                    .map_err(|_| io::Error::other("fixture signal dropped"))
-            };
-            let completion = async move {
-                kind.map_or(Ok(()), |kind| {
-                    Err(io::Error::new(kind, "original driver fixture"))
-                })
-            };
-            let mut driver_error = None;
-            {
-                let wait = supervise_proxy(
-                    completion,
-                    signal,
-                    lifecycle.clone(),
-                    None,
-                    &mut driver_error,
-                );
-                tokio::pin!(wait);
-                assert!(futures_util::poll!(wait.as_mut()).is_pending());
-                assert_eq!(starts.load(Ordering::Relaxed), 1);
-                assert_eq!(
-                    lifecycle.snapshot().unwrap().phase,
-                    match kind {
-                        None => Phase::Drained,
-                        Some(io::ErrorKind::TimedOut) => Phase::Interrupted,
-                        _ => Phase::Failed,
-                    }
-                );
-                stop.send(()).unwrap();
-                wait.await.unwrap();
-            }
-            assert_eq!(starts.load(Ordering::Relaxed), 1);
-            // No completion is requested again when the signal finally arrives.
-            assert_eq!(driver_error.as_ref().map(io::Error::kind), kind);
-            if let Some(error) = driver_error {
-                assert_eq!(error.to_string(), "original driver fixture");
-            }
-        }
-    }
-
-    #[tokio::test]
-    async fn unplanned_completion_and_early_signal_keep_existing_fatal_boundary() {
-        let lifecycle = Lifecycle::new(Handle::new()).unwrap();
-        let mut driver_error = None;
-        let error = supervise_proxy(
-            async { Ok(()) },
-            std::future::pending(),
-            lifecycle,
-            None,
-            &mut driver_error,
-        )
-        .await
-        .unwrap_err();
-        assert_eq!(error.kind(), io::ErrorKind::Other);
-        assert!(driver_error.is_none());
-
-        let lifecycle = Lifecycle::new(Handle::new()).unwrap();
-        planned(&lifecycle);
-        supervise_proxy(
-            std::future::pending(),
-            async { Ok(()) },
-            lifecycle.clone(),
-            None,
-            &mut driver_error,
-        )
-        .await
-        .unwrap();
-        assert_eq!(lifecycle.snapshot().unwrap().phase, Phase::Draining);
-        assert!(driver_error.is_none());
-    }
-}
-
 /// A single cancellation owner covers both administration and data-plane
 /// admission, including supervisor cancellation before its normal drain path.
 struct Shutdown {
@@ -1869,112 +1695,6 @@ async fn shutdown_signal() -> io::Result<()> {
 }
 
 #[cfg(test)]
-mod recovery_tests {
-    //! Cold startup gates only; no listener, egress backend or remote is started.
-
-    use super::*;
-    use crate::manage::{node::tests::Fixture, store};
-
-    fn restored(fixture: &Fixture, phase: &str, key: [u8; 32]) -> io::Result<()> {
-        let connection =
-            rusqlite::Connection::open(fixture.client_state.join("management.sqlite3"))
-                .map_err(io::Error::other)?;
-        connection.execute(
-        "UPDATE recovery_state SET kind='restored',phase=?1,recovery_id=?2,source_node_id=?3,
-         source_schema_version=13,source_database_sha256=?4,node_key_sha256=?5,
-         imported_users=0,imported_prefixes=0,imported_addresses=0,imported_pools=0 WHERE singleton=1",
-        rusqlite::params![phase, "AAAAAAAAAAAAAAAAAAAAAA", fixture.server_id, "1".repeat(64), &key[..]],
-    ).map_err(io::Error::other)?;
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn startup_author_is_reused_and_retained_by_initialized_state() -> io::Result<()> {
-        let fixture = tokio::task::spawn_blocking(|| Fixture::new(true, true))
-            .await
-            .map_err(io::Error::other)??;
-        let (author, key) = startup(&fixture.client_state)?;
-        assert!(key.is_none());
-        let state = initialize(
-            fixture.client_state.clone(),
-            PublicOrigin::parse("https://localhost:8443")?,
-            author.clone(),
-        )
-        .await?;
-        drop(author);
-        assert!(
-            matches!(store::lock(&fixture.client_state), Err(error) if error.kind()==io::ErrorKind::WouldBlock)
-        );
-        drop(state);
-        drop(store::lock(&fixture.client_state)?);
-        Ok(())
-    }
-
-    #[test]
-    fn pending_and_corrupt_startup_fail_closed_and_release_the_author() -> io::Result<()> {
-        let fixture = Fixture::new(true, true)?;
-        let key = crate::manage::tls::node_key_sha256(&fixture.client_key)?;
-        restored(&fixture, "pending_review", key)?;
-        let before = store::recovery::status(&fixture.client_state)?;
-        assert_eq!(
-            startup(&fixture.client_state).err().unwrap().kind(),
-            io::ErrorKind::PermissionDenied
-        );
-        assert_eq!(store::recovery::status(&fixture.client_state)?, before);
-        drop(store::lock(&fixture.client_state)?);
-        let connection =
-            rusqlite::Connection::open(fixture.client_state.join("management.sqlite3"))
-                .map_err(io::Error::other)?;
-        connection
-        .execute_batch(
-            "PRAGMA ignore_check_constraints=ON; UPDATE recovery_state SET node_key_sha256=x'00'",
-        )
-        .map_err(io::Error::other)?;
-        assert!(startup(&fixture.client_state).is_err());
-        connection
-            .execute("DELETE FROM recovery_state", [])
-            .map_err(io::Error::other)?;
-        assert!(startup(&fixture.client_state).is_err());
-        drop(store::lock(&fixture.client_state)?);
-        Ok(())
-    }
-
-    #[test]
-    fn startup_returns_ready_pin_and_keeps_genuine_legacy_native_state_usable() -> io::Result<()> {
-        let fixture = Fixture::new(true, true)?;
-        let key = crate::manage::tls::node_key_sha256(&fixture.client_key)?;
-        restored(&fixture, "ready", key)?;
-        let (author, actual) = startup(&fixture.client_state)?;
-        assert_eq!(actual, Some(key));
-        drop(author);
-        // Relabelling a current database is not a genuine historical fixture.
-        let connection =
-            rusqlite::Connection::open(fixture.server_state.join("management.sqlite3"))
-                .map_err(io::Error::other)?;
-        let schema_version: u32 = connection
-            .pragma_query_value(None, "user_version", |row| row.get(0))
-            .map_err(io::Error::other)?;
-        connection
-            .pragma_update(None, "user_version", 13)
-            .map_err(io::Error::other)?;
-        assert!(
-            matches!(startup(&fixture.server_state), Err(error) if error.kind() == io::ErrorKind::InvalidData)
-        );
-        drop(store::lock(&fixture.server_state)?);
-        connection
-            .pragma_update(None, "user_version", schema_version)
-            .map_err(io::Error::other)?;
-        // Remove the endpoint namespace and receipt/outbox vocabulary as well as
-        // recovery_state; genuine v13 predates all of them.
-        store::recovery::remove_schema_for_test(&connection)?;
-        let (author, legacy) = startup(&fixture.server_state)?;
-        assert!(legacy.is_none());
-        drop(author);
-        Ok(())
-    }
-}
-
-#[cfg(test)]
 mod tests {
     use super::*;
     use axum::body::Body;
@@ -2037,161 +1757,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn supervisor_signals_and_drains_both_identity_domains() {
-        use std::sync::atomic::{AtomicUsize, Ordering};
-        let shutdown = CancellationToken::new();
-        let completed = Arc::new(AtomicUsize::new(0));
-        let mut listeners = JoinSet::new();
-        for _ in 0..2 {
-            let stop = shutdown.clone();
-            let completed = completed.clone();
-            listeners.spawn(async move {
-                stop.cancelled().await;
-                completed.fetch_add(1, Ordering::SeqCst);
-                Ok(())
-            });
-        }
-        supervise(listeners, shutdown.clone(), async { Ok(()) }, None, None)
-            .await
-            .unwrap();
-        assert!(shutdown.is_cancelled());
-        assert_eq!(completed.load(Ordering::SeqCst), 2);
-    }
-
-    #[tokio::test]
-    async fn failed_listener_stops_its_sibling_and_is_not_reported_as_normal_shutdown() {
-        use std::sync::atomic::{AtomicBool, Ordering};
-        let shutdown = CancellationToken::new();
-        let completed = Arc::new(AtomicBool::new(false));
-        let mut listeners = JoinSet::new();
-        let stop = shutdown.clone();
-        let drained = completed.clone();
-        listeners.spawn(async move {
-            stop.cancelled().await;
-            drained.store(true, Ordering::SeqCst);
-            Ok(())
-        });
-        listeners.spawn(async { Err(io::Error::from(io::ErrorKind::ConnectionAborted)) });
-        let error = supervise(listeners, shutdown, std::future::pending(), None, None)
-            .await
-            .unwrap_err();
-        assert_eq!(error.kind(), io::ErrorKind::ConnectionAborted);
-        assert!(completed.load(Ordering::SeqCst));
-    }
-
-    #[tokio::test]
-    async fn signal_setup_failure_still_requests_listener_shutdown() {
-        let shutdown = CancellationToken::new();
-        let mut listeners = JoinSet::new();
-        let stop = shutdown.clone();
-        listeners.spawn(async move {
-            stop.cancelled().await;
-            Ok(())
-        });
-        let error = supervise(
-            listeners,
-            shutdown.clone(),
-            async { Err(io::Error::from(io::ErrorKind::PermissionDenied)) },
-            None,
-            None,
-        )
-        .await
-        .unwrap_err();
-        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
-        assert!(shutdown.is_cancelled());
-    }
-
-    #[cfg(feature = "web-ui")]
-    #[tokio::test]
-    async fn public_assets_keep_their_policy_without_relaxing_api_guards() {
-        let state = state();
-        let page = call(state.clone(), request(Method::GET, "/", "")).await;
-        assert_eq!(page.status(), StatusCode::OK);
-        assert_eq!(page.headers()[header::CACHE_CONTROL], "no-cache");
-        assert_eq!(page.headers()[header::X_CONTENT_TYPE_OPTIONS], "nosniff");
-        assert_eq!(page.headers()[header::X_FRAME_OPTIONS], "DENY");
-        assert!(
-            page.headers()[header::CONTENT_SECURITY_POLICY]
-                .to_str()
-                .unwrap()
-                .contains("script-src 'self'")
-        );
-
-        let private = call(state.clone(), request(Method::GET, "/api/v1/node", "")).await;
-        assert_eq!(private.status(), StatusCode::FORBIDDEN);
-        assert_eq!(private.headers()[header::CACHE_CONTROL], "no-store");
-        assert_eq!(
-            private.headers()[header::CONTENT_SECURITY_POLICY],
-            "default-src 'none'; frame-ancestors 'none'"
-        );
-        let missing = call(state.clone(), request(Method::GET, "/api/v1/missing", "")).await;
-        assert_eq!(missing.status(), StatusCode::NOT_FOUND);
-        assert_eq!(missing.headers()[header::CONTENT_TYPE], "application/json");
-
-        let mut wrong_host = request(Method::GET, "/", "");
-        wrong_host
-            .headers_mut()
-            .insert(header::HOST, "attacker.test".parse().unwrap());
-        let rejected = call(state, wrong_host).await;
-        assert_eq!(rejected.status(), StatusCode::FORBIDDEN);
-        assert_eq!(rejected.headers()[header::CACHE_CONTROL], "no-store");
-    }
-
-    #[test]
-    fn origin_validation_rejects_browser_normalization_and_ambiguous_origins() {
-        for value in [
-            "http://localhost",
-            "https://localhost/",
-            "https://localhost?x=1",
-            "https://user@localhost",
-            "https://localhost:443",
-            "https://LOCALHOST",
-            "https://localhost:0",
-            "https://localhost:bad",
-            "https://[0:0:0:0:0:0:0:1]",
-            "https://localhost#fragment",
-            "https://127.1",
-            "https://2130706433",
-            "https://0x7f000001",
-            "https://0177.0.0.1",
-            "https://localhost:08443",
-        ] {
-            assert!(PublicOrigin::parse(value).is_err(), "accepted {value}");
-        }
-        assert!(PublicOrigin::parse("https://localhost").is_ok());
-        assert!(PublicOrigin::parse("https://[::1]:8443").is_ok());
-    }
-
-    #[tokio::test]
-    async fn host_origin_and_media_type_checks_precede_password_work() {
-        let state = state();
-        for (header_name, value, status) in [
-            (header::HOST, "attacker.test", StatusCode::FORBIDDEN),
-            (
-                header::ORIGIN,
-                "https://attacker.test",
-                StatusCode::FORBIDDEN,
-            ),
-            (
-                header::CONTENT_TYPE,
-                "text/plain",
-                StatusCode::UNSUPPORTED_MEDIA_TYPE,
-            ),
-        ] {
-            let mut req = request(Method::POST, "/api/v1/auth/login", "{}");
-            req.headers_mut()
-                .insert(header_name, value.parse().unwrap());
-            let response = call(state.clone(), req).await;
-            assert_eq!(response.status(), status);
-            assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
-            assert_eq!(response.headers()[header::X_FRAME_OPTIONS], "DENY");
-        }
-        let mut req = request(Method::POST, "/api/v1/auth/login", "{}");
-        req.headers_mut().remove(header::ORIGIN);
-        assert_eq!(call(state, req).await.status(), StatusCode::FORBIDDEN);
-    }
-
-    #[tokio::test]
     async fn absolute_form_uses_target_authority_without_forwarding_or_trusting_host() {
         let state = state();
         for host in ["other.example:443", "OTHER.example", ""] {
@@ -2230,102 +1795,6 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn absolute_form_still_rejects_missing_duplicate_and_malformed_host() {
-        let state = state();
-        let target = "https://localhost:8443/api/v1/node";
-        for host in [
-            "user@other.example",
-            "a.example,b.example",
-            "other.example:bad",
-            "other.example/path",
-        ] {
-            let mut req = request(Method::GET, target, "");
-            req.headers_mut()
-                .insert(header::HOST, host.parse().unwrap());
-            assert_eq!(
-                call(state.clone(), req).await.status(),
-                StatusCode::BAD_REQUEST
-            );
-        }
-        let mut req = request(Method::GET, target, "");
-        req.headers_mut().remove(header::HOST);
-        assert_eq!(
-            call(state.clone(), req).await.status(),
-            StatusCode::BAD_REQUEST
-        );
-        let mut req = request(Method::GET, target, "");
-        req.headers_mut()
-            .append(header::HOST, "other.example".parse().unwrap());
-        assert_eq!(call(state, req).await.status(), StatusCode::BAD_REQUEST);
-    }
-
-    #[tokio::test]
-    async fn method_not_allowed_retains_the_route_specific_allow_header() {
-        let state = state();
-        for (method, path, expected) in [
-            (Method::GET, "/api/v1/auth/login", vec!["POST"]),
-            (Method::PUT, "/api/v1/node", vec!["GET", "HEAD"]),
-        ] {
-            let response = call(state.clone(), request(method, path, "{}")).await;
-            assert_eq!(response.status(), StatusCode::METHOD_NOT_ALLOWED);
-            let mut allowed: Vec<_> = response.headers()[header::ALLOW]
-                .to_str()
-                .unwrap()
-                .split(',')
-                .map(str::trim)
-                .collect();
-            allowed.sort_unstable();
-            assert_eq!(allowed, expected);
-            let bytes = response.into_body().collect().await.unwrap().to_bytes();
-            assert_eq!(
-                serde_json::from_slice::<serde_json::Value>(&bytes).unwrap()["error"]["code"],
-                "method_not_allowed"
-            );
-        }
-    }
-
-    #[test]
-    fn cookie_parser_rejects_duplicate_and_malformed_session_values() {
-        let mut headers = HeaderMap::new();
-        headers.insert(
-            header::COOKIE,
-            format!("other=ok; {COOKIE_NAME}={}", "x".repeat(43))
-                .parse()
-                .unwrap(),
-        );
-        assert_eq!(session_cookie(&headers).unwrap().unwrap(), "x".repeat(43));
-        headers.append(
-            header::COOKIE,
-            format!("{COOKIE_NAME}={}", "y".repeat(43)).parse().unwrap(),
-        );
-        assert!(session_cookie(&headers).is_err());
-        headers.insert(
-            header::COOKIE,
-            format!("{COOKIE_NAME}=short").parse().unwrap(),
-        );
-        assert!(session_cookie(&headers).is_err());
-    }
-
-    #[test]
-    fn sessions_expire_absolutely_and_rotation_invalidates_old_token() {
-        let now = Instant::now();
-        let mut security = SecurityState::new(now);
-        security
-            .insert_session(None, "old".into(), fixture_session(now))
-            .unwrap();
-        assert!(
-            security
-                .session("old", now + SESSION_LIFETIME - Duration::from_secs(1))
-                .is_ok()
-        );
-        security
-            .insert_session(Some("old"), "new".into(), fixture_session(now))
-            .unwrap();
-        assert!(security.session("old", now).is_err());
-        assert!(security.session("new", now + SESSION_LIFETIME).is_err());
-    }
-
     #[test]
     fn login_rate_limits_apply_per_peer_globally_and_recover_after_expiry() {
         let now = Instant::now();
@@ -2343,80 +1812,49 @@ mod tests {
         assert_eq!(security.address_rates.len(), 1);
     }
 
-    #[test]
-    fn capacity_rejects_new_sessions_without_evicting_a_live_browser() {
-        let now = Instant::now();
-        let mut security = SecurityState::new(now);
-        for index in 0..MAX_SESSIONS {
-            security
-                .insert_session(None, format!("token-{index}"), fixture_session(now))
-                .unwrap();
-        }
-        assert!(
-            security
-                .insert_session(None, "overflow".into(), fixture_session(now))
-                .is_err()
-        );
-        assert!(security.session("token-0", now).is_ok());
-        security
-            .insert_session(Some("token-0"), "replacement".into(), fixture_session(now))
-            .unwrap();
-        assert_eq!(security.sessions.len(), MAX_SESSIONS);
-        assert!(security.session("token-0", now).is_err());
-        assert!(security.session("replacement", now).is_ok());
-    }
-
-    #[test]
-    fn accept_retries_transient_network_and_resource_errors_but_not_invalid_listeners() {
-        for kind in [
-            io::ErrorKind::Interrupted,
-            io::ErrorKind::WouldBlock,
-            io::ErrorKind::ConnectionAborted,
-            io::ErrorKind::OutOfMemory,
-        ] {
-            assert!(retryable_accept_error(&io::Error::from(kind)));
-        }
-        assert!(!retryable_accept_error(&io::Error::from(
-            io::ErrorKind::InvalidInput
-        )));
-        #[cfg(unix)]
-        for code in [libc::EMFILE, libc::ENFILE, libc::ENOMEM] {
-            assert!(retryable_accept_error(&io::Error::from_raw_os_error(code)));
-        }
-        #[cfg(target_os = "linux")]
-        {
-            assert!(retryable_accept_error(&io::Error::from_raw_os_error(
-                libc::ENONET
-            )));
-            assert!(!retryable_accept_error(&io::Error::from_raw_os_error(
-                libc::ENOTSOCK
-            )));
-        }
-        #[cfg(windows)]
-        {
-            assert!(retryable_accept_error(&io::Error::from_raw_os_error(10024)));
-            assert!(!retryable_accept_error(&io::Error::from_raw_os_error(
-                10038
-            )));
-        }
-    }
-
     #[tokio::test]
     async fn protected_routes_logout_and_csrf_use_server_session_state() {
-        let state = state();
-        assert_eq!(
-            call(state.clone(), request(Method::GET, "/api/v1/node", ""))
-                .await
-                .status(),
-            StatusCode::FORBIDDEN
-        );
-        let token = "t".repeat(43);
-        state
-            .security()
-            .unwrap()
-            .insert_session(None, token.clone(), fixture_session(Instant::now()))
-            .unwrap();
-        let cookie = format!("{COOKIE_NAME}={token}");
+        let (_directory, state, cookie) = managed_state();
+        for path in [
+            "/api/v1/node",
+            "/api/v1/tls/acme",
+            "/api/v1/tls/status",
+            "/api/v1/proxy/addresses",
+            "/api/v1/targets",
+            "/api/v1/targets/AAAAAAAAAAAAAAAAAAAAAA/egress-alerts",
+            "/api/v1/targets/AAAAAAAAAAAAAAAAAAAAAA/operations-alerts",
+            "/api/v1/targets/AAAAAAAAAAAAAAAAAAAAAA/commands/history",
+            "/api/v1/targets/AAAAAAAAAAAAAAAAAAAAAA/proxy/runtime",
+            "/api/v1/targets/AAAAAAAAAAAAAAAAAAAAAA/proxy/health",
+        ] {
+            assert_eq!(
+                call(state.clone(), request(Method::GET, path, ""))
+                    .await
+                    .status(),
+                StatusCode::FORBIDDEN,
+                "{path}",
+            );
+        }
+        for path in [
+            "/api/v1/proxy/users",
+            "/api/v1/proxy/user-operations",
+            "/api/v1/proxy/addresses",
+            "/api/v1/targets",
+            "/api/v1/targets/AAAAAAAAAAAAAAAAAAAAAA/commands",
+            "/api/v1/targets/AAAAAAAAAAAAAAAAAAAAAA/routing/commands",
+            "/api/v1/targets/AAAAAAAAAAAAAAAAAAAAAA/command/user-result",
+            "/api/v1/targets/AAAAAAAAAAAAAAAAAAAAAA/proxy/runtime/drain",
+        ] {
+            let mut input = request(Method::POST, path, "{}");
+            input
+                .headers_mut()
+                .insert(header::COOKIE, cookie.parse().unwrap());
+            assert_eq!(
+                call(state.clone(), input).await.status(),
+                StatusCode::FORBIDDEN,
+                "{path}"
+            );
+        }
         let mut req = request(Method::GET, "/api/v1/node", "");
         req.headers_mut()
             .insert(header::COOKIE, cookie.parse().unwrap());
@@ -2457,36 +1895,6 @@ mod tests {
         req.headers_mut()
             .insert(header::COOKIE, cookie.parse().unwrap());
         assert_eq!(call(state, req).await.status(), StatusCode::FORBIDDEN);
-    }
-
-    #[tokio::test]
-    async fn malformed_oversized_json_and_unknown_routes_have_stable_errors() {
-        let state = state();
-        for (body, status) in [
-            ("{", StatusCode::BAD_REQUEST),
-            ("{\"unexpected\":1}", StatusCode::BAD_REQUEST),
-            (
-                &"x".repeat(MAX_JSON_BYTES + 1),
-                StatusCode::PAYLOAD_TOO_LARGE,
-            ),
-        ] {
-            assert_eq!(
-                call(
-                    state.clone(),
-                    request(Method::POST, "/api/v1/auth/login", body)
-                )
-                .await
-                .status(),
-                status
-            );
-        }
-        let response = call(state, request(Method::GET, "/api/v1/missing", "")).await;
-        assert_eq!(response.status(), StatusCode::NOT_FOUND);
-        let bytes = response.into_body().collect().await.unwrap().to_bytes();
-        assert_eq!(
-            serde_json::from_slice::<serde_json::Value>(&bytes).unwrap()["error"]["code"],
-            "not_found"
-        );
     }
 
     /// Own exactly the randomly named fixture directory created by initialize.
@@ -2545,621 +1953,5 @@ mod tests {
             .insert_session(None, token.clone(), session)
             .unwrap();
         (directory, state, format!("{COOKIE_NAME}={token}"))
-    }
-
-    #[tokio::test]
-    async fn real_password_login_rotates_cookie_and_unknown_users_have_same_public_error() {
-        let (_directory, state) = initialized_state();
-        for username in ["admin", "missing"] {
-            let body = format!(r#"{{"username":"{username}","password":"incorrect"}}"#);
-            let response = call(
-                state.clone(),
-                request(Method::POST, "/api/v1/auth/login", &body),
-            )
-            .await;
-            assert_eq!(response.status(), StatusCode::FORBIDDEN);
-            let bytes = response.into_body().collect().await.unwrap().to_bytes();
-            assert_eq!(
-                serde_json::from_slice::<serde_json::Value>(&bytes).unwrap()["error"]["code"],
-                "invalid_credentials"
-            );
-        }
-        let body = r#"{"username":"admin","password":"fixture-password"}"#;
-        let response = call(
-            state.clone(),
-            request(Method::POST, "/api/v1/auth/login", body),
-        )
-        .await;
-        assert_eq!(response.status(), StatusCode::OK);
-        let cookie = response.headers()[header::SET_COOKIE]
-            .to_str()
-            .unwrap()
-            .to_owned();
-        for flag in [
-            "Path=/",
-            "Secure",
-            "HttpOnly",
-            "SameSite=Strict",
-            "Max-Age=28800",
-        ] {
-            assert!(cookie.contains(flag));
-        }
-        let old_cookie = cookie.split(';').next().unwrap();
-        let bytes = response.into_body().collect().await.unwrap().to_bytes();
-        let session: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-        assert_eq!(session["administrator"]["username"], "admin");
-        assert_eq!(session["csrf_token"].as_str().unwrap().len(), 43);
-        assert!(session.get("password").is_none());
-        let mut req = request(Method::POST, "/api/v1/auth/login", body);
-        req.headers_mut()
-            .insert(header::COOKIE, old_cookie.parse().unwrap());
-        let response = call(state.clone(), req).await;
-        assert_eq!(response.status(), StatusCode::OK);
-        let new_cookie = response.headers()[header::SET_COOKIE]
-            .to_str()
-            .unwrap()
-            .split(';')
-            .next()
-            .unwrap()
-            .to_owned();
-        assert_ne!(new_cookie, old_cookie);
-        for (cookie, expected) in [
-            (old_cookie, StatusCode::FORBIDDEN),
-            (new_cookie.as_str(), StatusCode::OK),
-        ] {
-            let mut req = request(Method::GET, "/api/v1/auth/session", "");
-            req.headers_mut()
-                .insert(header::COOKIE, cookie.parse().unwrap());
-            assert_eq!(call(state.clone(), req).await.status(), expected);
-        }
-    }
-
-    #[tokio::test]
-    async fn password_capacity_rejects_without_queueing_and_internal_errors_are_redacted() {
-        let state = state();
-        let permits = state
-            .password_work
-            .clone()
-            .try_acquire_many_owned(2)
-            .unwrap();
-        let body = r#"{"username":"admin","password":"fixture-password"}"#;
-        assert_eq!(
-            call(
-                state.clone(),
-                request(Method::POST, "/api/v1/auth/login", body)
-            )
-            .await
-            .status(),
-            StatusCode::SERVICE_UNAVAILABLE
-        );
-        drop(permits);
-        let response = call(state, request(Method::POST, "/api/v1/auth/login", body)).await;
-        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
-        let bytes = response.into_body().collect().await.unwrap().to_bytes();
-        assert_eq!(
-            serde_json::from_slice::<serde_json::Value>(&bytes).unwrap()["error"]["code"],
-            "internal_error"
-        );
-    }
-}
-
-#[cfg(test)]
-mod transport_tests {
-    //! Loopback integration of the actual TLS identity, HTTP/1 driver and API router.
-    //! Clients trust only the generated root and still verify the requested SAN.
-
-    use std::{fs::OpenOptions, io::Write, path::Path, sync::Arc};
-
-    use super::*;
-    use bytes::Bytes;
-    use http_body_util::{BodyExt as _, Full};
-    use rcgen::generate_simple_self_signed;
-    use rustls::{ClientConfig, RootCertStore, crypto::aws_lc_rs};
-    use rustls_pki_types::ServerName;
-    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
-    use tokio_rustls::TlsConnector;
-
-    /// Owns only a randomly named test directory and its test transport identities.
-    struct Fixture {
-        directory: PathBuf,
-        acceptor: TlsAcceptor,
-        connector: TlsConnector,
-    }
-
-    impl Fixture {
-        fn new() -> io::Result<Self> {
-            let directory = std::env::temp_dir().join(format!(
-                "vproxy-api-transport-{}",
-                random_token().map_err(|_| io::Error::other("fixture randomness failed"))?
-            ));
-            let phc = Argon2::default()
-                .hash_password(b"transport-password")
-                .map_err(|_| io::Error::other("fixture hash failed"))?
-                .to_string();
-            super::super::store::initialize(&directory, "Transport fixture", "admin", &phc)?;
-            // Remove partial certificate fixtures on identity/client setup failure,
-            // before a successful Fixture can take responsibility for the directory.
-            let result = Self::identities(&directory);
-            match result {
-                Ok((acceptor, connector)) => Ok(Self {
-                    directory,
-                    acceptor,
-                    connector,
-                }),
-                Err(error) => {
-                    let _ = std::fs::remove_dir_all(&directory);
-                    Err(error)
-                }
-            }
-        }
-
-        fn identities(directory: &Path) -> io::Result<(TlsAcceptor, TlsConnector)> {
-            let identity =
-                generate_simple_self_signed(vec!["localhost".into()]).map_err(io::Error::other)?;
-            let certificate = directory.join("https-cert.pem");
-            let key = directory.join("https-key.pem");
-            write_private(&certificate, identity.cert.pem().as_bytes())?;
-            write_private(&key, identity.signing_key.serialize_pem().as_bytes())?;
-            let server = super::super::tls::admin_server_config(&certificate, &key)?;
-            let mut roots = RootCertStore::empty();
-            roots
-                .add(identity.cert.der().clone())
-                .map_err(io::Error::other)?;
-            let mut client =
-                ClientConfig::builder_with_provider(Arc::new(aws_lc_rs::default_provider()))
-                    .with_protocol_versions(&[&rustls::version::TLS13])
-                    .map_err(io::Error::other)?
-                    .with_root_certificates(roots)
-                    .with_no_client_auth();
-            client.alpn_protocols = vec![b"http/1.1".to_vec()];
-            Ok((
-                TlsAcceptor::from(server),
-                TlsConnector::from(Arc::new(client)),
-            ))
-        }
-
-        async fn state(&self, port: u16) -> io::Result<Arc<AppState>> {
-            initialize(
-                self.directory.clone(),
-                PublicOrigin::parse(&format!("https://localhost:{port}"))?,
-                Arc::new(super::super::store::lock(&self.directory)?),
-            )
-            .await
-        }
-    }
-
-    impl Drop for Fixture {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.directory);
-        }
-    }
-
-    fn write_private(path: &Path, bytes: &[u8]) -> io::Result<()> {
-        let mut options = OpenOptions::new();
-        options.write(true).create_new(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt as _;
-            options.mode(0o600);
-        }
-        options.open(path)?.write_all(bytes)
-    }
-
-    /// The same connection handler is used by the production accept loop. JoinSet
-    /// owns every driver; timeout/unwind cannot leave detached listeners or clients.
-    fn spawn_server(
-        tasks: &mut JoinSet<io::Result<()>>,
-        listener: TcpListener,
-        fixture: &Fixture,
-        state: Arc<AppState>,
-        shutdown: CancellationToken,
-        connection_count: usize,
-    ) {
-        let acceptor = fixture.acceptor.clone();
-        let app = router(state);
-        tasks.spawn(async move {
-            for _ in 0..connection_count {
-                let (stream, peer) = listener.accept().await?;
-                serve_connection(
-                    stream,
-                    acceptor.clone(),
-                    app.clone(),
-                    PeerIp(peer.ip()),
-                    shutdown.clone(),
-                )
-                .await;
-            }
-            Ok(())
-        });
-    }
-
-    fn request(method: Method, path: &str, port: u16, body: &str) -> http::Request<Full<Bytes>> {
-        http::Request::builder()
-            .method(method)
-            .uri(path)
-            .header(header::HOST, format!("localhost:{port}"))
-            .header(header::ORIGIN, format!("https://localhost:{port}"))
-            .header(header::CONTENT_TYPE, "application/json")
-            .body(Full::new(Bytes::copy_from_slice(body.as_bytes())))
-            .unwrap()
-    }
-
-    #[tokio::test]
-    async fn native_full_supervisor_serves_real_https_and_releases_author_after_stop()
-    -> io::Result<()> {
-        let fixture = tokio::task::spawn_blocking(Fixture::new)
-            .await
-            .map_err(io::Error::other)??;
-        let reservation = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).await?;
-        let address = reservation.local_addr()?;
-        let directory = fixture.directory.clone();
-        let author = Arc::new(super::super::store::lock(&directory)?);
-        let (_, metadata, proxy_identity) = super::super::tls::admin_proxy_identity(
-            &directory.join("https-cert.pem"),
-            &directory.join("https-key.pem"),
-        )?;
-        let tls = fixture.acceptor.clone();
-        let profile_config = crate::ebpf::Args::default().load()?;
-        let (stop, stopping) = tokio::sync::oneshot::channel();
-        drop(reservation);
-        let driver = tokio::task::spawn_blocking(move || {
-            run_prepared(
-                async move {
-                    let state = initialize(
-                        directory,
-                        PublicOrigin::parse(&format!("https://localhost:{}", address.port()))?,
-                        author,
-                    )
-                    .await?;
-                    Ok(Prepared {
-                        state,
-                        bind: address,
-                        tls: Acceptor::Manual(tls),
-                        acme: None,
-                        certificate_source: super::super::certificates::ManagementSource::Manual(
-                            metadata,
-                        ),
-                        service_tls: Some(super::super::proxy::settings::Tls::Manual(
-                            proxy_identity,
-                        )),
-                        node: None,
-                        prepared_proxy: None,
-                        profile_config,
-                        health_config: super::super::health::Config::default(),
-                        health_explicit: false,
-                        observe_target_alerts: false,
-                        #[cfg(feature = "witness-journal")]
-                        source: None,
-                    })
-                },
-                async move { stopping.await.map_err(io::Error::other) },
-            )
-        });
-        let mut tasks = JoinSet::new();
-        let exercised = timeout(Duration::from_secs(20), async {
-            let stream = loop {
-                match TcpStream::connect(address).await {
-                    Ok(stream) => break stream,
-                    Err(e) if e.kind() == io::ErrorKind::ConnectionRefused => {
-                        tokio::time::sleep(Duration::from_millis(10)).await
-                    }
-                    Err(e) => return Err(e),
-                }
-            };
-            let stream = fixture
-                .connector
-                .connect(
-                    ServerName::try_from("localhost").map_err(io::Error::other)?,
-                    stream,
-                )
-                .await?;
-            let (mut client, connection) =
-                hyper::client::conn::http1::handshake(TokioIo::new(stream))
-                    .await
-                    .map_err(io::Error::other)?;
-            tasks.spawn(async move { connection.await.map_err(io::Error::other) });
-            let response = client
-                .send_request(request(
-                    Method::POST,
-                    "/api/v1/auth/login",
-                    address.port(),
-                    r#"{"username":"admin","password":"transport-password"}"#,
-                ))
-                .await
-                .map_err(io::Error::other)?;
-            if response.status() != StatusCode::OK {
-                return Err(io::Error::other("native supervisor login failed"));
-            }
-            let cookie = Zeroizing::new(
-                response
-                    .headers()
-                    .get(header::SET_COOKIE)
-                    .ok_or_else(|| io::Error::other("cookie"))?
-                    .to_str()
-                    .map_err(io::Error::other)?
-                    .split(';')
-                    .next()
-                    .ok_or_else(|| io::Error::other("cookie pair"))?
-                    .to_owned(),
-            );
-            response
-                .into_body()
-                .collect()
-                .await
-                .map_err(io::Error::other)?;
-            let mut query = request(Method::GET, "/api/v1/tls/status", address.port(), "");
-            query.headers_mut().insert(
-                header::COOKIE,
-                HeaderValue::from_str(cookie.as_str()).map_err(io::Error::other)?,
-            );
-            let response = client.send_request(query).await.map_err(io::Error::other)?;
-            if response.status() != StatusCode::OK {
-                return Err(io::Error::other(
-                    "native supervisor certificate inventory failed",
-                ));
-            }
-            response
-                .into_body()
-                .collect()
-                .await
-                .map_err(io::Error::other)?;
-            Ok::<_, io::Error>(())
-        })
-        .await
-        .map_err(io::Error::other)
-        .and_then(|r| r);
-        let _ = stop.send(());
-        tasks.abort_all();
-        while tasks.join_next().await.is_some() {}
-        let stopped = timeout(Duration::from_secs(20), driver)
-            .await
-            .map_err(io::Error::other)?
-            .map_err(io::Error::other)?;
-        exercised?;
-        stopped?;
-        super::super::store::lock(&fixture.directory)?;
-        super::super::store::update_lock(&fixture.directory)?;
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn trusted_https_http1_login_node_and_csrf_logout_round_trip() {
-        let mut tasks = JoinSet::new();
-        let shutdown = CancellationToken::new();
-        // Test data construction is not the application/network scenario. A timed
-        // out blocking worker is not interrupted and keeps its owned resources.
-        let preparation_started = Instant::now();
-        let worker_started = Arc::new(std::sync::OnceLock::new());
-        let entered = worker_started.clone();
-        let prepared = timeout(
-            Duration::from_secs(30),
-            tokio::task::spawn_blocking(move || {
-                let _ = entered.set(Instant::now());
-                Fixture::new()
-            }),
-        )
-        .await;
-        let preparation_elapsed = preparation_started.elapsed();
-        let queue_elapsed = worker_started
-            .get()
-            .map(|started| started.duration_since(preparation_started));
-        assert!(
-            prepared.is_ok(),
-            "HTTPS fixture preparation deadline, total {:?}, queue {:?}, worker-entry elapsed {:?}; blocking work is not interrupted",
-            preparation_elapsed,
-            queue_elapsed,
-            worker_started.get().map(Instant::elapsed)
-        );
-        let fixture = prepared.unwrap().unwrap().unwrap();
-        let mut phase = ("listener and application initialization", Instant::now());
-        let result = timeout(Duration::from_secs(10), async {
-            let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
-                .await
-                .unwrap();
-            let address = listener.local_addr().unwrap();
-            let state = fixture.state(address.port()).await.unwrap();
-            spawn_server(&mut tasks, listener, &fixture, state, shutdown.clone(), 1);
-            phase = ("TLS handshake", Instant::now());
-            let stream = TcpStream::connect(address).await.unwrap();
-            let stream = fixture
-                .connector
-                .connect(ServerName::try_from("localhost").unwrap(), stream)
-                .await
-                .unwrap();
-            assert_eq!(stream.get_ref().1.alpn_protocol(), Some(&b"http/1.1"[..]));
-            let (mut client, connection) =
-                hyper::client::conn::http1::handshake(TokioIo::new(stream))
-                    .await
-                    .unwrap();
-            tasks.spawn(async move { connection.await.map_err(io::Error::other) });
-            #[cfg(feature = "web-ui")]
-            {
-                phase = ("embedded Web requests", Instant::now());
-                let mut req = request(Method::GET, "/", address.port(), "");
-                req.headers_mut()
-                    .insert(header::ACCEPT_ENCODING, "gzip".parse().unwrap());
-                let response = client.send_request(req).await.unwrap();
-                assert_eq!(response.status(), StatusCode::OK);
-                assert_eq!(response.headers()[header::CONTENT_ENCODING], "gzip");
-                assert_eq!(response.headers()[header::VARY], "Accept-Encoding");
-                assert!(!response.headers().contains_key(header::SET_COOKIE));
-                let length: usize = response.headers()[header::CONTENT_LENGTH]
-                    .to_str()
-                    .unwrap()
-                    .parse()
-                    .unwrap();
-                let bytes = response.into_body().collect().await.unwrap().to_bytes();
-                assert_eq!(bytes.len(), length);
-                assert!(bytes.starts_with(&[0x1f, 0x8b]));
-                let response = client
-                    .send_request(request(Method::HEAD, "/", address.port(), ""))
-                    .await
-                    .unwrap();
-                assert_eq!(response.status(), StatusCode::OK);
-                assert!(response.headers().contains_key(header::CONTENT_LENGTH));
-                assert!(
-                    response
-                        .into_body()
-                        .collect()
-                        .await
-                        .unwrap()
-                        .to_bytes()
-                        .is_empty()
-                );
-            }
-            phase = ("password login", Instant::now());
-            let response = client
-                .send_request(request(
-                    Method::POST,
-                    "/api/v1/auth/login",
-                    address.port(),
-                    r#"{"username":"admin","password":"transport-password"}"#,
-                ))
-                .await
-                .unwrap();
-            assert_eq!(response.status(), StatusCode::OK);
-            assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
-            let cookie = response.headers()[header::SET_COOKIE]
-                .to_str()
-                .unwrap()
-                .split(';')
-                .next()
-                .unwrap()
-                .to_owned();
-            let bytes = response.into_body().collect().await.unwrap().to_bytes();
-            let session: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-            let csrf = session["csrf_token"].as_str().unwrap();
-            phase = ("authenticated identity read", Instant::now());
-            let mut req = request(Method::GET, "/api/v1/node", address.port(), "");
-            req.headers_mut()
-                .insert(header::COOKIE, cookie.parse().unwrap());
-            let response = client.send_request(req).await.unwrap();
-            assert_eq!(response.status(), StatusCode::OK);
-            let bytes = response.into_body().collect().await.unwrap().to_bytes();
-            let node: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-            assert_eq!(node["name"], "Transport fixture");
-            assert!(node["node_id"].as_str().is_some_and(|id| !id.is_empty()));
-            assert!(node.get("traffic").is_none());
-            phase = ("logout and revoked-session rejection", Instant::now());
-            let mut req = request(Method::POST, "/api/v1/auth/logout", address.port(), "{}");
-            req.headers_mut()
-                .insert(header::COOKIE, cookie.parse().unwrap());
-            req.headers_mut()
-                .insert("x-csrf-token", csrf.parse().unwrap());
-            let response = client.send_request(req).await.unwrap();
-            assert_eq!(response.status(), StatusCode::NO_CONTENT);
-            assert!(
-                response.headers()[header::SET_COOKIE]
-                    .to_str()
-                    .unwrap()
-                    .contains("Max-Age=0")
-            );
-            response.into_body().collect().await.unwrap();
-            let mut req = request(Method::GET, "/api/v1/node", address.port(), "");
-            req.headers_mut()
-                .insert(header::COOKIE, cookie.parse().unwrap());
-            let response = client.send_request(req).await.unwrap();
-            assert_eq!(response.status(), StatusCode::FORBIDDEN);
-            response.into_body().collect().await.unwrap();
-            drop(client);
-            phase = ("driver drain", Instant::now());
-            shutdown.cancel();
-            while let Some(result) = tasks.join_next().await {
-                result.unwrap().unwrap();
-            }
-        })
-        .await;
-        shutdown.cancel();
-        tasks.shutdown().await;
-        assert!(
-            result.is_ok(),
-            "HTTPS deadline at {}, phase elapsed {:?}; fixture preparation {:?}, queue {:?}",
-            phase.0,
-            phase.1.elapsed(),
-            preparation_elapsed,
-            queue_elapsed
-        );
-    }
-
-    #[tokio::test]
-    async fn wrong_certificate_san_and_plaintext_never_reach_login_router() {
-        let mut tasks = JoinSet::new();
-        let shutdown = CancellationToken::new();
-        let preparation_started = Instant::now();
-        let worker_started = Arc::new(std::sync::OnceLock::new());
-        let entered = worker_started.clone();
-        let prepared = timeout(
-            Duration::from_secs(30),
-            tokio::task::spawn_blocking(move || {
-                let _ = entered.set(Instant::now());
-                Fixture::new()
-            }),
-        )
-        .await;
-        let preparation_elapsed = preparation_started.elapsed();
-        let queue_elapsed = worker_started
-            .get()
-            .map(|started| started.duration_since(preparation_started));
-        assert!(
-            prepared.is_ok(),
-            "TLS rejection fixture preparation deadline, total {:?}, queue {:?}, worker-entry elapsed {:?}; blocking work is not interrupted",
-            preparation_elapsed,
-            queue_elapsed,
-            worker_started.get().map(Instant::elapsed)
-        );
-        let fixture = prepared.unwrap().unwrap().unwrap();
-        let mut phase = ("listener and application initialization", Instant::now());
-        let result = timeout(Duration::from_secs(10), async {
-        let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
-            .await
-            .unwrap();
-        let address = listener.local_addr().unwrap();
-        let state = fixture.state(address.port()).await.unwrap();
-        spawn_server(
-            &mut tasks,
-            listener,
-            &fixture,
-            state.clone(),
-            shutdown.clone(),
-            2,
-        );
-        phase = ("wrong-SAN TLS rejection", Instant::now());
-        let stream = TcpStream::connect(address).await.unwrap();
-        assert!(fixture.connector
-            .connect(ServerName::try_from("wrong.example").unwrap(), stream)
-            .await
-            .is_err());
-        phase = ("plaintext rejection", Instant::now());
-        let mut stream = TcpStream::connect(address).await.unwrap();
-        stream.write_all(format!(
-            "POST /api/v1/auth/login HTTP/1.1\r\nHost: localhost:{}\r\nOrigin: https://localhost:{}\r\nContent-Type: application/json\r\nContent-Length: 2\r\n\r\n{{}}",
-            address.port(), address.port()
-        ).as_bytes()).await.unwrap();
-        let mut received = Vec::new();
-        if let Err(error) = stream.read_to_end(&mut received).await {
-            assert!(matches!(error.kind(), io::ErrorKind::ConnectionReset | io::ErrorKind::ConnectionAborted));
-        }
-        assert!(!received.starts_with(b"HTTP/"));
-        drop(stream);
-        phase = ("driver drain", Instant::now());
-        shutdown.cancel();
-        while let Some(result) = tasks.join_next().await {
-            result.unwrap().unwrap();
-        }
-        let security = state.security().unwrap();
-        assert!(security.address_rates.is_empty());
-        assert!(security.sessions.is_empty());
-    })
-    .await;
-        shutdown.cancel();
-        tasks.shutdown().await;
-        assert!(
-            result.is_ok(),
-            "TLS rejection deadline at {}, phase elapsed {:?}; fixture preparation {:?}, queue {:?}",
-            phase.0,
-            phase.1.elapsed(),
-            preparation_elapsed,
-            queue_elapsed
-        );
     }
 }

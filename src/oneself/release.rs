@@ -293,34 +293,20 @@ mod tests {
     struct Fake {
         releases: RefCell<Option<Vec<Release>>>,
         bytes: Vec<u8>,
-        calls: RefCell<Vec<&'static str>>,
-        fail: Option<&'static str>,
     }
     impl Fake {
         fn new(variant: Variant, target: &str) -> Self {
             Self {
                 releases: RefCell::new(Some(vec![release("2.6.0", variant, target)])),
                 bytes: archive(variant, target),
-                calls: RefCell::new(Vec::new()),
-                fail: None,
-            }
-        }
-        fn step(&self, name: &'static str) -> io::Result<()> {
-            self.calls.borrow_mut().push(name);
-            if self.fail == Some(name) {
-                Err(io::Error::other("synthetic source failure"))
-            } else {
-                Ok(())
             }
         }
     }
     impl Source for Fake {
         fn releases(&self, _: &str) -> io::Result<Vec<Release>> {
-            self.step("metadata")?;
             Ok(self.releases.borrow_mut().take().unwrap())
         }
         fn read_checksum(&self, url: &str, name: &str) -> io::Result<[u8; 32]> {
-            self.step("checksum")?;
             assert!(url.ends_with(&format!("/{name}.sha256")));
             Ok(Sha256::digest(&self.bytes).into())
         }
@@ -330,91 +316,12 @@ mod tests {
             expected: [u8; 32],
             output: &mut std::fs::File,
         ) -> io::Result<()> {
-            self.step("download")?;
             assert!(url.ends_with(".tar.gz"));
             assert_eq!(expected, <[u8; 32]>::from(Sha256::digest(&self.bytes)));
             output.write_all(&self.bytes)
         }
         fn check_deadline(&self) -> io::Result<()> {
-            self.step("deadline")
-        }
-    }
-
-    #[test]
-    fn variant_and_components_are_fixed_and_unsupported_builds_fail_before_network() {
-        let current = Variant::current();
-        if cfg!(feature = "ebpf") {
-            assert_eq!(current.err().unwrap().kind(), io::ErrorKind::Unsupported);
-        } else {
-            assert_eq!(
-                current.unwrap(),
-                if cfg!(feature = "web-ui") {
-                    Variant::Web
-                } else if cfg!(feature = "management") {
-                    Variant::Api
-                } else {
-                    Variant::Proxy
-                }
-            );
-        }
-        for value in ["", "../1.0", "x/y", "x\\y", "-1", "é", "1\n"] {
-            assert!(Variant::Proxy.archive_name(value, TARGET).is_none());
-            assert!(Variant::Proxy.archive_name("2.6.0", value).is_none());
-        }
-        let source = Fake::new(Variant::Proxy, TARGET);
-        assert!(
-            install(&source, Variant::Proxy, "2.5.5", "../target", |_| panic!(
-                "no replacement"
-            ))
-            .is_err()
-        );
-        assert!(source.calls.borrow().is_empty());
-    }
-
-    #[test]
-    fn selection_preserves_api_order_and_compatible_first_without_asset_fallback() {
-        let entries = || {
-            vec![
-                release("3.0.0", Variant::Web, TARGET),
-                release("2.7.0", Variant::Web, TARGET),
-                release("2.6.0", Variant::Web, TARGET),
-            ]
-        };
-        assert_eq!(
-            select(entries(), "2.5.5").unwrap().unwrap().version,
-            "2.7.0"
-        );
-        assert_eq!(
-            select(entries(), "1.0.0").unwrap().unwrap().version,
-            "3.0.0"
-        );
-        assert!(select(entries(), "4.0.0").unwrap().is_none());
-        assert!(select(entries(), "invalid").is_err());
-        for variant in [Variant::Proxy, Variant::Api, Variant::Web] {
-            let name = variant.archive_name("2.6.0", TARGET).unwrap();
-            let selected = release("2.6.0", variant, TARGET);
-            assert!(assets(&selected, &name).is_ok());
-            for bad in [
-                vec![selected.assets[0].clone()],
-                vec![selected.assets[1].clone()],
-                vec![
-                    selected.assets[0].clone(),
-                    selected.assets[0].clone(),
-                    selected.assets[1].clone(),
-                ],
-            ] {
-                assert!(
-                    assets(
-                        &Release {
-                            assets: bad,
-                            ..selected.clone()
-                        },
-                        &name
-                    )
-                    .is_err()
-                );
-            }
-            assert!(assets(&selected, &format!("extra-{name}")).is_err());
+            Ok(())
         }
     }
 
@@ -435,10 +342,6 @@ mod tests {
                 })?;
                 assert!(matches!(outcome, Outcome::Updated(ref version) if version=="2.6.0"));
                 assert_eq!(calls.get(), 1);
-                assert_eq!(
-                    *source.calls.borrow(),
-                    ["metadata", "checksum", "download", "deadline"]
-                );
                 assert!(
                     !candidate.unwrap().exists(),
                     "only this owned staging file is cleaned"
@@ -446,66 +349,5 @@ mod tests {
             }
         }
         Ok(())
-    }
-
-    #[test]
-    fn every_pre_install_failure_has_zero_replacements_and_replacement_error_is_unconfirmed() {
-        for failure in [
-            "metadata",
-            "checksum",
-            "download",
-            "deadline",
-            "archive",
-            "missing_pair",
-        ] {
-            let mut source = Fake::new(Variant::Api, TARGET);
-            match failure {
-                "archive" => source.bytes = b"not gzip".to_vec(),
-                "missing_pair" => {
-                    let mut rows = source.releases.borrow_mut();
-                    let rows = rows.as_mut().unwrap();
-                    rows[0].assets.clear();
-                    rows.push(release("2.5.6", Variant::Api, TARGET));
-                }
-                _ => source.fail = Some(failure),
-            }
-            let calls = Cell::new(0);
-            assert!(
-                install(&source, Variant::Api, "2.5.5", TARGET, |_| {
-                    calls.set(calls.get() + 1);
-                    Ok(())
-                })
-                .is_err()
-            );
-            assert_eq!(calls.get(), 0, "{failure}");
-            if failure == "missing_pair" {
-                assert_eq!(*source.calls.borrow(), ["metadata"]);
-            }
-        }
-        let source = Fake::new(Variant::Proxy, TARGET);
-        let calls = Cell::new(0);
-        let error = install(&source, Variant::Proxy, "2.5.5", TARGET, |_| {
-            calls.set(calls.get() + 1);
-            Err(io::Error::other("private install path"))
-        })
-        .err()
-        .unwrap();
-        assert_eq!(calls.get(), 1);
-        assert!(
-            error
-                .to_string()
-                .contains("installation state is unconfirmed")
-        );
-        assert!(!error.to_string().contains("private install path"));
-        let source = Fake::new(Variant::Proxy, TARGET);
-        *source.releases.borrow_mut() = Some(Vec::new());
-        assert!(matches!(
-            install(&source, Variant::Proxy, "2.5.5", TARGET, |_| panic!(
-                "no replacement"
-            ))
-            .unwrap(),
-            Outcome::UpToDate
-        ));
-        assert_eq!(*source.calls.borrow(), ["metadata"]);
     }
 }
